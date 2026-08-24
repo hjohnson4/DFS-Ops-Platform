@@ -4,7 +4,7 @@
   "outputDirectory": "dist/public",
   "framework": null,
   "functions": {
-    "api/index.ts": {
+    "api/index.mjs": {
       "runtime": "@vercel/node@5.10.2",
       "maxDuration": 60,
       "memory": 1024
