@@ -189,6 +189,49 @@ export default function UsersPage() {
     onSettled: () => setResettingId(null),
   });
 
+  // Robust copy: try the async Clipboard API, then fall back to a hidden
+  // textarea + execCommand("copy"), which works when navigator.clipboard is
+  // unavailable or blocked (older browsers, some embedded/secure contexts).
+  async function copyText(text: string): Promise<boolean> {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // fall through to legacy path
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async function copyResetPassword() {
+    if (!resetResult) return;
+    const ok = await copyText(resetResult.password);
+    toast(
+      ok
+        ? { title: "Password copied", description: "Paste it wherever you need it." }
+        : {
+            title: "Couldn't copy automatically",
+            description: "Tap the password field to select it, then copy manually.",
+            variant: "destructive",
+          },
+    );
+  }
+
   async function copyResetCredentials() {
     if (!resetResult) return;
     const appUrl = window.location.origin + window.location.pathname + "#/";
@@ -198,16 +241,16 @@ export default function UsersPage() {
       `Email: ${resetResult.email}\n` +
       `Temporary password: ${resetResult.password}\n` +
       `You'll be asked to set your own password on first login.`;
-    try {
-      await navigator.clipboard.writeText(text.trim());
-      toast({ title: "Copied", description: "Login details copied to clipboard." });
-    } catch {
-      toast({
-        title: "Couldn't copy automatically",
-        description: "Select and copy the password shown instead.",
-        variant: "destructive",
-      });
-    }
+    const ok = await copyText(text.trim());
+    toast(
+      ok
+        ? { title: "Copied", description: "Login details copied to clipboard." }
+        : {
+            title: "Couldn't copy automatically",
+            description: "Tap the password field to select it, then copy manually.",
+            variant: "destructive",
+          },
+    );
   }
 
   const updateUser = useMutation({
@@ -540,11 +583,28 @@ export default function UsersPage() {
               <span className="font-medium text-foreground">{resetResult?.email}</span>. They'll be
               asked to set their own password the next time they sign in.
             </p>
-            <div className="rounded-md border bg-muted/40 p-3 font-mono text-base tracking-wide select-all">
-              {resetResult?.password}
+            <div className="flex items-center gap-2">
+              <Input
+                readOnly
+                value={resetResult?.password ?? ""}
+                onFocus={(e) => e.currentTarget.select()}
+                className="font-mono text-base tracking-wide"
+                data-testid="input-reset-password"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={copyResetPassword}
+                data-testid="button-reset-copy-password"
+              >
+                <Copy className="mr-1.5 h-3.5 w-3.5" />
+                Copy
+              </Button>
             </div>
             <p className="text-xs text-muted-foreground">
               This password is shown once. Copy it now — it can't be retrieved later.
+              You can also tap the field to select it.
             </p>
           </div>
           <DialogFooter>
