@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
 import logoUrl from "@/assets/dfs-logo.png";
 
 function Logo() {
@@ -31,6 +32,14 @@ export default function Login() {
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
+  // Forgot-password panel state.
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotBusy, setForgotBusy] = useState(false);
+  // null = not submitted; "email" = a link was/would be sent; "admin" = email
+  // isn't configured, tell them to contact an admin for a reset.
+  const [forgotResult, setForgotResult] = useState<null | "email" | "admin">(null);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr("");
@@ -41,6 +50,25 @@ export default function Login() {
       setErr(e.message || "Login failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function submitForgot(e: React.FormEvent) {
+    e.preventDefault();
+    setForgotBusy(true);
+    setForgotResult(null);
+    try {
+      const res = await apiRequest("POST", "/api/auth/forgot-password", {
+        email: forgotEmail.trim(),
+      });
+      const data = await res.json();
+      setForgotResult(data.emailEnabled ? "email" : "admin");
+    } catch {
+      // Never reveal errors that could confirm/deny an account; default to the
+      // generic "contact your admin" guidance, which always applies.
+      setForgotResult("admin");
+    } finally {
+      setForgotBusy(false);
     }
   }
 
@@ -95,6 +123,74 @@ export default function Login() {
               Sign in
             </Button>
           </form>
+
+          <div className="mt-4 border-t border-card-border pt-4">
+            {!showForgot ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setShowForgot(true);
+                  setForgotEmail(email);
+                  setForgotResult(null);
+                }}
+                className="text-sm text-primary hover:underline"
+                data-testid="button-forgot-open"
+              >
+                Forgot password?
+              </button>
+            ) : (
+              <form onSubmit={submitForgot} className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="forgot-email">Reset your password</Label>
+                  <Input
+                    id="forgot-email"
+                    type="email"
+                    autoComplete="username"
+                    placeholder="you@company.com"
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                    required
+                    data-testid="input-forgot-email"
+                  />
+                </div>
+                {forgotResult === "email" && (
+                  <p className="text-sm text-muted-foreground" data-testid="text-forgot-result">
+                    If that email matches an account, we've sent a link to reset your password. Check
+                    your inbox (and spam folder).
+                  </p>
+                )}
+                {forgotResult === "admin" && (
+                  <p className="text-sm text-muted-foreground" data-testid="text-forgot-result">
+                    Email-based resets aren't enabled yet. Ask your administrator to reset your
+                    password — they can generate a new temporary one for you from the Users page.
+                  </p>
+                )}
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="submit"
+                    size="sm"
+                    disabled={forgotBusy}
+                    data-testid="button-forgot-submit"
+                  >
+                    {forgotBusy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    Send reset link
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setShowForgot(false);
+                      setForgotResult(null);
+                    }}
+                    data-testid="button-forgot-cancel"
+                  >
+                    Back to sign in
+                  </Button>
+                </div>
+              </form>
+            )}
+          </div>
         </div>
         <p className="text-center text-xs text-muted-foreground mt-5">
           Drilling Fluid Solutions · West Texas · South Texas · North Louisiana

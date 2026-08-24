@@ -3,7 +3,7 @@ import type { Server } from "node:http";
 import crypto from "node:crypto";
 import { supabaseAnon, supabaseAdmin, hasAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf, jobScopeOf } from "./auth";
-import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, sendInviteEmail } from "./email";
+import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, sendInviteEmail, sendPasswordResetEmail } from "./email";
 import { parseDailyReportWorkbook, ExcelParseError } from "./excelDailyReport";
 import * as XLSX from "xlsx";
 import { AREAS } from "@shared/schema";
@@ -119,6 +119,26 @@ export async function registerRoutes(
   // the user id, email, and an expiry; the set-password page posts it back to
   // verify identity and set the password. Tokens are single-window (expiry) and
   // tamper-evident (any change invalidates the signature).
+  // Generate a strong, readable temporary password: 12 chars, guaranteed to
+  // contain upper/lower letters and digits, avoiding easily-confused glyphs
+  // (no O/0, I/1/l). Satisfies the strongPassword rule (>=10, letter+digit).
+  function genTempPassword(): string {
+    const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const lower = "abcdefghijkmnpqrstuvwxyz";
+    const digits = "23456789";
+    const all = upper + lower + digits;
+    const pick = (set: string) =>
+      set[crypto.randomInt(0, set.length)];
+    const chars = [pick(upper), pick(lower), pick(digits), pick(digits)];
+    while (chars.length < 12) chars.push(pick(all));
+    // Fisher-Yates shuffle with a CSPRNG.
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    return chars.join("");
+  }
+
   function signInvite(payload: { uid: string; email: string; exp: number }): string {
     const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -206,6 +226,46 @@ export async function registerRoutes(
       refresh_token: signIn.session.refresh_token,
       profile,
     });
+  });
+
+  // Self-serve "forgot password": a logged-out user requests a reset link by
+  // email. If (and only if) an email provider is configured AND the email
+  // matches an active account, we email a signed set-password link (reusing the
+  // invite/complete flow). Always responds the same way so it never reveals
+  // whether an email is registered. When email is dormant, `emailEnabled:false`
+  // lets the UI tell the user to contact their admin instead.
+  app.post("/api/auth/forgot-password", async (req: Request, res: Response) => {
+    const email = String((req.body || {}).email || "").trim().toLowerCase();
+    const emailEnabled = emailConfigured();
+    // Uniform response regardless of outcome (no account enumeration).
+    const ok = () => res.json({ ok: true, emailEnabled });
+
+    if (!email || !emailEnabled || !supabaseAdmin) return ok();
+
+    try {
+      const { data: profile } = await supabaseAdmin
+        .from("profiles")
+        .select("id,email,name,active")
+        .eq("email", email)
+        .single();
+      if (!profile || !profile.active) return ok();
+
+      const appUrl =
+        (process.env.APP_URL || "").trim() ||
+        `${req.protocol}://${req.get("host")}` ||
+        "https://dfs-ops-platform.vercel.app";
+      // Reset links are short-lived (1 hour).
+      const token = signInvite({
+        uid: profile.id,
+        email: profile.email,
+        exp: Date.now() + 60 * 60 * 1000,
+      });
+      const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+      await sendPasswordResetEmail({ to: profile.email, name: profile.name, link });
+    } catch (e) {
+      console.error("[forgot-password] error", e);
+    }
+    return ok();
   });
 
   // Current user
@@ -848,6 +908,40 @@ export async function registerRoutes(
         });
       }
       res.json({ sent: true, email: profile.email });
+    },
+  );
+
+  // Admin resets a user's password to a fresh temporary one (no email needed).
+  // Returns the temporary password so the admin can share it; the user is
+  // flagged to set their own password on next login.
+  app.post(
+    "/api/users/:id/reset-password",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      if (!hasAdmin() || !supabaseAdmin) {
+        return res.status(503).json({
+          message:
+            "Account management is not enabled yet. The service role key must be configured in the deployment environment.",
+        });
+      }
+      const { data: profile, error: pErr } = await supabaseAdmin
+        .from("profiles")
+        .select("id,email,name")
+        .eq("id", req.params.id)
+        .single();
+      if (pErr || !profile)
+        return res.status(404).json({ message: "User not found" });
+
+      // Generate a strong, readable 12-char temporary password (letters+digits,
+      // no easily-confused characters).
+      const temp = genTempPassword();
+      const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(profile.id, {
+        password: temp,
+        user_metadata: { name: profile.name, must_change_password: true },
+      });
+      if (uErr) return res.status(400).json({ message: uErr.message });
+      res.json({ reset: true, email: profile.email, temporaryPassword: temp });
     },
   );
 

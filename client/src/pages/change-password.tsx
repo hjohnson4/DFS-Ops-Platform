@@ -15,6 +15,12 @@ const PW_OK = /^(?=.*[A-Za-z])(?=.*[0-9]).{10,}$/;
  * and on the forced first-login screen. `onDone` runs after a successful
  * change (e.g. refresh auth state / navigate away).
  */
+export default function ChangePassword() {
+  // Default export exists so this module matches the same import shape as the
+  // other page modules (Vite/Vercel resolve default page exports cleanly).
+  return <ChangePasswordForm />;
+}
+
 export function ChangePasswordForm({ onDone }: { onDone?: () => void }) {
   const { toast } = useToast();
   const [current, setCurrent] = useState("");

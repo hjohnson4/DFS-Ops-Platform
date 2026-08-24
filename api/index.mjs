@@ -155,6 +155,31 @@ async function sendInviteEmail(ctx) {
     </div>`;
   return deliver(ctx.to, "You're invited to DFS Ops \u2014 set your password", html);
 }
+async function sendPasswordResetEmail(ctx) {
+  const who = ctx.name ? ctx.name : "there";
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;">
+      <h2 style="color:#28251D;margin:0 0 16px;">Reset your DFS Ops password</h2>
+      <p style="color:#28251D;font-size:15px;line-height:1.5;">Hi ${who},</p>
+      <p style="color:#28251D;font-size:15px;line-height:1.5;">
+        We received a request to reset the password on your Drilling Fluid
+        Solutions operations account. Click the button below to choose a new
+        password. This link expires in 1 hour.
+      </p>
+      <p style="margin:24px 0;">
+        <a href="${ctx.link}"
+           style="background:#01696F;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;font-weight:600;display:inline-block;">
+          Reset password
+        </a>
+      </p>
+      <p style="color:#7A7974;font-size:13px;line-height:1.5;">
+        If the button doesn't work, copy and paste this link into your browser:<br>
+        <a href="${ctx.link}" style="color:#01696F;word-break:break-all;">${ctx.link}</a>
+      </p>
+      <p style="color:#BAB9B4;font-size:12px;margin-top:24px;">If you didn't request this, you can safely ignore this email \u2014 your password won't change.</p>
+    </div>`;
+  return deliver(ctx.to, "Reset your DFS Ops password", html);
+}
 async function sendDailyReportChanges(ctx) {
   const who = ctx.senderName ? `${ctx.senderName}` : "there";
   const re = ctx.subject ? `Re: ${ctx.subject}` : "Re: your daily report";
@@ -819,6 +844,20 @@ async function registerRoutes(httpServer, app) {
       profile: { ...profile, must_change_password: mustChange }
     });
   });
+  function genTempPassword() {
+    const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+    const lower = "abcdefghijkmnpqrstuvwxyz";
+    const digits = "23456789";
+    const all = upper + lower + digits;
+    const pick = (set) => set[crypto.randomInt(0, set.length)];
+    const chars = [pick(upper), pick(lower), pick(digits), pick(digits)];
+    while (chars.length < 12) chars.push(pick(all));
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = crypto.randomInt(0, i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    return chars.join("");
+  }
   function signInvite(payload) {
     const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
     const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
@@ -883,6 +922,27 @@ async function registerRoutes(httpServer, app) {
       refresh_token: signIn.session.refresh_token,
       profile
     });
+  });
+  app.post("/api/auth/forgot-password", async (req, res) => {
+    const email = String((req.body || {}).email || "").trim().toLowerCase();
+    const emailEnabled = emailConfigured();
+    const ok = () => res.json({ ok: true, emailEnabled });
+    if (!email || !emailEnabled || !supabaseAdmin) return ok();
+    try {
+      const { data: profile } = await supabaseAdmin.from("profiles").select("id,email,name,active").eq("email", email).single();
+      if (!profile || !profile.active) return ok();
+      const appUrl = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
+      const token = signInvite({
+        uid: profile.id,
+        email: profile.email,
+        exp: Date.now() + 60 * 60 * 1e3
+      });
+      const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+      await sendPasswordResetEmail({ to: profile.email, name: profile.name, link });
+    } catch (e) {
+      console.error("[forgot-password] error", e);
+    }
+    return ok();
   });
   app.get("/api/me", requireAuth, async (req, res) => {
     const { data: prefs } = await supabaseAnon.from("notification_prefs").select("*").eq("user_id", req.profile.id).single();
@@ -1325,6 +1385,28 @@ async function registerRoutes(httpServer, app) {
         });
       }
       res.json({ sent: true, email: profile.email });
+    }
+  );
+  app.post(
+    "/api/users/:id/reset-password",
+    requireAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      if (!hasAdmin() || !supabaseAdmin) {
+        return res.status(503).json({
+          message: "Account management is not enabled yet. The service role key must be configured in the deployment environment."
+        });
+      }
+      const { data: profile, error: pErr } = await supabaseAdmin.from("profiles").select("id,email,name").eq("id", req.params.id).single();
+      if (pErr || !profile)
+        return res.status(404).json({ message: "User not found" });
+      const temp = genTempPassword();
+      const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(profile.id, {
+        password: temp,
+        user_metadata: { name: profile.name, must_change_password: true }
+      });
+      if (uErr) return res.status(400).json({ message: uErr.message });
+      res.json({ reset: true, email: profile.email, temporaryPassword: temp });
     }
   );
   app.patch(

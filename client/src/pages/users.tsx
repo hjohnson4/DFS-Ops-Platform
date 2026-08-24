@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, UserPlus, ShieldAlert, Pencil, Send, RefreshCw, Copy } from "lucide-react";
+import { Loader2, UserPlus, ShieldAlert, Pencil, Send, RefreshCw, Copy, KeyRound } from "lucide-react";
 
 const ROLE_TONE: Record<Role, string> = {
   admin: "bg-primary/10 text-primary",
@@ -170,6 +170,45 @@ export default function UsersPage() {
       toast({ title: "Could not send invite", description: e.message, variant: "destructive" }),
     onSettled: () => setResendingId(null),
   });
+
+  // Admin password reset. On success we surface the generated temporary
+  // password in a dialog (with Copy) so the admin can hand it to the user.
+  const [resetResult, setResetResult] = useState<{ email: string; password: string } | null>(null);
+  const [resettingId, setResettingId] = useState<string | null>(null);
+  const resetPassword = useMutation({
+    mutationFn: async (u: Profile) => {
+      setResettingId(u.id);
+      const res = await apiRequest("POST", `/api/users/${u.id}/reset-password`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setResetResult({ email: data.email, password: data.temporaryPassword });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not reset password", description: e.message, variant: "destructive" }),
+    onSettled: () => setResettingId(null),
+  });
+
+  async function copyResetCredentials() {
+    if (!resetResult) return;
+    const appUrl = window.location.origin + window.location.pathname + "#/";
+    const text =
+      `DFS Ops login\n` +
+      `URL: ${appUrl}\n` +
+      `Email: ${resetResult.email}\n` +
+      `Temporary password: ${resetResult.password}\n` +
+      `You'll be asked to set your own password on first login.`;
+    try {
+      await navigator.clipboard.writeText(text.trim());
+      toast({ title: "Copied", description: "Login details copied to clipboard." });
+    } catch {
+      toast({
+        title: "Couldn't copy automatically",
+        description: "Select and copy the password shown instead.",
+        variant: "destructive",
+      });
+    }
+  }
 
   const updateUser = useMutation({
     mutationFn: async () => {
@@ -407,6 +446,21 @@ export default function UsersPage() {
                     )}
                     Resend invite
                   </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => resetPassword.mutate(u)}
+                    disabled={resettingId === u.id || (health && !health.adminReady)}
+                    title="Set a new temporary password for this user to share"
+                    data-testid={`button-reset-${u.id}`}
+                  >
+                    {resettingId === u.id ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Reset password
+                  </Button>
                   <Button variant="ghost" size="sm" onClick={() => toggleActive.mutate(u)} data-testid={`button-toggle-${u.id}`}>
                     {u.active ? "Deactivate" : "Reactivate"}
                   </Button>
@@ -469,6 +523,37 @@ export default function UsersPage() {
             >
               {updateUser.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reset-password result: show the new temporary password + Copy */}
+      <Dialog open={!!resetResult} onOpenChange={(o) => !o && setResetResult(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Temporary password created</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <p className="text-muted-foreground">
+              Share these details with{" "}
+              <span className="font-medium text-foreground">{resetResult?.email}</span>. They'll be
+              asked to set their own password the next time they sign in.
+            </p>
+            <div className="rounded-md border bg-muted/40 p-3 font-mono text-base tracking-wide select-all">
+              {resetResult?.password}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              This password is shown once. Copy it now — it can't be retrieved later.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setResetResult(null)} data-testid="button-reset-done">
+              Done
+            </Button>
+            <Button onClick={copyResetCredentials} data-testid="button-reset-copy">
+              <Copy className="mr-1.5 h-3.5 w-3.5" />
+              Copy login details
             </Button>
           </DialogFooter>
         </DialogContent>
