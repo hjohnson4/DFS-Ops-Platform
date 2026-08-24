@@ -41,19 +41,36 @@ if (!SUPABASE_URL || !ANON_KEY) {
   console.warn("[supabase] SUPABASE_URL / SUPABASE_ANON_KEY not set");
 }
 
-// Some published/hosted sandboxes set HTTPS_PROXY to route outbound traffic
-// through a credential-injecting proxy. That proxy can corrupt Supabase REST
-// (PostgREST) and GoTrue calls. Supabase-js uses the global fetch, which honors
-// the proxy. Force a DIRECT connection by passing a custom fetch that uses an
-// undici Agent with no proxy configured.
+// Some published/hosted sandboxes (e.g. the Perplexity pplx.app sandbox) set
+// HTTPS_PROXY/HTTP_PROXY to route outbound traffic through a credential-injecting
+// proxy. That proxy can corrupt Supabase REST (PostgREST) and GoTrue calls, so
+// in THOSE environments we force a DIRECT connection via a custom undici Agent
+// with no proxy configured.
+//
+// On Vercel (and any normal host) there is NO such proxy, and installing a
+// custom undici dispatcher/fetch inside the serverless runtime can itself throw
+// at call time (FUNCTION_INVOCATION_FAILED on the first Supabase call). So we
+// ONLY install the custom fetch when a proxy env var is actually present;
+// otherwise supabase-js uses the platform's native global fetch.
+const hasOutboundProxy = Boolean(
+  process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy,
+);
 let directFetch: typeof fetch | undefined = undefined;
-try {
-  // undici ships with Node 18+; Agent bypasses env proxy settings.
-  const agent = new Agent();
-  directFetch = ((input: any, init: any = {}) =>
-    undiciFetch(input, { ...init, dispatcher: agent })) as unknown as typeof fetch;
-} catch {
-  directFetch = undefined; // fall back to global fetch if undici isn't present
+if (hasOutboundProxy) {
+  try {
+    // undici ships with Node 18+; Agent bypasses env proxy settings.
+    const agent = new Agent();
+    directFetch = ((input: any, init: any = {}) =>
+      undiciFetch(input, {
+        ...init,
+        dispatcher: agent,
+      })) as unknown as typeof fetch;
+  } catch {
+    directFetch = undefined; // fall back to global fetch if undici isn't present
+  }
 }
 
 const clientOpts = {

@@ -24,12 +24,20 @@ var SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 if (!SUPABASE_URL || !ANON_KEY) {
   console.warn("[supabase] SUPABASE_URL / SUPABASE_ANON_KEY not set");
 }
+var hasOutboundProxy = Boolean(
+  process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy
+);
 var directFetch = void 0;
-try {
-  const agent = new Agent();
-  directFetch = ((input, init = {}) => undiciFetch(input, { ...init, dispatcher: agent }));
-} catch {
-  directFetch = void 0;
+if (hasOutboundProxy) {
+  try {
+    const agent = new Agent();
+    directFetch = ((input, init = {}) => undiciFetch(input, {
+      ...init,
+      dispatcher: agent
+    }));
+  } catch {
+    directFetch = void 0;
+  }
 }
 var clientOpts = {
   auth: { autoRefreshToken: false, persistSession: false },
