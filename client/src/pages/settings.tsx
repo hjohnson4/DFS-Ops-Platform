@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { ROLE_LABELS } from "@shared/schema";
 import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
-import { ChangePasswordForm } from "@/pages/change-password.tsx";
+import { ChangePasswordForm } from "@/pages/change-password";
 
 type DailyReportConfigResponse = {
   id: number;
