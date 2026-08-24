@@ -1,0 +1,113 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Customer &amp; jobs report</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", Arial, Helvetica, sans-serif;
+    color: #1a1a1a; font-size: 12px; line-height: 1.45;
+    padding: 32px 36px;
+  }
+  .report-head { border-bottom: 2px solid #1e4d8b; padding-bottom: 12px; margin-bottom: 18px; }
+  .brand { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #1e4d8b; font-weight: 700; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .meta { font-size: 11px; color: #666; }
+  h2.section { font-size: 13px; margin: 22px 0 8px; color: #1e4d8b; border-bottom: 1px solid #d8dee8; padding-bottom: 4px; }
+  .kpis { display: flex; gap: 10px; margin: 14px 0 4px; }
+  .kpi { flex: 1; border: 1px solid #d8dee8; border-radius: 8px; padding: 10px 12px; background: #f7f9fc; }
+  .kpi-value { font-size: 20px; font-weight: 700; color: #1e4d8b; }
+  .kpi-label { font-size: 10px; color: #666; text-transform: uppercase; letter-spacing: .04em; margin-top: 2px; }
+  table.tbl { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  table.tbl th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .03em;
+    color: #555; background: #eef2f8; padding: 6px 8px; border-bottom: 1px solid #d8dee8; }
+  table.tbl td { padding: 6px 8px; border-bottom: 1px solid #eceff4; vertical-align: top; }
+  .tbl .num { text-align: right; }
+  .mono { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .customer { margin-top: 20px; page-break-inside: avoid; border: 1px solid #d8dee8; border-radius: 10px; padding: 14px 16px; }
+  .cust-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  .cust-name { font-size: 15px; font-weight: 700; }
+  .inactive { font-size: 10px; color: #999; font-weight: 500; }
+  .cust-contact { font-size: 11px; color: #555; margin-top: 2px; }
+  .cust-contact span:not(:last-child)::after { content: " · "; color: #bbb; }
+  .cust-stats { font-size: 11px; color: #444; text-align: right; white-space: nowrap; }
+  .cust-stats span { display: block; }
+  .cust-notes { font-size: 11px; color: #444; margin: 8px 0 2px; background: #f7f9fc; border-radius: 6px; padding: 6px 8px; }
+  .cust-notes .lbl { color: #888; text-transform: uppercase; font-size: 9px; letter-spacing: .05em; }
+  .empty { font-size: 11px; color: #888; padding: 8px 0 2px; font-style: italic; }
+  .badge { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 999px; }
+  .badge-active { background: #dcf5e6; color: #1a7a44; }
+  .badge-onhold { background: #fdf0d5; color: #9a6a12; }
+  .badge-completed { background: #eceff4; color: #555; }
+  .foot { margin-top: 26px; padding-top: 10px; border-top: 1px solid #d8dee8; font-size: 10px; color: #888; }
+  @media print {
+    body { padding: 0; }
+    .customer { break-inside: avoid; }
+  }
+</style></head>
+<body>
+  <div class="report-head">
+    <div class="brand">DFS Ops · Equipment Operations</div>
+    <h1>Customer &amp; jobs report</h1>
+    <div class="meta">Generated August 4, 2026 at 2:58 PM · by Avery Cole</div>
+  </div>
+
+  <div class="kpis"><div class="kpi"><div class="kpi-value">1</div><div class="kpi-label">Customers</div></div><div class="kpi"><div class="kpi-value">1</div><div class="kpi-label">Active customers</div></div><div class="kpi"><div class="kpi-value">2</div><div class="kpi-label">Total jobs</div></div><div class="kpi"><div class="kpi-value">2</div><div class="kpi-label">Active jobs</div></div></div>
+  
+    <h2 class="section">Jobs by area</h2>
+    <table class="tbl">
+      <thead><tr><th>Operating area</th><th class="num">Customers</th><th class="num">Jobs</th><th class="num">Active</th></tr></thead>
+      <tbody><tr><td>West Texas</td><td class="num">1</td><td class="num">1</td><td class="num">1</td></tr><tr><td>South Texas</td><td class="num">1</td><td class="num">1</td><td class="num">1</td></tr></tbody>
+    </table>
+
+  <h2 class="section">Customers</h2>
+  
+    <section class="customer">
+      <div class="cust-head">
+        <div>
+          <div class="cust-name">Permian Basin Resources</div>
+          <div class="cust-contact">
+            <span>J. Alvarez</span>
+            <span>432-555-0110</span>
+            <span>ops@pbr.com</span>
+          </div>
+        </div>
+        <div class="cust-stats">
+          <span><strong>2</strong> jobs</span>
+          <span><strong>2</strong> active</span>
+          <span>South Texas, West Texas</span>
+        </div>
+      </div>
+      
+      
+    <table class="tbl jobs">
+      <thead><tr>
+        <th>Job #</th><th>Area</th><th>Well</th><th>Description</th>
+        <th>Crewing</th><th class="num">Day rate</th><th>Started</th><th>Status</th>
+      </tr></thead>
+      <tbody><tr>
+        <td class="mono">ST-2201</td>
+        <td>South Texas</td>
+        <td>Keg 1-0-39-38 E 505H</td>
+        <td>Dewatering package</td>
+        <td>Manned</td>
+        <td class="num">$4,500</td>
+        <td>—</td>
+        <td><span class="badge badge-active">Active</span></td>
+      </tr><tr>
+        <td class="mono">WT-1042</td>
+        <td>West Texas</td>
+        <td>—</td>
+        <td>Centrifuge package on Wolfcamp pad</td>
+        <td>Manned</td>
+        <td class="num">$3,201</td>
+        <td>—</td>
+        <td><span class="badge badge-active">Active</span></td>
+      </tr></tbody>
+    </table>
+    </section>
+
+  <div class="foot">
+    DFS Ops — West Texas · South Texas · North Louisiana. This report reflects data
+    visible to the account that generated it (jobs are scoped to your operating area).
+  </div>
+</body></html>
