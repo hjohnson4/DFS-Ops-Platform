@@ -62,6 +62,11 @@ export interface Profile {
   area: Area | null;
   active: boolean;
   created_at: string;
+  // Computed at auth time from Supabase Auth user_metadata (not a profiles
+  // column). When true, the app forces the user to set a new password before
+  // using the rest of the app. Set when an admin creates them with a temporary
+  // password and asks for a change on first login; cleared once they change it.
+  must_change_password?: boolean;
 }
 
 export interface Customer {
@@ -708,20 +713,41 @@ export interface NotificationPrefs {
 }
 
 // ---- Insert / validation schemas -------------------------------------------
+// Password rule shared by manual create and password reset: at least 10 chars
+// with letters and numbers (these mint real login accounts).
+const strongPassword = z
+  .string()
+  .min(10, "Password must be at least 10 characters")
+  .regex(/[A-Za-z]/, "Password must include a letter")
+  .regex(/[0-9]/, "Password must include a number");
+
+// Creating a user supports two modes:
+//   - "invite": no password; the system emails a secure set-password link.
+//   - "password": admin sets a temporary password now (password required).
+// Password is optional at the schema level and validated per-mode in the route.
 export const createUserSchema = z.object({
   email: z.string().email(),
   name: z.string().min(1),
-  // These mint real login accounts, so require a stronger password than the
-  // old 8-char minimum: at least 10 chars with letters and numbers.
-  password: z
-    .string()
-    .min(10, "Password must be at least 10 characters")
-    .regex(/[A-Za-z]/, "Password must include a letter")
-    .regex(/[0-9]/, "Password must include a number"),
+  // Default to "password" (admin sets credentials and shares them). Email
+  // invites remain supported but are dormant unless an email provider is set up.
+  mode: z.enum(["invite", "password"]).default("password"),
+  password: strongPassword.optional(),
+  // Password mode only: when true, the user must set a new password on first
+  // login before they can use the app.
+  requirePasswordChange: z.boolean().optional().default(true),
   role: z.enum(ROLES),
   area: z.enum(AREAS).nullable().optional(),
 });
 export type CreateUserInput = z.infer<typeof createUserSchema>;
+
+// A signed-in user changing their own password. `currentPassword` is required
+// to re-authenticate; unless they are completing a forced first-login change,
+// where the current (temporary) password is re-entered too.
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: strongPassword,
+});
+export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 
 export const updateUserSchema = z.object({
   name: z.string().min(1).optional(),

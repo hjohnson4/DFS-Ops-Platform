@@ -1,6 +1,9 @@
 // server/app.ts
 import express from "express";
 
+// server/routes.ts
+import crypto from "node:crypto";
+
 // server/ws-polyfill.ts
 import ws from "ws";
 var g = globalThis;
@@ -64,7 +67,8 @@ async function requireAuth(req, res, next) {
     if (!profile.active) {
       return res.status(403).json({ message: "This account has been deactivated" });
     }
-    req.profile = profile;
+    const mustChange = !!data.user.user_metadata?.must_change_password;
+    req.profile = { ...profile, must_change_password: mustChange };
     req.accessToken = token;
     next();
   } catch (e) {
@@ -125,6 +129,31 @@ async function deliver(to, subject, html) {
 }
 function emailConfigured() {
   return !!RESEND_API_KEY;
+}
+async function sendInviteEmail(ctx) {
+  const who = ctx.name ? ctx.name : "there";
+  const by = ctx.inviterName ? `${ctx.inviterName} has` : "You've been";
+  const html = `
+    <div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;">
+      <h2 style="color:#28251D;margin:0 0 16px;">Welcome to DFS Ops</h2>
+      <p style="color:#28251D;font-size:15px;line-height:1.5;">Hi ${who},</p>
+      <p style="color:#28251D;font-size:15px;line-height:1.5;">
+        ${by} invited to the Drilling Fluid Solutions operations platform.
+        Click the button below to set your password and sign in.
+      </p>
+      <p style="margin:24px 0;">
+        <a href="${ctx.link}"
+           style="background:#01696F;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:6px;font-size:15px;font-weight:600;display:inline-block;">
+          Set your password
+        </a>
+      </p>
+      <p style="color:#7A7974;font-size:13px;line-height:1.5;">
+        If the button doesn't work, copy and paste this link into your browser:<br>
+        <a href="${ctx.link}" style="color:#01696F;word-break:break-all;">${ctx.link}</a>
+      </p>
+      <p style="color:#BAB9B4;font-size:12px;margin-top:24px;">Sent by DFS Ops. If you weren't expecting this, you can ignore this email.</p>
+    </div>`;
+  return deliver(ctx.to, "You're invited to DFS Ops \u2014 set your password", html);
 }
 async function sendDailyReportChanges(ctx) {
   const who = ctx.senderName ? `${ctx.senderName}` : "there";
@@ -385,14 +414,23 @@ function serviceStatusFor(a) {
   else if (hoursSince >= interval * (1 - SERVICE_SOON_FRACTION)) state = "Soon";
   return { hoursSince, interval, state };
 }
+var strongPassword = z.string().min(10, "Password must be at least 10 characters").regex(/[A-Za-z]/, "Password must include a letter").regex(/[0-9]/, "Password must include a number");
 var createUserSchema = z.object({
   email: z.string().email(),
   name: z.string().min(1),
-  // These mint real login accounts, so require a stronger password than the
-  // old 8-char minimum: at least 10 chars with letters and numbers.
-  password: z.string().min(10, "Password must be at least 10 characters").regex(/[A-Za-z]/, "Password must include a letter").regex(/[0-9]/, "Password must include a number"),
+  // Default to "password" (admin sets credentials and shares them). Email
+  // invites remain supported but are dormant unless an email provider is set up.
+  mode: z.enum(["invite", "password"]).default("password"),
+  password: strongPassword.optional(),
+  // Password mode only: when true, the user must set a new password on first
+  // login before they can use the app.
+  requirePasswordChange: z.boolean().optional().default(true),
   role: z.enum(ROLES),
   area: z.enum(AREAS).nullable().optional()
+});
+var changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: strongPassword
 });
 var updateUserSchema = z.object({
   name: z.string().min(1).optional(),
@@ -751,7 +789,12 @@ var updateWorkOrderSchema = z.object({
 var INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 async function registerRoutes(httpServer, app) {
   app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, adminReady: hasAdmin(), time: (/* @__PURE__ */ new Date()).toISOString() });
+    res.json({
+      ok: true,
+      adminReady: hasAdmin(),
+      emailReady: emailConfigured(),
+      time: (/* @__PURE__ */ new Date()).toISOString()
+    });
   });
   app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body || {};
@@ -769,9 +812,75 @@ async function registerRoutes(httpServer, app) {
       return res.status(403).json({ message: "No profile for this account" });
     if (!profile.active)
       return res.status(403).json({ message: "Account deactivated" });
+    const mustChange = !!data.user?.user_metadata?.must_change_password;
     res.json({
       access_token: data.session.access_token,
       refresh_token: data.session.refresh_token,
+      profile: { ...profile, must_change_password: mustChange }
+    });
+  });
+  function signInvite(payload) {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const sig = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    return `${body}.${sig}`;
+  }
+  function verifyInvite(token) {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const parts = (token || "").split(".");
+    if (parts.length !== 2) return { error: "This invite link is malformed." };
+    const [body, sig] = parts;
+    const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b))
+      return { error: "This invite link is invalid." };
+    let payload;
+    try {
+      payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    } catch {
+      return { error: "This invite link is malformed." };
+    }
+    if (!payload.exp || Date.now() > payload.exp)
+      return { error: "This invite link has expired. Ask your admin to resend it." };
+    return { uid: payload.uid, email: payload.email };
+  }
+  app.post("/api/invite/verify", async (req, res) => {
+    const v = verifyInvite((req.body || {}).token);
+    if ("error" in v) return res.status(400).json({ message: v.error });
+    if (!supabaseAdmin)
+      return res.status(503).json({ message: "Service unavailable." });
+    const { data: profile } = await supabaseAdmin.from("profiles").select("email,name").eq("id", v.uid).single();
+    res.json({ email: v.email, name: profile?.name ?? null });
+  });
+  app.post("/api/invite/complete", async (req, res) => {
+    const { token, password } = req.body || {};
+    const v = verifyInvite(token);
+    if ("error" in v) return res.status(400).json({ message: v.error });
+    if (typeof password !== "string" || password.length < 10 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+      return res.status(400).json({
+        message: "Password must be at least 10 characters and include a letter and a number."
+      });
+    }
+    if (!supabaseAdmin)
+      return res.status(503).json({ message: "Service unavailable." });
+    const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(v.uid, {
+      password,
+      email_confirm: true
+    });
+    if (uErr) return res.status(400).json({ message: uErr.message });
+    const { data: signIn, error: sErr } = await supabaseAnon.auth.signInWithPassword({
+      email: v.email,
+      password
+    });
+    if (sErr || !signIn.session) {
+      return res.json({ passwordSet: true, session: null });
+    }
+    const { data: profile } = await supabaseAnon.from("profiles").select("*").eq("id", v.uid).single();
+    res.json({
+      passwordSet: true,
+      access_token: signIn.session.access_token,
+      refresh_token: signIn.session.refresh_token,
       profile
     });
   });
@@ -779,6 +888,45 @@ async function registerRoutes(httpServer, app) {
     const { data: prefs } = await supabaseAnon.from("notification_prefs").select("*").eq("user_id", req.profile.id).single();
     res.json({ profile: req.profile, prefs: prefs || null });
   });
+  app.post(
+    "/api/account/change-password",
+    requireAuth,
+    async (req, res) => {
+      const parsed = changePasswordSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const { currentPassword, newPassword } = parsed.data;
+      const me = req.profile;
+      if (currentPassword === newPassword)
+        return res.status(400).json({ message: "Your new password must be different from the current one." });
+      const { data: signIn, error: sErr } = await supabaseAnon.auth.signInWithPassword({
+        email: me.email,
+        password: currentPassword
+      });
+      if (sErr || !signIn.session) {
+        return res.status(400).json({ message: "Your current password is incorrect." });
+      }
+      if (supabaseAdmin) {
+        const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(me.id, {
+          password: newPassword,
+          user_metadata: {
+            name: me.name,
+            must_change_password: false
+          }
+        });
+        if (uErr) return res.status(400).json({ message: uErr.message });
+      } else {
+        const { error: uErr } = await supabaseAnon.auth.updateUser(
+          { password: newPassword },
+          {
+            /* uses the session from signIn above */
+          }
+        );
+        if (uErr) return res.status(400).json({ message: uErr.message });
+      }
+      res.json({ changed: true });
+    }
+  );
   app.get(
     "/api/notifications",
     requireAuth,
@@ -1085,12 +1233,21 @@ async function registerRoutes(httpServer, app) {
           message: "Account creation is not enabled yet. The service role key must be configured in the deployment environment."
         });
       }
-      const { email, name, password, role, area } = parsed.data;
+      const { email, name, mode, password, role, area, requirePasswordChange } = parsed.data;
+      if (mode === "password" && !password) {
+        return res.status(400).json({ message: "A password is required when setting one manually." });
+      }
+      if (mode === "invite" && !emailConfigured()) {
+        return res.status(400).json({
+          message: "Email invites aren't enabled yet (no email provider configured). Set a password manually instead, or configure email delivery."
+        });
+      }
+      const mustChange = mode === "password" && requirePasswordChange !== false;
       const { data: created, error: cErr } = await supabaseAdmin.auth.admin.createUser({
         email,
-        password,
+        ...mode === "password" ? { password } : {},
         email_confirm: true,
-        user_metadata: { name }
+        user_metadata: { name, ...mustChange ? { must_change_password: true } : {} }
       });
       if (cErr || !created.user)
         return res.status(400).json({ message: cErr?.message || "Could not create user" });
@@ -1112,7 +1269,62 @@ async function registerRoutes(httpServer, app) {
         on_needs_signoff: role === "area",
         on_filed: false
       });
-      res.status(201).json(profile);
+      let invited = false;
+      if (mode === "invite") {
+        const appUrl = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
+        const token = signInvite({
+          uid: created.user.id,
+          email,
+          exp: Date.now() + 7 * 24 * 60 * 60 * 1e3
+        });
+        const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+        invited = await sendInviteEmail({
+          to: email,
+          name,
+          inviterName: req.profile?.name ?? null,
+          link
+        });
+      }
+      res.status(201).json({ ...profile, invited });
+    }
+  );
+  app.post(
+    "/api/users/:id/resend-invite",
+    requireAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      if (!hasAdmin() || !supabaseAdmin) {
+        return res.status(503).json({
+          message: "Account management is not enabled yet. The service role key must be configured in the deployment environment."
+        });
+      }
+      if (!emailConfigured()) {
+        return res.status(400).json({
+          message: "Email isn't enabled yet (no email provider configured), so invites can't be sent. Set a password for this user instead."
+        });
+      }
+      const { data: profile, error: pErr } = await supabaseAdmin.from("profiles").select("id,email,name").eq("id", req.params.id).single();
+      if (pErr || !profile)
+        return res.status(404).json({ message: "User not found" });
+      const appUrl = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
+      const token = signInvite({
+        uid: profile.id,
+        email: profile.email,
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1e3
+      });
+      const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+      const sent = await sendInviteEmail({
+        to: profile.email,
+        name: profile.name,
+        inviterName: req.profile?.name ?? null,
+        link
+      });
+      if (!sent) {
+        return res.status(502).json({
+          message: "The invite email could not be delivered. Check the email provider configuration."
+        });
+      }
+      res.json({ sent: true, email: profile.email });
     }
   );
   app.patch(

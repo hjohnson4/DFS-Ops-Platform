@@ -1,14 +1,16 @@
 import type { Express, Request, Response } from "express";
 import type { Server } from "node:http";
+import crypto from "node:crypto";
 import { supabaseAnon, supabaseAdmin, hasAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf, jobScopeOf } from "./auth";
-import { sendNotificationEmails, sendDailyReportChanges, emailConfigured } from "./email";
+import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, sendInviteEmail } from "./email";
 import { parseDailyReportWorkbook, ExcelParseError } from "./excelDailyReport";
 import * as XLSX from "xlsx";
 import { AREAS } from "@shared/schema";
 import {
   createUserSchema,
   updateUserSchema,
+  changePasswordSchema,
   createAssetSchema,
   updateAssetSchema,
   createReportSchema,
@@ -68,7 +70,12 @@ export async function registerRoutes(
     // adminReady reflects whether SUPABASE_SERVICE_ROLE_KEY is configured — when
     // true, self-service account creation is enabled. `time` helps confirm a
     // fresh deploy is serving (e.g. after setting the key in the env).
-    res.json({ ok: true, adminReady: hasAdmin(), time: new Date().toISOString() });
+    res.json({
+      ok: true,
+      adminReady: hasAdmin(),
+      emailReady: emailConfigured(),
+      time: new Date().toISOString(),
+    });
   });
   // ---- Auth ---------------------------------------------------------------
   // Login: exchange email+password for a Supabase session (access token)
@@ -97,9 +104,106 @@ export async function registerRoutes(
     if (!profile.active)
       return res.status(403).json({ message: "Account deactivated" });
 
+    const mustChange = !!(data.user?.user_metadata as any)?.must_change_password;
+
     res.json({
       access_token: data.session.access_token,
       refresh_token: data.session.refresh_token,
+      profile: { ...profile, must_change_password: mustChange },
+    });
+  });
+
+  // ---- Invite tokens --------------------------------------------------------
+  // Invites use a stateless, signed token (HMAC-SHA256 over the payload using
+  // the service-role key as the secret). No DB column needed. The token encodes
+  // the user id, email, and an expiry; the set-password page posts it back to
+  // verify identity and set the password. Tokens are single-window (expiry) and
+  // tamper-evident (any change invalidates the signature).
+  function signInvite(payload: { uid: string; email: string; exp: number }): string {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const sig = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    return `${body}.${sig}`;
+  }
+  function verifyInvite(
+    token: string,
+  ): { uid: string; email: string } | { error: string } {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const parts = (token || "").split(".");
+    if (parts.length !== 2) return { error: "This invite link is malformed." };
+    const [body, sig] = parts;
+    const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    // constant-time compare
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b))
+      return { error: "This invite link is invalid." };
+    let payload: { uid: string; email: string; exp: number };
+    try {
+      payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    } catch {
+      return { error: "This invite link is malformed." };
+    }
+    if (!payload.exp || Date.now() > payload.exp)
+      return { error: "This invite link has expired. Ask your admin to resend it." };
+    return { uid: payload.uid, email: payload.email };
+  }
+
+  // Verify an invite token and return whom it's for (to greet on the page).
+  app.post("/api/invite/verify", async (req: Request, res: Response) => {
+    const v = verifyInvite((req.body || {}).token);
+    if ("error" in v) return res.status(400).json({ message: v.error });
+    if (!supabaseAdmin)
+      return res.status(503).json({ message: "Service unavailable." });
+    const { data: profile } = await supabaseAdmin
+      .from("profiles")
+      .select("email,name")
+      .eq("id", v.uid)
+      .single();
+    res.json({ email: v.email, name: profile?.name ?? null });
+  });
+
+  // Complete an invite: set the password, then sign the user in.
+  app.post("/api/invite/complete", async (req: Request, res: Response) => {
+    const { token, password } = req.body || {};
+    const v = verifyInvite(token);
+    if ("error" in v) return res.status(400).json({ message: v.error });
+    if (
+      typeof password !== "string" ||
+      password.length < 10 ||
+      !/[A-Za-z]/.test(password) ||
+      !/[0-9]/.test(password)
+    ) {
+      return res.status(400).json({
+        message: "Password must be at least 10 characters and include a letter and a number.",
+      });
+    }
+    if (!supabaseAdmin)
+      return res.status(503).json({ message: "Service unavailable." });
+    // Set the password (and make sure the email is confirmed).
+    const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(v.uid, {
+      password,
+      email_confirm: true,
+    });
+    if (uErr) return res.status(400).json({ message: uErr.message });
+    // Sign them in so they land in the app already authenticated.
+    const { data: signIn, error: sErr } = await supabaseAnon.auth.signInWithPassword({
+      email: v.email,
+      password,
+    });
+    if (sErr || !signIn.session) {
+      // Password was set but auto-login failed — tell them to sign in normally.
+      return res.json({ passwordSet: true, session: null });
+    }
+    const { data: profile } = await supabaseAnon
+      .from("profiles")
+      .select("*")
+      .eq("id", v.uid)
+      .single();
+    res.json({
+      passwordSet: true,
+      access_token: signIn.session.access_token,
+      refresh_token: signIn.session.refresh_token,
       profile,
     });
   });
@@ -114,6 +218,59 @@ export async function registerRoutes(
       .single();
     res.json({ profile: req.profile, prefs: prefs || null });
   });
+
+  // Change my own password. Any signed-in user can do this at any time; it's
+  // also how a user completes a forced first-login password change. We
+  // re-authenticate with the current password (so a stolen session can't
+  // silently change it), set the new password, and clear the
+  // must_change_password flag in auth metadata.
+  app.post(
+    "/api/account/change-password",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const parsed = changePasswordSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const { currentPassword, newPassword } = parsed.data;
+      const me = req.profile!;
+      if (currentPassword === newPassword)
+        return res
+          .status(400)
+          .json({ message: "Your new password must be different from the current one." });
+
+      // 1. Verify the current password by attempting a sign-in.
+      const { data: signIn, error: sErr } =
+        await supabaseAnon.auth.signInWithPassword({
+          email: me.email,
+          password: currentPassword,
+        });
+      if (sErr || !signIn.session) {
+        return res.status(400).json({ message: "Your current password is incorrect." });
+      }
+
+      // 2. Set the new password. Prefer the admin API (also lets us clear the
+      //    metadata flag); fall back to updating via the user's own session.
+      if (supabaseAdmin) {
+        const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(me.id, {
+          password: newPassword,
+          user_metadata: {
+            name: me.name,
+            must_change_password: false,
+          },
+        });
+        if (uErr) return res.status(400).json({ message: uErr.message });
+      } else {
+        // No service role key: update through the just-established session.
+        const { error: uErr } = await supabaseAnon.auth.updateUser(
+          { password: newPassword },
+          { /* uses the session from signIn above */ } as any,
+        );
+        if (uErr) return res.status(400).json({ message: uErr.message });
+      }
+
+      res.json({ changed: true });
+    },
+  );
 
   // ---- In-app notifications (computed, read-only) -------------------------
   // Derives a live alert feed from current operational state — no dedicated
@@ -549,15 +706,36 @@ export async function registerRoutes(
         });
       }
 
-      const { email, name, password, role, area } = parsed.data;
+      const { email, name, mode, password, role, area, requirePasswordChange } = parsed.data;
 
-      // 1. Create the auth user (email confirmed so they can log in immediately)
+      // In "password" mode the admin must supply a password. In "invite" mode we
+      // create the account WITHOUT a password and email a set-password link.
+      if (mode === "password" && !password) {
+        return res
+          .status(400)
+          .json({ message: "A password is required when setting one manually." });
+      }
+      if (mode === "invite" && !emailConfigured()) {
+        return res.status(400).json({
+          message:
+            "Email invites aren't enabled yet (no email provider configured). Set a password manually instead, or configure email delivery.",
+        });
+      }
+
+      // 1. Create the auth user. Password mode: confirmed + password so they can
+      //    log in immediately. Invite mode: no password; confirm the email so the
+      //    recovery link works, and they set their password via the emailed link.
+      // In password mode, optionally flag the account so the user is forced to
+      // set their own password on first login (recommended when the admin picks
+      // a temporary password to share). Stored in auth user_metadata — no DB
+      // column. Invite users always choose their own password, so no flag.
+      const mustChange = mode === "password" && requirePasswordChange !== false;
       const { data: created, error: cErr } =
         await supabaseAdmin.auth.admin.createUser({
           email,
-          password,
+          ...(mode === "password" ? { password } : {}),
           email_confirm: true,
-          user_metadata: { name },
+          user_metadata: { name, ...(mustChange ? { must_change_password: true } : {}) },
         });
       if (cErr || !created.user)
         return res.status(400).json({ message: cErr?.message || "Could not create user" });
@@ -589,7 +767,87 @@ export async function registerRoutes(
         on_filed: false,
       });
 
-      res.status(201).json(profile);
+      // 4. Invite mode: generate a Supabase recovery link and email it so the
+      //    new user can set their own password. The redirect returns them to the
+      //    app's set-password page. APP_URL lets you pin the canonical URL; we
+      //    fall back to the request's own origin, then the known production URL.
+      let invited = false;
+      if (mode === "invite") {
+        const appUrl =
+          (process.env.APP_URL || "").trim() ||
+          `${req.protocol}://${req.get("host")}` ||
+          "https://dfs-ops-platform.vercel.app";
+        // Signed, self-contained invite token valid for 7 days. The link lands
+        // on the app's own set-password page, which posts the token back.
+        const token = signInvite({
+          uid: created.user.id,
+          email,
+          exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+        });
+        const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+        invited = await sendInviteEmail({
+          to: email,
+          name,
+          inviterName: req.profile?.name ?? null,
+          link,
+        });
+      }
+
+      res.status(201).json({ ...profile, invited });
+    },
+  );
+
+  // Resend an invite: regenerate a fresh 7-day set-password link and email it.
+  // Works for any existing user (e.g. their first link expired, or they lost it).
+  app.post(
+    "/api/users/:id/resend-invite",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      if (!hasAdmin() || !supabaseAdmin) {
+        return res.status(503).json({
+          message:
+            "Account management is not enabled yet. The service role key must be configured in the deployment environment.",
+        });
+      }
+      if (!emailConfigured()) {
+        return res.status(400).json({
+          message:
+            "Email isn't enabled yet (no email provider configured), so invites can't be sent. Set a password for this user instead.",
+        });
+      }
+      // Look up the user to invite.
+      const { data: profile, error: pErr } = await supabaseAdmin
+        .from("profiles")
+        .select("id,email,name")
+        .eq("id", req.params.id)
+        .single();
+      if (pErr || !profile)
+        return res.status(404).json({ message: "User not found" });
+
+      const appUrl =
+        (process.env.APP_URL || "").trim() ||
+        `${req.protocol}://${req.get("host")}` ||
+        "https://dfs-ops-platform.vercel.app";
+      const token = signInvite({
+        uid: profile.id,
+        email: profile.email,
+        exp: Date.now() + 7 * 24 * 60 * 60 * 1000,
+      });
+      const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+      const sent = await sendInviteEmail({
+        to: profile.email,
+        name: profile.name,
+        inviterName: req.profile?.name ?? null,
+        link,
+      });
+      if (!sent) {
+        return res.status(502).json({
+          message:
+            "The invite email could not be delivered. Check the email provider configuration.",
+        });
+      }
+      res.json({ sent: true, email: profile.email });
     },
   );
 

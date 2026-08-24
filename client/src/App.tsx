@@ -7,6 +7,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import AppShell from "@/components/AppShell";
 import Login from "@/pages/login";
+import SetPassword from "@/pages/set-password";
+import { ForcedPasswordChange } from "@/pages/change-password";
 import Dashboard from "@/pages/dashboard";
 import UsersPage from "@/pages/users";
 import CustomersPage from "@/pages/customers";
@@ -32,6 +34,11 @@ import { Loader2 } from "lucide-react";
 
 function Protected() {
   const { profile } = useAuth();
+  // Admin created this account with a temporary password and asked for a
+  // first-login change. Block the app until they set their own password.
+  if (profile?.must_change_password) {
+    return <ForcedPasswordChange />;
+  }
   return (
     <AppShell>
       <Switch>
@@ -65,6 +72,12 @@ function Protected() {
 
 function Gate() {
   const { profile, loading } = useAuth();
+  // The set-password page (invite acceptance) must be reachable while logged
+  // out. Match it directly off the hash path before the auth gate applies.
+  const path = (window.location.hash || "").replace(/^#/, "").split("?")[0];
+  if (path === "/set-password") {
+    return <SetPassword />;
+  }
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">

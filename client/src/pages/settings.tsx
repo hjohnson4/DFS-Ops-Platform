@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import { ROLE_LABELS } from "@shared/schema";
 import { Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { ChangePasswordForm } from "@/pages/change-password";
 
 type DailyReportConfigResponse = {
   id: number;
@@ -85,6 +86,16 @@ export default function Settings() {
             {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Save preferences
           </Button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-card-border bg-card p-4 mt-6">
+        <h2 className="text-sm font-semibold mb-1">Password</h2>
+        <p className="text-xs text-muted-foreground mb-4">
+          Change the password you use to sign in to DFS Ops.
+        </p>
+        <div className="max-w-sm">
+          <ChangePasswordForm />
         </div>
       </div>
 

@@ -27,8 +27,9 @@ import {
   DialogTrigger,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, UserPlus, ShieldAlert, Pencil } from "lucide-react";
+import { Loader2, UserPlus, ShieldAlert, Pencil, Send, RefreshCw, Copy } from "lucide-react";
 
 const ROLE_TONE: Record<Role, string> = {
   admin: "bg-primary/10 text-primary",
@@ -54,7 +55,7 @@ export default function UsersPage() {
     setEditArea((u.area as string) || AREAS[0]);
   }
 
-  const { data: health } = useQuery<{ ok: boolean; adminReady: boolean }>({
+  const { data: health } = useQuery<{ ok: boolean; adminReady: boolean; emailReady?: boolean }>({
     queryKey: ["/api/health"],
   });
   const { data: users, isLoading } = useQuery<Profile[]>({
@@ -65,21 +66,78 @@ export default function UsersPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // "invite" = email them a set-password link; "password" = admin sets one now.
+  // Default to "password": the admin creates credentials and shares them (email
+  // invites are dormant unless an email provider is configured).
+  const [mode, setMode] = useState<"invite" | "password">("password");
+  // When true (password mode), the new user must change their password on first
+  // login. Recommended when the admin picks a temporary password to share.
+  const [requireChange, setRequireChange] = useState(true);
   const [role, setRole] = useState<Role>("field");
   const [area, setArea] = useState<string>(AREAS[0]);
 
+  // Generate a strong, readable temporary password (>=10 chars, letters+digits).
+  function generatePassword() {
+    const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // no I/O to avoid confusion
+    const lower = "abcdefghijkmnpqrstuvwxyz"; // no l
+    const digits = "23456789"; // no 0/1
+    const all = upper + lower + digits;
+    const pick = (set: string) => set[Math.floor(Math.random() * set.length)];
+    // Guarantee the mix, then fill to 12 and shuffle.
+    let chars = [pick(upper), pick(lower), pick(digits), pick(digits)];
+    while (chars.length < 12) chars.push(pick(all));
+    for (let i = chars.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    setPassword(chars.join(""));
+  }
+
+  async function copyCredentials() {
+    const appUrl = window.location.origin + window.location.pathname + "#/";
+    const text =
+      `DFS Ops login\n` +
+      `URL: ${appUrl}\n` +
+      `Email: ${email}\n` +
+      `Temporary password: ${password}\n` +
+      (requireChange ? `You'll be asked to set your own password on first login.` : ``);
+    try {
+      await navigator.clipboard.writeText(text.trim());
+      toast({ title: "Copied", description: "Login details copied to clipboard." });
+    } catch {
+      toast({
+        title: "Couldn't copy automatically",
+        description: "Select and copy the password field manually.",
+        variant: "destructive",
+      });
+    }
+  }
+
   const create = useMutation({
     mutationFn: async () => {
-      const body: any = { name, email, password, role };
+      const body: any = { name, email, mode, role };
+      if (mode === "password") {
+        body.password = password;
+        body.requirePasswordChange = requireChange;
+      }
       if (role !== "admin") body.area = area;
       const res = await apiRequest("POST", "/api/users", body);
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/users"] });
-      toast({ title: "User created", description: `${name} can now sign in.` });
+      if (mode === "invite") {
+        toast({
+          title: data?.invited ? "Invite sent" : "User created",
+          description: data?.invited
+            ? `${name} was emailed a link to set their password.`
+            : `${name} was created. ${data?.inviteError || "Email delivery isn't confirmed — you may need to set a password for them."}`,
+        });
+      } else {
+        toast({ title: "User created", description: `${name} can now sign in.` });
+      }
       setOpen(false);
-      setName(""); setEmail(""); setPassword(""); setRole("field");
+      setName(""); setEmail(""); setPassword(""); setRole("field"); setMode("password"); setRequireChange(true);
     },
     onError: (e: any) =>
       toast({ title: "Could not create user", description: e.message, variant: "destructive" }),
@@ -91,6 +149,26 @@ export default function UsersPage() {
       return res.json();
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/users"] }),
+  });
+
+  // Track which user's invite is currently being resent (to show a spinner on
+  // just that row's button).
+  const [resendingId, setResendingId] = useState<string | null>(null);
+  const resendInvite = useMutation({
+    mutationFn: async (u: Profile) => {
+      setResendingId(u.id);
+      const res = await apiRequest("POST", `/api/users/${u.id}/resend-invite`);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Invite sent",
+        description: `A new set-password link was emailed to ${data?.email || "the user"}.`,
+      });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not send invite", description: e.message, variant: "destructive" }),
+    onSettled: () => setResendingId(null),
   });
 
   const updateUser = useMutation({
@@ -153,9 +231,65 @@ export default function UsersPage() {
                 <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} data-testid="input-new-email" />
               </div>
               <div className="space-y-1.5">
-                <Label>Temporary password</Label>
-                <Input type="text" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="min 10 chars, letters and numbers" data-testid="input-new-password" />
+                <Label>How should they get access?</Label>
+                <Select value={mode} onValueChange={(v) => setMode(v as "invite" | "password")}>
+                  <SelectTrigger data-testid="select-mode"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="password">Set a password now (share it with them)</SelectItem>
+                    <SelectItem value="invite" disabled={!!health && !health.emailReady}>
+                      Email an invite (they set their own password){health && !health.emailReady ? " — needs email setup" : ""}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
+              {mode === "password" && (
+                <div className="space-y-3">
+                  <div className="space-y-1.5">
+                    <Label>Temporary password</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="text"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder="min 10 chars, letters and numbers"
+                        data-testid="input-new-password"
+                        className="font-mono"
+                      />
+                      <Button type="button" variant="outline" onClick={generatePassword} data-testid="button-generate-password">
+                        <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Generate
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={copyCredentials}
+                        disabled={!email || !password}
+                        title={!email || !password ? "Enter an email and password first" : "Copy login details to share"}
+                        data-testid="button-copy-credentials"
+                      >
+                        <Copy className="mr-1.5 h-3.5 w-3.5" /> Copy
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Share the email and this password with the employee. “Copy” puts the
+                      login URL, email, and password on your clipboard.
+                    </p>
+                  </div>
+                  <label className="flex items-start gap-2.5 cursor-pointer">
+                    <Checkbox
+                      checked={requireChange}
+                      onCheckedChange={(v) => setRequireChange(v === true)}
+                      data-testid="checkbox-require-change"
+                      className="mt-0.5"
+                    />
+                    <span className="text-sm">
+                      Require them to set their own password on first login
+                      <span className="block text-xs text-muted-foreground">
+                        Recommended — the temporary password only works once, then they choose their own.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <Label>Role</Label>
@@ -184,11 +318,17 @@ export default function UsersPage() {
             <DialogFooter>
               <Button
                 onClick={() => create.mutate()}
-                disabled={create.isPending || !name || !email || !/^(?=.*[A-Za-z])(?=.*[0-9]).{10,}$/.test(password)}
+                disabled={
+                  create.isPending ||
+                  !name ||
+                  !email ||
+                  (mode === "password" &&
+                    !/^(?=.*[A-Za-z])(?=.*[0-9]).{10,}$/.test(password))
+                }
                 data-testid="button-save-user"
               >
                 {create.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Create user
+                {mode === "invite" ? "Send invite" : "Create user"}
               </Button>
             </DialogFooter>
           </DialogContent>
@@ -247,6 +387,25 @@ export default function UsersPage() {
                 <td className="px-4 py-2.5 text-right whitespace-nowrap">
                   <Button variant="ghost" size="sm" onClick={() => openEdit(u)} data-testid={`button-edit-${u.id}`}>
                     <Pencil className="mr-1.5 h-3.5 w-3.5" /> Edit
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => resendInvite.mutate(u)}
+                    disabled={resendingId === u.id || (health && (!health.adminReady || !health.emailReady))}
+                    title={
+                      health && !health.emailReady
+                        ? "Email isn't configured yet, so invites can't be sent."
+                        : "Email a fresh set-password link to this user"
+                    }
+                    data-testid={`button-resend-${u.id}`}
+                  >
+                    {resendingId === u.id ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Send className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Resend invite
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => toggleActive.mutate(u)} data-testid={`button-toggle-${u.id}`}>
                     {u.active ? "Deactivate" : "Reactivate"}

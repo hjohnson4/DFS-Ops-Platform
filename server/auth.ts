@@ -48,7 +48,12 @@ export async function requireAuth(
       return res.status(403).json({ message: "This account has been deactivated" });
     }
 
-    req.profile = profile as Profile;
+    // Surface the "must change password" flag from Supabase Auth user_metadata.
+    // It lives on the auth user (not the profiles table), so no DB column is
+    // needed. The client uses it to force a password change before app access.
+    const mustChange = !!(data.user.user_metadata as any)?.must_change_password;
+
+    req.profile = { ...(profile as Profile), must_change_password: mustChange };
     req.accessToken = token;
     next();
   } catch (e) {
