@@ -4157,7 +4157,7 @@ async function createApp() {
   return app;
 }
 
-// api/index.ts
+// script/api-entry.ts
 var appPromise = null;
 function getApp() {
   if (!appPromise) {

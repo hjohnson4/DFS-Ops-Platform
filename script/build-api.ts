@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 
-// Bundle the Vercel serverless API entry (api/index.ts) and ALL of its local
+// Bundle the Vercel serverless API entry (script/api-entry.ts) and ALL of its local
 // imports (server/*, shared/*) into a single self-contained file. This mirrors
 // what script/build.ts does for the standalone server: bundling means Node's
 // ESM loader never has to resolve extensionless relative imports at runtime,
@@ -13,7 +13,7 @@ import { build as esbuild } from "esbuild";
 
 async function buildApi() {
   await esbuild({
-    entryPoints: ["api/index.ts"],
+    entryPoints: ["script/api-entry.ts"],
     platform: "node",
     target: "node20",
     bundle: true,
