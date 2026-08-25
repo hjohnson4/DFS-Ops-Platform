@@ -15,6 +15,8 @@ import {
   Upload,
   FileSpreadsheet,
   AlertTriangle,
+  Eye,
+  Download,
 } from "lucide-react";
 import {
   Dialog,
@@ -289,6 +291,46 @@ export default function DailyReportsPage() {
     profile?.role === "super";
   const canManage = profile?.role === "admin" || profile?.role === "area";
   const [importOpen, setImportOpen] = useState(false);
+  // Which row's document is currently loading, keyed as `${id}:${mode}`.
+  const [docBusy, setDocBusy] = useState<string | null>(null);
+
+  // Fetch a report's stored workbook (authenticated) and either open it in a
+  // new tab or download it. Row clicks navigate to the detail page, so callers
+  // must stopPropagation on these buttons.
+  async function openReportDoc(
+    reportId: string,
+    name: string | null,
+    mode: "view" | "download",
+  ) {
+    setDocBusy(`${reportId}:${mode}`);
+    try {
+      const res = await apiRequest(
+        "GET",
+        `/api/daily-reports/${reportId}/attachment`,
+      );
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      if (mode === "view") {
+        window.open(url, "_blank", "noopener,noreferrer");
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name || "daily-report.xlsx";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e: any) {
+      toast({
+        title: "Could not open the document",
+        description: e.message,
+        variant: "destructive",
+      });
+    } finally {
+      setDocBusy(null);
+    }
+  }
 
   const { data: reports, isLoading } = useQuery<DailyReportWithLinks[]>({
     queryKey: ["/api/daily-reports"],
@@ -524,6 +566,7 @@ export default function DailyReportsPage() {
                 <th className="px-4 py-2.5 font-medium">Job / Customer</th>
                 <th className="px-4 py-2.5 font-medium">Area</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
+                <th className="px-4 py-2.5 font-medium">Document</th>
               </tr>
             </thead>
             <tbody>
@@ -577,6 +620,45 @@ export default function DailyReportsPage() {
                       <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${STATUS_TONE[r.status]}`}>
                         {r.status}
                       </span>
+                    </td>
+                    <td
+                      className="px-4 py-2.5 whitespace-nowrap"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {r.has_attachment ? (
+                        <div className="flex items-center gap-1">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2"
+                            disabled={docBusy !== null}
+                            onClick={() => openReportDoc(r.id, r.attachment_name, "view")}
+                            data-testid={`button-view-doc-${r.id}`}
+                          >
+                            {docBusy === `${r.id}:view` ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Eye className="h-4 w-4" />
+                            )}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 px-2"
+                            disabled={docBusy !== null}
+                            onClick={() => openReportDoc(r.id, r.attachment_name, "download")}
+                            data-testid={`button-download-doc-${r.id}`}
+                          >
+                            {docBusy === `${r.id}:download` ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Download className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </td>
                   </tr>
                 );
@@ -639,6 +721,43 @@ export default function DailyReportsPage() {
                     <div className="truncate">{r.sender_name || r.sender_email || "—"}</div>
                   </div>
                 </div>
+                {r.has_attachment && (
+                  <div
+                    className="mt-2 flex items-center gap-2"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      disabled={docBusy !== null}
+                      onClick={() => openReportDoc(r.id, r.attachment_name, "view")}
+                      data-testid={`button-view-doc-card-${r.id}`}
+                    >
+                      {docBusy === `${r.id}:view` ? (
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Eye className="mr-1.5 h-4 w-4" />
+                      )}
+                      View
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      disabled={docBusy !== null}
+                      onClick={() => openReportDoc(r.id, r.attachment_name, "download")}
+                      data-testid={`button-download-doc-card-${r.id}`}
+                    >
+                      {docBusy === `${r.id}:download` ? (
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                      ) : (
+                        <Download className="mr-1.5 h-4 w-4" />
+                      )}
+                      Download
+                    </Button>
+                  </div>
+                )}
               </div>
             );
           })}

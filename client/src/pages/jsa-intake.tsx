@@ -1,9 +1,13 @@
+import { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
+import { apiRequest } from "@/lib/queryClient";
+import { useToast } from "@/hooks/use-toast";
 import type { JsaReportWithLinks, JsaStatus } from "@shared/schema";
 import { SafetyTabs } from "@/components/SafetyTabs";
-import { Mail, Inbox, ShieldCheck } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Mail, Inbox, ShieldCheck, Eye, Download, Loader2 } from "lucide-react";
 
 const STATUS_TONE: Record<JsaStatus, string> = {
   "Needs job match": "bg-orange-500/15 text-orange-700 dark:text-orange-400",
@@ -20,10 +24,47 @@ function fmt(d: string | null) {
 export default function JsaIntakePage() {
   const [, navigate] = useLocation();
   const { profile } = useAuth();
+  const { toast } = useToast();
+  // Which row's document is loading, keyed as `${id}:${mode}`.
+  const [docBusy, setDocBusy] = useState<string | null>(null);
 
   const { data: jsas, isLoading } = useQuery<JsaReportWithLinks[]>({
     queryKey: ["/api/jsa-intake"],
   });
+
+  // Fetch a JSA's stored file (authenticated) and view or download it. Row
+  // clicks navigate to the detail page, so callers must stopPropagation.
+  async function openJsaDoc(
+    jsaId: string,
+    name: string | null,
+    mode: "view" | "download",
+  ) {
+    setDocBusy(`${jsaId}:${mode}`);
+    try {
+      const res = await apiRequest("GET", `/api/jsa-intake/${jsaId}/attachment`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      if (mode === "view") {
+        window.open(url, "_blank", "noopener,noreferrer");
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = name || "jsa";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e: any) {
+      toast({
+        title: "Could not open the document",
+        description: e.message,
+        variant: "destructive",
+      });
+    } finally {
+      setDocBusy(null);
+    }
+  }
 
   const needsMatch = (jsas || []).filter((j) => j.status === "Needs job match").length;
   const pending = (jsas || []).filter((j) => j.status === "Pending sign-off").length;
@@ -78,6 +119,7 @@ export default function JsaIntakePage() {
                 <th className="px-4 py-2.5 font-medium">Job / Customer</th>
                 <th className="px-4 py-2.5 font-medium">Area</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
+                <th className="px-4 py-2.5 font-medium">Document</th>
               </tr>
             </thead>
             <tbody>
@@ -110,6 +152,41 @@ export default function JsaIntakePage() {
                       {j.status === "Signed off" && <ShieldCheck className="h-3 w-3" />}
                       {j.status}
                     </span>
+                  </td>
+                  <td
+                    className="px-4 py-2.5 whitespace-nowrap"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="flex items-center gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2"
+                        disabled={docBusy !== null}
+                        onClick={() => openJsaDoc(j.id, j.attachment_name, "view")}
+                        data-testid={`button-view-jsa-doc-${j.id}`}
+                      >
+                        {docBusy === `${j.id}:view` ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 px-2"
+                        disabled={docBusy !== null}
+                        onClick={() => openJsaDoc(j.id, j.attachment_name, "download")}
+                        data-testid={`button-download-jsa-doc-${j.id}`}
+                      >
+                        {docBusy === `${j.id}:download` ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Download className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -146,6 +223,41 @@ export default function JsaIntakePage() {
                 Received {fmt(j.received_at)}
                 {j.jsa_date ? ` · JSA ${fmt(j.jsa_date)}` : ""}
                 {j.area ? ` · ${j.area}` : ""}
+              </div>
+              <div
+                className="mt-2 flex items-center gap-2"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  disabled={docBusy !== null}
+                  onClick={() => openJsaDoc(j.id, j.attachment_name, "view")}
+                  data-testid={`button-view-jsa-doc-card-${j.id}`}
+                >
+                  {docBusy === `${j.id}:view` ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Eye className="mr-1.5 h-4 w-4" />
+                  )}
+                  View
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  disabled={docBusy !== null}
+                  onClick={() => openJsaDoc(j.id, j.attachment_name, "download")}
+                  data-testid={`button-download-jsa-doc-card-${j.id}`}
+                >
+                  {docBusy === `${j.id}:download` ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="mr-1.5 h-4 w-4" />
+                  )}
+                  Download
+                </Button>
               </div>
             </div>
           ))}
