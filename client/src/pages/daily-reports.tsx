@@ -332,7 +332,13 @@ export default function DailyReportsPage() {
     }
   }
 
-  const { data: reports, isLoading } = useQuery<DailyReportWithLinks[]>({
+  const {
+    data: reports,
+    isLoading,
+    isError,
+    isFetching,
+    refetch,
+  } = useQuery<DailyReportWithLinks[]>({
     queryKey: ["/api/daily-reports"],
   });
 
@@ -526,6 +532,35 @@ export default function DailyReportsPage() {
 
       {isLoading ? (
         <div className="text-sm text-muted-foreground py-8 text-center">Loading…</div>
+      ) : isError ? (
+        <div
+          className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center"
+          data-testid="daily-reports-error"
+        >
+          <AlertTriangle className="h-6 w-6 mx-auto text-amber-500 mb-2" />
+          <div className="text-sm font-medium">Couldn't load daily reports</div>
+          <div className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+            The reports are still saved — the request to load them didn't go
+            through. This is usually a brief network hiccup. Try again.
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-3"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            data-testid="button-retry-daily-reports"
+          >
+            {isFetching ? (
+              <>
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                Retrying…
+              </>
+            ) : (
+              "Retry"
+            )}
+          </Button>
+        </div>
       ) : rows.length === 0 ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <Inbox className="h-6 w-6 mx-auto text-muted-foreground mb-2" />

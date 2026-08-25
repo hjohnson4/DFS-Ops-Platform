@@ -64,14 +64,26 @@ export const getQueryFn: <T>(options: {
     return await res.json();
   };
 
+// A 401 means the in-memory token is missing/expired — retrying won't help and
+// only delays the sign-in redirect. Everything else (network blips, a cold
+// Supabase connection, transient Cloudflare 5xx) is worth a couple of retries
+// so a single hiccup doesn't make a list look empty.
+function isAuthError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /\b401\b|unauthorized|not authenticated|invalid token|jwt/i.test(msg);
+}
+
 export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       queryFn: getQueryFn({ on401: "throw" }),
       refetchInterval: false,
-      refetchOnWindowFocus: false,
+      refetchOnWindowFocus: true,
       staleTime: 30_000,
-      retry: false,
+      // Retry transient failures up to 2 times with backoff; never retry auth.
+      retry: (failureCount, error) =>
+        !isAuthError(error) && failureCount < 2,
+      retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 4000),
     },
     mutations: {
       retry: false,

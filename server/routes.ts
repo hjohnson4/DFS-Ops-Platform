@@ -4158,10 +4158,29 @@ export async function registerRoutes(
   app.get("/api/daily-reports", requireAuth, async (req: Request, res: Response) => {
     const scope = areaScopeOf(req.profile!);
     const jobIds = await jobScopeOf(req.profile!);
+    // IMPORTANT: never select attachment_base64 (or raw_body) in the LIST — the
+    // workbook bytes average ~1.7 MB per row, so `select *` pulls tens of MB per
+    // page load only to throw the bytes away below. On the free-tier connection
+    // that large transfer is what intermittently timed out and made the list
+    // look empty. We select an explicit column set (all list-relevant fields
+    // minus the heavy blobs) and derive `has_attachment` from attachment_size,
+    // which is set for exactly the rows that have stored bytes. The detail page
+    // and /attachment route still load the bytes on demand.
+    const LIST_COLUMNS = [
+      "id", "email_message_id", "sender_email", "sender_name", "subject",
+      "received_at", "area", "customer_id", "job_id", "report_date", "summary",
+      "analysis", "status", "reviewed_by", "reviewed_by_name", "reviewed_at",
+      "change_notes", "email_out_status", "email_out_at", "created_at",
+      "well_name", "kpis", "source", "attachment_name", "source_sheet",
+      "report_day", "kpi_cell_map", "well_context", "report_number",
+      "work_summary", "crew_hours", "crew", "asset_ids", "comments",
+      "submitted_by", "signed_by", "signed_at", "run_hours_applied",
+      "attachment_mime", "attachment_size",
+    ].join(", ");
     let q = supabaseAnon
       .from("daily_reports")
       .select(
-        "*, customer:customers(name), job:jobs(job_number), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)",
+        `${LIST_COLUMNS}, customer:customers(name), job:jobs(job_number), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)`,
       )
       // Sort by the report's OWN date (the day the work happened), newest first,
       // so every day of a well sits in date order regardless of when the row was
@@ -4182,11 +4201,11 @@ export async function registerRoutes(
       job_number: r.job?.job_number ?? null,
       submitted_by_name: r.submitter?.name ?? null,
       signed_by_name: r.signer?.name ?? null,
-      // Never ship the heavy workbook bytes in the list; the detail page and
-      // the /attachment route load them on demand. Keep a boolean flag so the
-      // UI can decide whether to show the "View document" link.
-      has_attachment: !!r.attachment_base64,
-      attachment_base64: undefined,
+      // The workbook bytes are no longer fetched in the list query (see
+      // LIST_COLUMNS above). attachment_size is set for exactly the rows that
+      // have stored bytes, so it's the correct signal for whether to show the
+      // "View document" link — the detail/attachment routes load the bytes.
+      has_attachment: !!r.attachment_size,
       customer: undefined,
       job: undefined,
       submitter: undefined,
