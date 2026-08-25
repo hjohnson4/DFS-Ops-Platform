@@ -79,10 +79,24 @@ function toText(v: any): string | null {
 }
 
 // Excel serial date -> yyyy-mm-dd. Handles both real dates and serial numbers.
+//
+// IMPORTANT: never use Date.toISOString() here. SheetJS (cellDates:true) builds
+// the Date at LOCAL midnight for the workbook's calendar day, so converting to
+// UTC with toISOString() shifts the day by one whenever the server runs in a
+// timezone offset from UTC (this is exactly what put backfilled report dates a
+// day late on Vercel). Read the LOCAL Y/M/D components instead, which give back
+// the calendar day SheetJS intended, on any runtime.
+function ymdLocal(d: Date): string {
+  const y = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
+
 function toDateStr(v: any): string | null {
   if (v === null || v === undefined || v === "") return null;
   if (v instanceof Date) {
-    return v.toISOString().slice(0, 10);
+    return ymdLocal(v);
   }
   if (typeof v === "number") {
     const d = XLSX.SSF ? XLSX.SSF.parse_date_code(v) : null;
@@ -96,8 +110,16 @@ function toDateStr(v: any): string | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
   const parsed = new Date(s);
-  if (!isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  if (!isNaN(parsed.getTime())) return ymdLocal(parsed);
   return null;
+}
+
+// Add a whole number of days to a yyyy-mm-dd string, returning yyyy-mm-dd.
+// Uses UTC so it never shifts across a day boundary due to local time zones.
+function addDaysToDateStr(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 
 // Measured depth (AI9) is the reliable "this day was actually worked" signal.
@@ -299,5 +321,32 @@ export function parseAllCompletedDays(buf: Buffer): ParsedDailyReport[] {
     throw new ExcelParseError(
       "No completed day tabs found in the workbook. Fill in at least one Report Day before importing.",
     );
-  return completed.map((d) => parseDaySheet(wb, d, false));
+  const parsed = completed.map((d) => parseDaySheet(wb, d, false));
+
+  // Fill in any missing per-day dates. A completed day whose D3 date cell is
+  // blank or unparseable (seen in real workbooks where the last worked day was
+  // saved before its date recalculated) would otherwise fall back to "today".
+  // Instead, infer it from a neighboring day that DID parse: dates run one per
+  // consecutive day, so day N's date = anchor date + (N - anchor's day index).
+  // Walk forward from the first parsed date, then backward, so a gap anywhere
+  // in the sequence is filled deterministically from real data — never today.
+  for (let i = 1; i < parsed.length; i++) {
+    if (!parsed[i].report_date && parsed[i - 1].report_date) {
+      const gap = parsed[i].report_day - parsed[i - 1].report_day;
+      parsed[i].report_date = addDaysToDateStr(
+        parsed[i - 1].report_date as string,
+        gap,
+      );
+    }
+  }
+  for (let i = parsed.length - 2; i >= 0; i--) {
+    if (!parsed[i].report_date && parsed[i + 1].report_date) {
+      const gap = parsed[i + 1].report_day - parsed[i].report_day;
+      parsed[i].report_date = addDaysToDateStr(
+        parsed[i + 1].report_date as string,
+        -gap,
+      );
+    }
+  }
+  return parsed;
 }
