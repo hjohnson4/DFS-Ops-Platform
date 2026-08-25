@@ -2399,7 +2399,15 @@ export async function registerRoutes(
   // ---- Assets -------------------------------------------------------------
   app.get("/api/assets", requireAuth, async (req: Request, res: Response) => {
     const scope = areaScopeOf(req.profile!);
-    const jobIds = await jobScopeOf(req.profile!);
+    // Field techs see ONLY assets currently deployed on a job they are assigned
+    // to — never the wider area view. A field tech with no assignments therefore
+    // sees no assets (fieldJobIds = []), rather than falling back to area scope.
+    // Other roles keep their normal (area or unrestricted) visibility.
+    let fieldJobIds: string[] | null = null;
+    if (req.profile!.role === "field") {
+      fieldJobIds = (await jobScopeOf(req.profile!)) ?? [];
+      if (fieldJobIds.length === 0) return res.json([]);
+    }
     let q = supabaseAnon
       .from("assets")
       .select(
@@ -2407,8 +2415,7 @@ export async function registerRoutes(
       )
       .order("tag");
     if (scope) q = q.eq("area", scope);
-    // Assigned field techs only see assets deployed on their assigned jobs.
-    if (jobIds) q = q.in("job_id", jobIds);
+    if (fieldJobIds) q = q.in("job_id", fieldJobIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
     res.json(data);
@@ -2423,6 +2430,7 @@ export async function registerRoutes(
   app.get(
     "/api/assets/utilization.csv",
     requireAuth,
+    requireRole("admin", "area", "super"),
     async (req: Request, res: Response) => {
       const scope = areaScopeOf(req.profile!);
       const client = supabaseAdmin || supabaseAnon;
@@ -2515,6 +2523,7 @@ export async function registerRoutes(
   app.get(
     "/api/assets/utilization.json",
     requireAuth,
+    requireRole("admin", "area", "super"),
     async (req: Request, res: Response) => {
       const scope = areaScopeOf(req.profile!);
       const client = supabaseAdmin || supabaseAnon;
@@ -2630,6 +2639,15 @@ export async function registerRoutes(
         return res.status(404).json({ message: "Asset not found" });
       if (scope && (asset as any).area !== scope)
         return res.status(403).json({ message: "Outside your area" });
+      // Field techs may only open an asset that is on one of their assigned
+      // jobs — matches the list view's job-only scope so an off-job asset can't
+      // be reached directly by ID. No assignments => no asset access.
+      if (req.profile!.role === "field") {
+        const fieldJobIds = (await jobScopeOf(req.profile!)) ?? [];
+        const assetJobId = (asset as any).job_id;
+        if (!assetJobId || !fieldJobIds.includes(assetJobId))
+          return res.status(404).json({ message: "Asset not found" });
+      }
 
       // Maintenance/inspection history: all reports for this asset, newest first,
       // with the filing supervisor's name joined in.

@@ -537,6 +537,16 @@ function AssetDetailDialog({
               <div>
                 <div className="text-xs text-muted-foreground mb-0.5">Run hours</div>
                 <div>{data.run_hours ?? "\u2014"}</div>
+                {tracksRunHours(data.category) && (
+                  <div className="text-xs text-muted-foreground mt-0.5">
+                    {data.run_hours_since_service != null
+                      ? `${data.run_hours_since_service.toLocaleString()} hrs since last service`
+                      : "\u2014 since last service"}
+                    {data.service_hours_interval
+                      ? ` (service every ${data.service_hours_interval.toLocaleString()} hrs)`
+                      : ""}
+                  </div>
+                )}
               </div>
               <div>
                 <div className="text-xs text-muted-foreground mb-0.5 flex items-center gap-1">
@@ -720,6 +730,7 @@ export default function AssetsPage() {
   const { profile } = useAuth();
   const canManage = profile?.role === "admin" || profile?.role === "area";
   const areaLocked = profile?.role === "area";
+  const isField = profile?.role === "field";
   const defaultArea = profile?.area ?? "";
 
   const { data: assets, isLoading } = useQuery<AssetWithSchedule[]>({
@@ -761,7 +772,7 @@ export default function AssetsPage() {
           <h1 className="text-xl font-semibold">Assets</h1>
         </div>
         <div className="flex items-center gap-2">
-          {rows.length > 0 && <ExportUtilizationDialog />}
+          {rows.length > 0 && !isField && <ExportUtilizationDialog />}
           {canManage && (
             <>
               <ManageSchedulesDialog schedules={scheduleList} />
@@ -775,8 +786,9 @@ export default function AssetsPage() {
         </div>
       </div>
       <p className="text-sm text-muted-foreground mb-4">
-        Your equipment fleet across{" "}
-        {profile?.area ? profile.area : "all areas"}.
+        {isField
+          ? "Equipment on the jobs you're assigned to."
+          : `Your equipment fleet across ${profile?.area ? profile.area : "all areas"}.`}
       </p>
 
       {/* Search */}
@@ -812,7 +824,9 @@ export default function AssetsPage() {
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <Boxes className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
           <div className="text-sm text-muted-foreground">
-            No assets on file yet.
+            {isField
+              ? "No equipment is currently on your assigned jobs."
+              : "No assets on file yet."}
           </div>
           {canManage && (
             <div className="text-xs text-muted-foreground mt-1">

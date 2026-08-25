@@ -2390,12 +2390,16 @@ async function registerRoutes(httpServer, app) {
   );
   app.get("/api/assets", requireAuth, async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    const jobIds = await jobScopeOf(req.profile);
+    let fieldJobIds = null;
+    if (req.profile.role === "field") {
+      fieldJobIds = await jobScopeOf(req.profile) ?? [];
+      if (fieldJobIds.length === 0) return res.json([]);
+    }
     let q = supabaseAnon.from("assets").select(
       "*, maintenance_schedule:maintenance_schedules(*), job:jobs(id,job_number,well_name,area,status)"
     ).order("tag");
     if (scope) q = q.eq("area", scope);
-    if (jobIds) q = q.in("job_id", jobIds);
+    if (fieldJobIds) q = q.in("job_id", fieldJobIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
     res.json(data);
@@ -2403,6 +2407,7 @@ async function registerRoutes(httpServer, app) {
   app.get(
     "/api/assets/utilization.csv",
     requireAuth,
+    requireRole("admin", "area", "super"),
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
       const client = supabaseAdmin || supabaseAnon;
@@ -2490,6 +2495,7 @@ async function registerRoutes(httpServer, app) {
   app.get(
     "/api/assets/utilization.json",
     requireAuth,
+    requireRole("admin", "area", "super"),
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
       const client = supabaseAdmin || supabaseAnon;
@@ -2582,6 +2588,12 @@ async function registerRoutes(httpServer, app) {
         return res.status(404).json({ message: "Asset not found" });
       if (scope && asset.area !== scope)
         return res.status(403).json({ message: "Outside your area" });
+      if (req.profile.role === "field") {
+        const fieldJobIds = await jobScopeOf(req.profile) ?? [];
+        const assetJobId = asset.job_id;
+        if (!assetJobId || !fieldJobIds.includes(assetJobId))
+          return res.status(404).json({ message: "Asset not found" });
+      }
       const { data: reps } = await client.from("maintenance_reports").select(
         "id, work_type, status, report_date, filed_at, notes, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)"
       ).eq("asset_id", req.params.id).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
