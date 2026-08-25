@@ -354,7 +354,12 @@ export async function registerRoutes(
 
       type Notification = {
         id: string;
-        type: "maintenance_due" | "signoff_overdue" | "signoff_pending" | "new_report";
+        type:
+          | "maintenance_due"
+          | "signoff_overdue"
+          | "signoff_pending"
+          | "new_report"
+          | "changes_requested";
         severity: "warning" | "info";
         title: string;
         detail: string;
@@ -362,6 +367,9 @@ export async function registerRoutes(
         ts: string | null;
       };
       const items: Notification[] = [];
+
+      const myId = req.profile!.id;
+      const myEmail = (req.profile!.email || "").toLowerCase();
 
       // 1) Assets due / overdue for service (run-hour centrifuges).
       let aq = client
@@ -432,6 +440,65 @@ export async function registerRoutes(
               ts: basis || null,
             });
           }
+        }
+      }
+
+      // 4) Changes requested on MY reports/JSAs. This is the field-tech loop:
+      //    when a reviewer bounces a report or JSA back, the person who filed it
+      //    (or, for emailed reports, whose address it came from) sees it here so
+      //    they know to fix and resubmit. Runs for every role — anyone can file.
+      {
+        // Daily reports I submitted (field reports) OR that were emailed from my
+        // address (emailed reports), currently in "Changes requested".
+        const orFilter = myEmail
+          ? `submitted_by.eq.${myId},sender_email.ilike.${myEmail}`
+          : `submitted_by.eq.${myId}`;
+        const { data: crReports, error: crErr } = await client
+          .from("daily_reports")
+          .select(
+            "id, well_name, area, report_date, received_at, change_notes, reviewed_by_name, reviewed_at",
+          )
+          .eq("status", "Changes requested")
+          .or(orFilter);
+        if (crErr) console.error("[notifications] changes_requested reports", crErr.message);
+        for (const r of (crReports || []) as any[]) {
+          const well = r.well_name ? ` · ${r.well_name}` : "";
+          const by = r.reviewed_by_name ? ` by ${r.reviewed_by_name}` : "";
+          const note = (r.change_notes || "").trim();
+          items.push({
+            id: `cr-report-${r.id}`,
+            type: "changes_requested",
+            severity: "warning",
+            title: `Changes requested on your report${by}`,
+            detail: note
+              ? note
+              : `${well ? well.slice(3) : "Daily report"}${r.area ? ` · ${r.area}` : ""}`,
+            href: `/daily-reports/${r.id}`,
+            ts: r.reviewed_at || r.received_at || r.report_date || null,
+          });
+        }
+
+        // JSAs I submitted, currently in "Changes requested".
+        const { data: crJsas, error: crjErr } = await client
+          .from("jsas")
+          .select(
+            "id, job_id, jsa_number, well_name, change_notes, created_at",
+          )
+          .eq("status", "Changes requested")
+          .eq("submitted_by", myId);
+        if (crjErr) console.error("[notifications] changes_requested jsas", crjErr.message);
+        for (const j of (crJsas || []) as any[]) {
+          const well = j.well_name ? ` · ${j.well_name}` : "";
+          const note = (j.change_notes || "").trim();
+          items.push({
+            id: `cr-jsa-${j.id}`,
+            type: "changes_requested",
+            severity: "warning",
+            title: `Changes requested on your JSA #${j.jsa_number}`,
+            detail: note ? note : `JSA #${j.jsa_number}${well}`,
+            href: `/jobs/${j.job_id}`,
+            ts: j.created_at || null,
+          });
         }
       }
 
@@ -2583,7 +2650,16 @@ export async function registerRoutes(
         notes: r.notes,
         supervisor_name: r.supervisor?.name ?? null,
       }));
-      res.json({ ...asset, history });
+      // Derive the run-hours-since-service view for centrifuges so the asset
+      // detail can show "X hrs since last service" alongside the raw meter.
+      const { hoursSince, interval, state } = serviceStatusFor(asset as any);
+      res.json({
+        ...asset,
+        run_hours_since_service: hoursSince,
+        service_hours_interval: interval,
+        service_state: state,
+        history,
+      });
     },
   );
 
@@ -3812,6 +3888,56 @@ export async function registerRoutes(
     });
   });
 
+  // Run-hours context for the sign-off UI: the day's hours (M33) plus the
+  // centrifuges on the report's matched job. The frontend uses this to decide
+  // whether to auto-apply (0 or 1 centrifuge) or prompt for a per-asset split.
+  app.get(
+    "/api/daily-reports/:id/centrifuges",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client
+        .from("daily_reports")
+        .select("id, area, job_id, kpis, run_hours_applied")
+        .eq("id", req.params.id)
+        .single();
+      if (rErr || !report)
+        return res.status(404).json({ message: "Report not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && report.area !== scope)
+        return res.status(404).json({ message: "Report not found" });
+
+      const dailyRaw = (report.kpis as any)?.daily_run_hours;
+      const daily_run_hours =
+        dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+
+      let centrifuges: any[] = [];
+      if (report.job_id) {
+        const { data: assets } = await client
+          .from("assets")
+          .select("id, tag, category, run_hours")
+          .eq("job_id", report.job_id)
+          .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
+        centrifuges = (assets || []).map((a: any) => ({
+          id: a.id,
+          tag: a.tag,
+          category: a.category,
+          run_hours: a.run_hours,
+        }));
+      }
+
+      res.json({
+        daily_run_hours:
+          daily_run_hours != null && Number.isFinite(daily_run_hours)
+            ? daily_run_hours
+            : null,
+        already_applied: !!report.run_hours_applied,
+        centrifuges,
+      });
+    },
+  );
+
   // Review: sign off OR request changes (area managers + supervisors)
   app.post(
     "/api/daily-reports/:id/review",
@@ -3839,6 +3965,85 @@ export async function registerRoutes(
       const reviewer = req.profile!;
 
       if (parsed.data.action === "sign_off") {
+        // ---- Roll the day's run hours (M33) onto the job's centrifuges -------
+        // Only centrifuges accumulate run hours, only at sign-off, and only
+        // once per report (run_hours_applied guards against double-counting).
+        let runHourDetail: string | null = null;
+        const dailyRaw = (report.kpis as any)?.daily_run_hours;
+        const dailyHours =
+          dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+
+        if (
+          !report.run_hours_applied &&
+          report.job_id &&
+          dailyHours != null &&
+          Number.isFinite(dailyHours) &&
+          dailyHours > 0
+        ) {
+          const { data: centAssets } = await client
+            .from("assets")
+            .select("id, tag, category, run_hours")
+            .eq("job_id", report.job_id)
+            .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
+          const centrifuges = centAssets || [];
+
+          // Decide per-asset hours.
+          let allocation: { asset_id: string; tag: string; add: number }[] = [];
+          if (centrifuges.length === 1) {
+            // Single centrifuge: the whole day's hours go to it automatically.
+            const c = centrifuges[0] as any;
+            allocation = [{ asset_id: c.id, tag: c.tag, add: dailyHours }];
+          } else if (centrifuges.length >= 2) {
+            // Multiple centrifuges: the reviewer MUST split the hours per asset.
+            const provided = parsed.data.run_hour_allocations;
+            if (!provided || provided.length === 0) {
+              return res.status(400).json({
+                message:
+                  "This job has multiple centrifuges. Allocate the day's run hours to each before signing off.",
+              });
+            }
+            const validIds = new Set(centrifuges.map((c: any) => c.id));
+            for (const a of provided) {
+              if (!validIds.has(a.asset_id))
+                return res.status(400).json({
+                  message: "Allocation references an asset that isn't a centrifuge on this job.",
+                });
+            }
+            const sum = provided.reduce((s, a) => s + a.hours, 0);
+            // Allow a tiny rounding tolerance against the day's total.
+            if (Math.abs(sum - dailyHours) > 0.01) {
+              return res.status(400).json({
+                message: `Allocated hours (${sum}) must add up to the day's run hours (${dailyHours}).`,
+              });
+            }
+            allocation = provided
+              .filter((a) => a.hours > 0)
+              .map((a) => {
+                const c = centrifuges.find((x: any) => x.id === a.asset_id) as any;
+                return { asset_id: a.asset_id, tag: c?.tag ?? a.asset_id, add: a.hours };
+              });
+          }
+
+          // Apply the deltas (running sum on asset.run_hours).
+          const applied: string[] = [];
+          for (const a of allocation) {
+            const cur = centrifuges.find((x: any) => x.id === a.asset_id) as any;
+            const base = Number(cur?.run_hours ?? 0) || 0;
+            const next = base + a.add;
+            const { error: uErr } = await client
+              .from("assets")
+              .update({ run_hours: next })
+              .eq("id", a.asset_id);
+            if (uErr)
+              return res.status(400).json({
+                message: `Could not update run hours for ${a.tag}: ${uErr.message}`,
+              });
+            applied.push(`${a.tag} +${a.add} hrs`);
+          }
+          if (applied.length > 0)
+            runHourDetail = `Run hours applied: ${applied.join(", ")}`;
+        }
+
         const { data, error } = await client
           .from("daily_reports")
           .update({
@@ -3847,6 +4052,7 @@ export async function registerRoutes(
             reviewed_by_name: reviewer.name,
             reviewed_at: now,
             change_notes: null,
+            run_hours_applied: runHourDetail ? true : report.run_hours_applied,
           })
           .eq("id", report.id)
           .select()
@@ -3858,7 +4064,7 @@ export async function registerRoutes(
           actor_name: reviewer.name,
           actor_role: reviewer.role,
           action: "signed_off",
-          detail: null,
+          detail: runHourDetail,
         });
         return res.json(data);
       }

@@ -648,7 +648,16 @@ var ingestDailyReportSchema = z.object({
 });
 var reviewDailyReportSchema = z.object({
   action: z.enum(["sign_off", "request_changes"]),
-  change_notes: z.string().nullable().optional()
+  change_notes: z.string().nullable().optional(),
+  // Optional per-centrifuge split of the day's run hours, supplied only when
+  // signing off a report whose job has 2+ centrifuges. When omitted, the
+  // server auto-applies the full day's hours to a single centrifuge (or none).
+  run_hour_allocations: z.array(
+    z.object({
+      asset_id: z.string().min(1),
+      hours: z.number().min(0)
+    })
+  ).optional()
 }).refine(
   (d) => d.action !== "request_changes" || !!(d.change_notes && d.change_notes.trim()),
   { message: "Suggested changes are required when requesting changes.", path: ["change_notes"] }
@@ -999,6 +1008,8 @@ async function registerRoutes(httpServer, app) {
       const DAY = 24 * 60 * 60 * 1e3;
       const SIGNOFF_OVERDUE_DAYS = 2;
       const items = [];
+      const myId = req.profile.id;
+      const myEmail = (req.profile.email || "").toLowerCase();
       let aq = client.from("assets").select("id, tag, category, area, run_hours, run_hours_at_service, service_hours_interval").in("category", RUN_HOUR_CATEGORIES);
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
@@ -1051,6 +1062,44 @@ async function registerRoutes(httpServer, app) {
               ts: basis || null
             });
           }
+        }
+      }
+      {
+        const orFilter = myEmail ? `submitted_by.eq.${myId},sender_email.ilike.${myEmail}` : `submitted_by.eq.${myId}`;
+        const { data: crReports, error: crErr } = await client.from("daily_reports").select(
+          "id, well_name, area, report_date, received_at, change_notes, reviewed_by_name, reviewed_at"
+        ).eq("status", "Changes requested").or(orFilter);
+        if (crErr) console.error("[notifications] changes_requested reports", crErr.message);
+        for (const r of crReports || []) {
+          const well = r.well_name ? ` \xB7 ${r.well_name}` : "";
+          const by = r.reviewed_by_name ? ` by ${r.reviewed_by_name}` : "";
+          const note = (r.change_notes || "").trim();
+          items.push({
+            id: `cr-report-${r.id}`,
+            type: "changes_requested",
+            severity: "warning",
+            title: `Changes requested on your report${by}`,
+            detail: note ? note : `${well ? well.slice(3) : "Daily report"}${r.area ? ` \xB7 ${r.area}` : ""}`,
+            href: `/daily-reports/${r.id}`,
+            ts: r.reviewed_at || r.received_at || r.report_date || null
+          });
+        }
+        const { data: crJsas, error: crjErr } = await client.from("jsas").select(
+          "id, job_id, jsa_number, well_name, change_notes, created_at"
+        ).eq("status", "Changes requested").eq("submitted_by", myId);
+        if (crjErr) console.error("[notifications] changes_requested jsas", crjErr.message);
+        for (const j of crJsas || []) {
+          const well = j.well_name ? ` \xB7 ${j.well_name}` : "";
+          const note = (j.change_notes || "").trim();
+          items.push({
+            id: `cr-jsa-${j.id}`,
+            type: "changes_requested",
+            severity: "warning",
+            title: `Changes requested on your JSA #${j.jsa_number}`,
+            detail: note ? note : `JSA #${j.jsa_number}${well}`,
+            href: `/jobs/${j.job_id}`,
+            ts: j.created_at || null
+          });
         }
       }
       items.sort((x, y) => {
@@ -2545,7 +2594,14 @@ async function registerRoutes(httpServer, app) {
         notes: r.notes,
         supervisor_name: r.supervisor?.name ?? null
       }));
-      res.json({ ...asset, history });
+      const { hoursSince, interval, state } = serviceStatusFor(asset);
+      res.json({
+        ...asset,
+        run_hours_since_service: hoursSince,
+        service_hours_interval: interval,
+        service_state: state,
+        history
+      });
     }
   );
   app.post(
@@ -3387,6 +3443,37 @@ async function registerRoutes(httpServer, app) {
       events: events || []
     });
   });
+  app.get(
+    "/api/daily-reports/:id/centrifuges",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client.from("daily_reports").select("id, area, job_id, kpis, run_hours_applied").eq("id", req.params.id).single();
+      if (rErr || !report)
+        return res.status(404).json({ message: "Report not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && report.area !== scope)
+        return res.status(404).json({ message: "Report not found" });
+      const dailyRaw = report.kpis?.daily_run_hours;
+      const daily_run_hours = dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+      let centrifuges = [];
+      if (report.job_id) {
+        const { data: assets } = await client.from("assets").select("id, tag, category, run_hours").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+        centrifuges = (assets || []).map((a) => ({
+          id: a.id,
+          tag: a.tag,
+          category: a.category,
+          run_hours: a.run_hours
+        }));
+      }
+      res.json({
+        daily_run_hours: daily_run_hours != null && Number.isFinite(daily_run_hours) ? daily_run_hours : null,
+        already_applied: !!report.run_hours_applied,
+        centrifuges
+      });
+    }
+  );
   app.post(
     "/api/daily-reports/:id/review",
     requireAuth,
@@ -3405,12 +3492,63 @@ async function registerRoutes(httpServer, app) {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const reviewer = req.profile;
       if (parsed.data.action === "sign_off") {
+        let runHourDetail = null;
+        const dailyRaw = report.kpis?.daily_run_hours;
+        const dailyHours = dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+        if (!report.run_hours_applied && report.job_id && dailyHours != null && Number.isFinite(dailyHours) && dailyHours > 0) {
+          const { data: centAssets } = await client.from("assets").select("id, tag, category, run_hours").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+          const centrifuges = centAssets || [];
+          let allocation = [];
+          if (centrifuges.length === 1) {
+            const c = centrifuges[0];
+            allocation = [{ asset_id: c.id, tag: c.tag, add: dailyHours }];
+          } else if (centrifuges.length >= 2) {
+            const provided = parsed.data.run_hour_allocations;
+            if (!provided || provided.length === 0) {
+              return res.status(400).json({
+                message: "This job has multiple centrifuges. Allocate the day's run hours to each before signing off."
+              });
+            }
+            const validIds = new Set(centrifuges.map((c) => c.id));
+            for (const a of provided) {
+              if (!validIds.has(a.asset_id))
+                return res.status(400).json({
+                  message: "Allocation references an asset that isn't a centrifuge on this job."
+                });
+            }
+            const sum = provided.reduce((s, a) => s + a.hours, 0);
+            if (Math.abs(sum - dailyHours) > 0.01) {
+              return res.status(400).json({
+                message: `Allocated hours (${sum}) must add up to the day's run hours (${dailyHours}).`
+              });
+            }
+            allocation = provided.filter((a) => a.hours > 0).map((a) => {
+              const c = centrifuges.find((x) => x.id === a.asset_id);
+              return { asset_id: a.asset_id, tag: c?.tag ?? a.asset_id, add: a.hours };
+            });
+          }
+          const applied = [];
+          for (const a of allocation) {
+            const cur = centrifuges.find((x) => x.id === a.asset_id);
+            const base = Number(cur?.run_hours ?? 0) || 0;
+            const next = base + a.add;
+            const { error: uErr } = await client.from("assets").update({ run_hours: next }).eq("id", a.asset_id);
+            if (uErr)
+              return res.status(400).json({
+                message: `Could not update run hours for ${a.tag}: ${uErr.message}`
+              });
+            applied.push(`${a.tag} +${a.add} hrs`);
+          }
+          if (applied.length > 0)
+            runHourDetail = `Run hours applied: ${applied.join(", ")}`;
+        }
         const { data: data2, error: error2 } = await client.from("daily_reports").update({
           status: "Signed off",
           reviewed_by: reviewer.id,
           reviewed_by_name: reviewer.name,
           reviewed_at: now,
-          change_notes: null
+          change_notes: null,
+          run_hours_applied: runHourDetail ? true : report.run_hours_applied
         }).eq("id", report.id).select().single();
         if (error2) return res.status(400).json({ message: error2.message });
         await client.from("daily_report_events").insert({
@@ -3419,7 +3557,7 @@ async function registerRoutes(httpServer, app) {
           actor_name: reviewer.name,
           actor_role: reviewer.role,
           action: "signed_off",
-          detail: null
+          detail: runHourDetail
         });
         return res.json(data2);
       }
