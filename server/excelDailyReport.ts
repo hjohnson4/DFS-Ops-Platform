@@ -19,12 +19,15 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   { field: "lgs_pct", cell: "G15", numeric: true },
   // Retort R.O.C %: labeled row 26 (value cell blank when not run that day).
   { field: "retort_roc_pct", cell: "I26", numeric: true },
-  // Fluid recovery & run hours: value in merged cell M (M:P).
+  // Fluid recovery: value in merged cell M (M:P).
   { field: "daily_fluid_recovery_bbl", cell: "M31", numeric: true },
   { field: "total_fluid_recovery_bbl", cell: "M32", numeric: true },
-  { field: "daily_run_hours", cell: "M33", numeric: true },
-  { field: "total_run_hours", cell: "M34", numeric: true },
-  { field: "maintenance_hours", cell: "M35", numeric: true },
+  // Centrifuge run/maintenance hours: value in the merged AA block (AA:AF),
+  // labeled in col R. This is the block the crews actually fill in — the old
+  // col-M rows 33-35 are a legacy summary area that stays zero.
+  { field: "daily_run_hours", cell: "AA37", numeric: true },
+  { field: "total_run_hours", cell: "AA38", numeric: true },
+  { field: "maintenance_hours", cell: "AA39", numeric: true },
   // Additions: value in merged cell H (H:J), Daily column.
   { field: "add_base_diesel_bbl", cell: "H45", numeric: true },
   { field: "add_water_bbl", cell: "H46", numeric: true },
