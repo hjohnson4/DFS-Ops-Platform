@@ -1,5 +1,5 @@
 import { build as viteBuild } from "vite";
-import { rm } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 
 // Client-only build for the Vercel deployment target.
 //
@@ -15,7 +15,22 @@ async function buildClient() {
   await rm("dist/public", { recursive: true, force: true });
   console.log("building client (Vercel target)...");
   await viteBuild();
-  console.log("client build complete → dist/public");
+
+  // Stamp a build version the running app can poll to detect new deploys.
+  // Content-hashed JS/CSS filenames change every build, but this file lives at a
+  // stable URL (/version.json), so the client can compare the version it booted
+  // with against the currently-deployed one and prompt a refresh when they
+  // differ. VERCEL_GIT_COMMIT_SHA is set automatically on Vercel builds; we fall
+  // back to a build timestamp locally.
+  const version =
+    process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) ||
+    `build-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  await writeFile(
+    "dist/public/version.json",
+    JSON.stringify({ version, built_at: new Date().toISOString() }) + "\n",
+    "utf8",
+  );
+  console.log(`client build complete → dist/public (version ${version})`);
 }
 
 buildClient().catch((err) => {

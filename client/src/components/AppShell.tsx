@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import logoUrl from "@/assets/dfs-logo.png";
 import PdfPreviewModal from "@/components/PdfPreviewModal";
 import NotificationBell from "@/components/NotificationBell";
+import UpdateBanner from "@/components/UpdateBanner";
 import {
   LayoutDashboard,
   Building2,
@@ -259,6 +260,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
           </Button>
           <NotificationBell />
         </div>
+        <UpdateBanner />
         {children}
       </main>
       {/* Global in-page PDF preview (shared by all exports) */}
