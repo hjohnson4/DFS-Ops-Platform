@@ -8,7 +8,7 @@
 // From that timeline we derive:
 //   - days on each well (and per stint),
 //   - accrued revenue per well  = day_rate ($/day) × days,
-//   - the job's current well    = the well on the most recent report.
+//   - the job's current well    = the well on the most recently SUBMITTED report.
 //
 // This is a DERIVATION ONLY. It writes nothing and needs no schema change; it
 // runs entirely on data already returned by /api/daily-reports. Because it is
@@ -44,7 +44,7 @@ export interface WellTotal {
 export interface WellTimeline {
   stints: WellStint[]; // chronological
   wells: WellTotal[]; // one row per distinct well, sorted by reportDays desc
-  currentWell: string | null; // well on the most recent report
+  currentWell: string | null; // well on the most recently submitted report
   currentWellKnown: boolean;
   totalReportDays: number; // reports that had a usable date
   distinctWells: number; // known wells only
@@ -158,7 +158,26 @@ export function buildWellTimeline(
 
   const totalReportDays = dated.length;
   const distinctWells = wells.filter((w) => w.wellKnown).length;
-  const lastReport = dated[dated.length - 1]?.r;
+  // Current well = the well on the MOST RECENTLY SUBMITTED report, ordered by
+  // submission time (created_at, falling back to received_at) — NOT by the
+  // report's own calendar date. A crew can submit an older-dated report after a
+  // newer one, and a report can arrive with a missing/late report_date; in both
+  // cases the latest-dated report is the wrong signal for "where the crew is
+  // now." Submission time answers "what did we most recently hear," which is the
+  // job's current well. The chronological stints above still use report_date.
+  const submittedSort = (r: DailyReportWithLinks): string =>
+    String(r.created_at || r.received_at || "");
+  const bySubmission = [...reports].sort((a, b) => {
+    const sa = submittedSort(a);
+    const sb = submittedSort(b);
+    if (sa !== sb) return sa < sb ? 1 : -1; // newest submission first
+    // Stable tiebreak: higher report_day, then id, so the ordering is deterministic.
+    const an = a.report_day ?? 0;
+    const bn = b.report_day ?? 0;
+    if (an !== bn) return bn - an;
+    return a.id < b.id ? 1 : -1;
+  });
+  const lastReport = bySubmission[0];
   const cur = lastReport ? normWell(lastReport.well_name) : { label: null, known: false };
 
   // ---- Honesty caveats -----------------------------------------------------
