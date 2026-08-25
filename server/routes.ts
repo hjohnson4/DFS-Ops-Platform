@@ -4163,6 +4163,11 @@ export async function registerRoutes(
       .select(
         "*, customer:customers(name), job:jobs(job_number), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)",
       )
+      // Sort by the report's OWN date (the day the work happened), newest first,
+      // so every day of a well sits in date order regardless of when the row was
+      // imported or emailed in. received_at is only a tiebreak. nullsFirst:false
+      // keeps any date-less rows at the bottom instead of jumping to the top.
+      .order("report_date", { ascending: false, nullsFirst: false })
       .order("received_at", { ascending: false });
     // area managers/supervisors/field only see their own area (+ any unclassified in their area);
     // admins see all. Unclassified (area is null) are visible to admins only.
