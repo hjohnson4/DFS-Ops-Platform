@@ -25,7 +25,8 @@ const KPI_GROUPS: {
       { key: "daily_run_hours", label: "Daily run hours" },
       { key: "total_run_hours", label: "Total run hours" },
       { key: "maintenance_hours", label: "Maintenance hours" },
-      { key: "volume_processed_bbl", label: "Volume processed (bbl)" },
+      { key: "volume_processed_bbl", label: "Volume processed — Cent 1 (bbl)" },
+      { key: "volume_processed_cent2_bbl", label: "Volume processed — Cent 2 (bbl)" },
     ],
   },
   {
