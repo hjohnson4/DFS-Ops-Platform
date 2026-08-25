@@ -1110,6 +1110,42 @@ export const ingestDailyReportSchema = z.object({
 });
 export type IngestDailyReportInput = z.infer<typeof ingestDailyReportSchema>;
 
+// Manual backfill: an admin/area manager uploads a daily-report workbook that
+// already has several completed day tabs, and the server loads EVERY completed
+// day (day 1 .. latest) in one shot. Used during rollout to seed a job's prior
+// days. Backfilled days are imported already signed off (historical) and their
+// centrifuge run hours are accrued, evenly split across the job's centrifuges.
+export const backfillDailyReportSchema = z.object({
+  attachment_base64: z.string().min(1, "Excel workbook (base64) is required"),
+  attachment_name: z.string().min(1),
+});
+export type BackfillDailyReportInput = z.infer<
+  typeof backfillDailyReportSchema
+>;
+
+// One row per imported day in the backfill response, so the UI can show a
+// per-day result summary (matched job, run hours applied, or skipped/duplicate).
+export interface BackfillDayResult {
+  report_day: number;
+  source_sheet: string;
+  report_date: string | null;
+  well_name: string | null;
+  status: "imported" | "duplicate" | "error";
+  daily_report_status: DailyReportStatus | null;
+  matched_job: boolean;
+  run_hours_applied: string | null;
+  message: string | null;
+}
+export interface BackfillDailyReportResult {
+  well_name: string | null;
+  matched_job: boolean;
+  days_found: number;
+  days_imported: number;
+  days_duplicate: number;
+  days_error: number;
+  results: BackfillDayResult[];
+}
+
 // Reviewer action: sign off OR request changes
 export const reviewDailyReportSchema = z
   .object({

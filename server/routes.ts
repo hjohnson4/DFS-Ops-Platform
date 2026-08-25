@@ -4,7 +4,11 @@ import crypto from "node:crypto";
 import { supabaseAnon, supabaseAdmin, hasAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf, jobScopeOf } from "./auth";
 import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, sendInviteEmail, sendPasswordResetEmail } from "./email";
-import { parseDailyReportWorkbook, ExcelParseError } from "./excelDailyReport";
+import {
+  parseDailyReportWorkbook,
+  parseAllCompletedDays,
+  ExcelParseError,
+} from "./excelDailyReport";
 import * as XLSX from "xlsx";
 import { AREAS } from "@shared/schema";
 import {
@@ -34,6 +38,7 @@ import {
   signoffSchema,
   notifPrefsSchema,
   ingestDailyReportSchema,
+  backfillDailyReportSchema,
   assignDailyReportJobSchema,
   reviewDailyReportSchema,
   updateDailyReportConfigSchema,
@@ -3816,6 +3821,255 @@ export async function registerRoutes(
     }
     res.status(201).json(data);
   });
+
+  // ---- Daily-report backfill (manual rollout import) ----------------------
+  // Admin / area manager uploads a workbook that ALREADY has several completed
+  // day tabs and we load EVERY completed day (day 1 .. latest) in one upload.
+  // Backfilled days are imported already signed off (historical) and their
+  // centrifuge run hours are accrued. For a job with 2+ centrifuges the day's
+  // hours are split EVENLY across them (no per-asset prompt during bulk import).
+  // Re-uploading the same file is safe: each day dedupes on a stable synthetic
+  // key ("backfill:<well>:<day>:<attachment>").
+  app.post(
+    "/api/daily-reports/backfill",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const parsed = backfillDailyReportSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const client = supabaseAdmin || supabaseAnon;
+      const p = parsed.data;
+      const scope = areaScopeOf(req.profile!);
+
+      // Parse every completed day tab in the workbook.
+      let days;
+      try {
+        const buf = Buffer.from(p.attachment_base64, "base64");
+        days = parseAllCompletedDays(buf);
+      } catch (e: any) {
+        if (e instanceof ExcelParseError)
+          return res.status(422).json({ message: e.message });
+        return res.status(422).json({
+          message: `Failed to parse Excel workbook: ${e?.message ?? e}`,
+        });
+      }
+
+      // Match the well name (same as the email intake) ONCE for the whole file.
+      const wellName = days.find((d) => d.well_name)?.well_name ?? null;
+      let job_id: string | null = null;
+      let area: string | null = null;
+      let customer_id: string | null = null;
+      if (wellName) {
+        const { data: jobs } = await client
+          .from("jobs")
+          .select("id, area, customer_id, well_name")
+          .not("well_name", "is", null);
+        const target = wellName.trim().toLowerCase();
+        const match = (jobs || []).find(
+          (j: any) => (j.well_name || "").trim().toLowerCase() === target,
+        );
+        if (match) {
+          job_id = match.id;
+          area = match.area;
+          customer_id = match.customer_id;
+        }
+      }
+
+      // Area managers can only backfill into their own area's job. If the well
+      // matched a job outside their area, refuse the whole import.
+      if (scope && job_id && area && area !== scope) {
+        return res.status(403).json({
+          message: `This well belongs to a job in ${area}. You can only import reports for jobs in your area (${scope}).`,
+        });
+      }
+
+      // Pull the job's centrifuges once so we can accrue hours per day.
+      let centrifuges: { id: string; tag: string }[] = [];
+      if (job_id) {
+        const { data: centAssets } = await client
+          .from("assets")
+          .select("id, tag, category, run_hours")
+          .eq("job_id", job_id)
+          .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
+        centrifuges = (centAssets || []) as any;
+      }
+      // Track a running in-memory tally so multiple days accrue correctly within
+      // one import without re-reading each asset every loop.
+      const runHourTally = new Map<string, number>();
+
+      const results: any[] = [];
+      const reviewer = req.profile!;
+      const now = new Date().toISOString();
+
+      for (const excel of days) {
+        const dedupeKey = `backfill:${(wellName || "unknown").toLowerCase()}:${excel.report_day}:${p.attachment_name}`;
+        try {
+          // Per-day dedupe on the synthetic key.
+          const { data: existing } = await client
+            .from("daily_reports")
+            .select("id, status")
+            .eq("email_message_id", dedupeKey)
+            .maybeSingle();
+          if (existing) {
+            results.push({
+              report_day: excel.report_day,
+              source_sheet: excel.source_sheet,
+              report_date: excel.report_date,
+              well_name: excel.well_name,
+              status: "duplicate",
+              daily_report_status: existing.status,
+              matched_job: !!job_id,
+              run_hours_applied: null,
+              message: "Already imported — skipped.",
+            });
+            continue;
+          }
+
+          // Accrue this day's run hours across the job's centrifuges (even split).
+          let runHourDetail: string | null = null;
+          const dailyRaw = (excel.kpis as any)?.daily_run_hours;
+          const dailyHours =
+            dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+          const willAccrue =
+            !!job_id &&
+            centrifuges.length > 0 &&
+            dailyHours != null &&
+            Number.isFinite(dailyHours) &&
+            dailyHours > 0;
+          if (willAccrue) {
+            const share = dailyHours! / centrifuges.length;
+            const applied: string[] = [];
+            for (const c of centrifuges) {
+              // Read the current DB value once, then track subsequent adds in memory.
+              let base = runHourTally.get(c.id);
+              if (base == null) {
+                const { data: cur } = await client
+                  .from("assets")
+                  .select("run_hours")
+                  .eq("id", c.id)
+                  .single();
+                base = Number((cur as any)?.run_hours ?? 0) || 0;
+              }
+              const next = base + share;
+              const { error: uErr } = await client
+                .from("assets")
+                .update({ run_hours: next })
+                .eq("id", c.id);
+              if (uErr) throw new Error(`run hours for ${c.tag}: ${uErr.message}`);
+              runHourTally.set(c.id, next);
+              applied.push(
+                centrifuges.length === 1
+                  ? `${c.tag} +${dailyHours} hrs`
+                  : `${c.tag} +${Math.round(share * 100) / 100} hrs`,
+              );
+            }
+            runHourDetail = `Run hours applied: ${applied.join(", ")}`;
+          }
+
+          const status = job_id ? "Signed off" : "Needs job match";
+          const row: Record<string, any> = {
+            email_message_id: dedupeKey,
+            sender_email: reviewer.email ?? "backfill@dfsops",
+            sender_name: reviewer.name,
+            subject: `Backfill import — ${excel.source_sheet}`,
+            received_at: excel.report_date
+              ? new Date(excel.report_date).toISOString()
+              : now,
+            raw_body: null,
+            source: "email",
+            attachment_name: p.attachment_name,
+            source_sheet: excel.source_sheet,
+            report_day: excel.report_day,
+            report_date: excel.report_date,
+            well_name: excel.well_name,
+            well_context: excel.well_context,
+            kpis: excel.kpis,
+            kpi_cell_map: excel.kpi_cell_map,
+            summary: excel.summary,
+            analysis: {},
+            area,
+            customer_id,
+            job_id,
+            status,
+            // Historical import: mark reviewed by the importer so it lands as
+            // already signed off, and flag run hours as applied so a later
+            // sign-off can never double-count them.
+            reviewed_by: job_id ? reviewer.id : null,
+            reviewed_by_name: job_id ? reviewer.name : null,
+            reviewed_at: job_id ? now : null,
+            run_hours_applied: willAccrue,
+          };
+          const { data: inserted, error } = await client
+            .from("daily_reports")
+            .insert(row)
+            .select()
+            .single();
+          if (error) throw new Error(error.message);
+
+          await client.from("daily_report_events").insert({
+            report_id: inserted.id,
+            actor_id: reviewer.id,
+            actor_name: reviewer.name,
+            actor_role: reviewer.role,
+            action: "ingested",
+            detail:
+              `Historical backfill of ${excel.source_sheet} from "${p.attachment_name}"` +
+              (job_id
+                ? ` — matched well "${excel.well_name}" and imported as signed off.`
+                : ` — well "${excel.well_name ?? "(none)"}" did not match any job; awaiting assignment.`),
+          });
+          if (job_id) {
+            await client.from("daily_report_events").insert({
+              report_id: inserted.id,
+              actor_id: reviewer.id,
+              actor_name: reviewer.name,
+              actor_role: reviewer.role,
+              action: "signed_off",
+              detail: runHourDetail
+                ? `Historical import (signed off). ${runHourDetail}`
+                : `Historical import (signed off).`,
+            });
+          }
+
+          results.push({
+            report_day: excel.report_day,
+            source_sheet: excel.source_sheet,
+            report_date: excel.report_date,
+            well_name: excel.well_name,
+            status: "imported",
+            daily_report_status: status,
+            matched_job: !!job_id,
+            run_hours_applied: runHourDetail,
+            message: null,
+          });
+        } catch (e: any) {
+          results.push({
+            report_day: excel.report_day,
+            source_sheet: excel.source_sheet,
+            report_date: excel.report_date,
+            well_name: excel.well_name,
+            status: "error",
+            daily_report_status: null,
+            matched_job: !!job_id,
+            run_hours_applied: null,
+            message: e?.message ?? String(e),
+          });
+        }
+      }
+
+      const summary = {
+        well_name: wellName,
+        matched_job: !!job_id,
+        days_found: days.length,
+        days_imported: results.filter((r) => r.status === "imported").length,
+        days_duplicate: results.filter((r) => r.status === "duplicate").length,
+        days_error: results.filter((r) => r.status === "error").length,
+        results,
+      };
+      res.status(201).json(summary);
+    },
+  );
 
   // Assign an unmatched Excel report to a job (review-queue action).
   // Supervisors+ only. Sets job/area/customer and moves it to Pending Review.

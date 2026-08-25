@@ -344,6 +344,9 @@ function parseDailyReportWorkbook(buf, requestedDay) {
     chosen = days[0];
     incomplete = true;
   }
+  return parseDaySheet(wb, chosen, incomplete);
+}
+function parseDaySheet(wb, chosen, incomplete) {
   const ws2 = wb.Sheets[chosen.name];
   const kpis = {};
   const cellMap = {};
@@ -392,6 +395,25 @@ function parseDailyReportWorkbook(buf, requestedDay) {
     well_context,
     summary
   };
+}
+function parseAllCompletedDays(buf) {
+  let wb;
+  try {
+    wb = XLSX.read(buf, { type: "buffer", cellDates: true });
+  } catch (e) {
+    throw new ExcelParseError(`Could not read Excel file: ${e?.message ?? e}`);
+  }
+  const days = reportDaySheets(wb);
+  if (days.length === 0)
+    throw new ExcelParseError(
+      "No daily-report day sheet found in the workbook."
+    );
+  const completed = days.filter((d) => d.completed);
+  if (completed.length === 0)
+    throw new ExcelParseError(
+      "No completed day tabs found in the workbook. Fill in at least one Report Day before importing."
+    );
+  return completed.map((d) => parseDaySheet(wb, d, false));
 }
 
 // server/routes.ts
@@ -647,6 +669,10 @@ var ingestDailyReportSchema = z.object({
   // Optional: which "Report Day N" sheet to read. Defaults to the latest
   // populated report-day sheet in the workbook.
   report_day: z.number().int().positive().nullable().optional()
+});
+var backfillDailyReportSchema = z.object({
+  attachment_base64: z.string().min(1, "Excel workbook (base64) is required"),
+  attachment_name: z.string().min(1)
 });
 var reviewDailyReportSchema = z.object({
   action: z.enum(["sign_off", "request_changes"]),
@@ -3383,6 +3409,187 @@ async function registerRoutes(httpServer, app) {
     }
     res.status(201).json(data);
   });
+  app.post(
+    "/api/daily-reports/backfill",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const parsed = backfillDailyReportSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const client = supabaseAdmin || supabaseAnon;
+      const p = parsed.data;
+      const scope = areaScopeOf(req.profile);
+      let days;
+      try {
+        const buf = Buffer.from(p.attachment_base64, "base64");
+        days = parseAllCompletedDays(buf);
+      } catch (e) {
+        if (e instanceof ExcelParseError)
+          return res.status(422).json({ message: e.message });
+        return res.status(422).json({
+          message: `Failed to parse Excel workbook: ${e?.message ?? e}`
+        });
+      }
+      const wellName = days.find((d) => d.well_name)?.well_name ?? null;
+      let job_id = null;
+      let area = null;
+      let customer_id = null;
+      if (wellName) {
+        const { data: jobs } = await client.from("jobs").select("id, area, customer_id, well_name").not("well_name", "is", null);
+        const target = wellName.trim().toLowerCase();
+        const match = (jobs || []).find(
+          (j) => (j.well_name || "").trim().toLowerCase() === target
+        );
+        if (match) {
+          job_id = match.id;
+          area = match.area;
+          customer_id = match.customer_id;
+        }
+      }
+      if (scope && job_id && area && area !== scope) {
+        return res.status(403).json({
+          message: `This well belongs to a job in ${area}. You can only import reports for jobs in your area (${scope}).`
+        });
+      }
+      let centrifuges = [];
+      if (job_id) {
+        const { data: centAssets } = await client.from("assets").select("id, tag, category, run_hours").eq("job_id", job_id).in("category", RUN_HOUR_CATEGORIES);
+        centrifuges = centAssets || [];
+      }
+      const runHourTally = /* @__PURE__ */ new Map();
+      const results = [];
+      const reviewer = req.profile;
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      for (const excel of days) {
+        const dedupeKey = `backfill:${(wellName || "unknown").toLowerCase()}:${excel.report_day}:${p.attachment_name}`;
+        try {
+          const { data: existing } = await client.from("daily_reports").select("id, status").eq("email_message_id", dedupeKey).maybeSingle();
+          if (existing) {
+            results.push({
+              report_day: excel.report_day,
+              source_sheet: excel.source_sheet,
+              report_date: excel.report_date,
+              well_name: excel.well_name,
+              status: "duplicate",
+              daily_report_status: existing.status,
+              matched_job: !!job_id,
+              run_hours_applied: null,
+              message: "Already imported \u2014 skipped."
+            });
+            continue;
+          }
+          let runHourDetail = null;
+          const dailyRaw = excel.kpis?.daily_run_hours;
+          const dailyHours = dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+          const willAccrue = !!job_id && centrifuges.length > 0 && dailyHours != null && Number.isFinite(dailyHours) && dailyHours > 0;
+          if (willAccrue) {
+            const share = dailyHours / centrifuges.length;
+            const applied = [];
+            for (const c of centrifuges) {
+              let base = runHourTally.get(c.id);
+              if (base == null) {
+                const { data: cur } = await client.from("assets").select("run_hours").eq("id", c.id).single();
+                base = Number(cur?.run_hours ?? 0) || 0;
+              }
+              const next = base + share;
+              const { error: uErr } = await client.from("assets").update({ run_hours: next }).eq("id", c.id);
+              if (uErr) throw new Error(`run hours for ${c.tag}: ${uErr.message}`);
+              runHourTally.set(c.id, next);
+              applied.push(
+                centrifuges.length === 1 ? `${c.tag} +${dailyHours} hrs` : `${c.tag} +${Math.round(share * 100) / 100} hrs`
+              );
+            }
+            runHourDetail = `Run hours applied: ${applied.join(", ")}`;
+          }
+          const status = job_id ? "Signed off" : "Needs job match";
+          const row = {
+            email_message_id: dedupeKey,
+            sender_email: reviewer.email ?? "backfill@dfsops",
+            sender_name: reviewer.name,
+            subject: `Backfill import \u2014 ${excel.source_sheet}`,
+            received_at: excel.report_date ? new Date(excel.report_date).toISOString() : now,
+            raw_body: null,
+            source: "email",
+            attachment_name: p.attachment_name,
+            source_sheet: excel.source_sheet,
+            report_day: excel.report_day,
+            report_date: excel.report_date,
+            well_name: excel.well_name,
+            well_context: excel.well_context,
+            kpis: excel.kpis,
+            kpi_cell_map: excel.kpi_cell_map,
+            summary: excel.summary,
+            analysis: {},
+            area,
+            customer_id,
+            job_id,
+            status,
+            // Historical import: mark reviewed by the importer so it lands as
+            // already signed off, and flag run hours as applied so a later
+            // sign-off can never double-count them.
+            reviewed_by: job_id ? reviewer.id : null,
+            reviewed_by_name: job_id ? reviewer.name : null,
+            reviewed_at: job_id ? now : null,
+            run_hours_applied: willAccrue
+          };
+          const { data: inserted, error } = await client.from("daily_reports").insert(row).select().single();
+          if (error) throw new Error(error.message);
+          await client.from("daily_report_events").insert({
+            report_id: inserted.id,
+            actor_id: reviewer.id,
+            actor_name: reviewer.name,
+            actor_role: reviewer.role,
+            action: "ingested",
+            detail: `Historical backfill of ${excel.source_sheet} from "${p.attachment_name}"` + (job_id ? ` \u2014 matched well "${excel.well_name}" and imported as signed off.` : ` \u2014 well "${excel.well_name ?? "(none)"}" did not match any job; awaiting assignment.`)
+          });
+          if (job_id) {
+            await client.from("daily_report_events").insert({
+              report_id: inserted.id,
+              actor_id: reviewer.id,
+              actor_name: reviewer.name,
+              actor_role: reviewer.role,
+              action: "signed_off",
+              detail: runHourDetail ? `Historical import (signed off). ${runHourDetail}` : `Historical import (signed off).`
+            });
+          }
+          results.push({
+            report_day: excel.report_day,
+            source_sheet: excel.source_sheet,
+            report_date: excel.report_date,
+            well_name: excel.well_name,
+            status: "imported",
+            daily_report_status: status,
+            matched_job: !!job_id,
+            run_hours_applied: runHourDetail,
+            message: null
+          });
+        } catch (e) {
+          results.push({
+            report_day: excel.report_day,
+            source_sheet: excel.source_sheet,
+            report_date: excel.report_date,
+            well_name: excel.well_name,
+            status: "error",
+            daily_report_status: null,
+            matched_job: !!job_id,
+            run_hours_applied: null,
+            message: e?.message ?? String(e)
+          });
+        }
+      }
+      const summary = {
+        well_name: wellName,
+        matched_job: !!job_id,
+        days_found: days.length,
+        days_imported: results.filter((r) => r.status === "imported").length,
+        days_duplicate: results.filter((r) => r.status === "duplicate").length,
+        days_error: results.filter((r) => r.status === "error").length,
+        results
+      };
+      res.status(201).json(summary);
+    }
+  );
   app.post(
     "/api/daily-reports/:id/assign-job",
     requireAuth,

@@ -194,6 +194,17 @@ export function parseDailyReportWorkbook(
     incomplete = true;
   }
 
+  return parseDaySheet(wb, chosen, incomplete);
+}
+
+// Parse a single already-chosen day tab into a ParsedDailyReport. Shared by the
+// single-day email path (parseDailyReportWorkbook) and the multi-day backfill
+// path (parseAllCompletedDays) so both read cells identically.
+function parseDaySheet(
+  wb: XLSX.WorkBook,
+  chosen: { day: number; name: string; completed: boolean },
+  incomplete: boolean,
+): ParsedDailyReport {
   const ws = wb.Sheets[chosen.name];
 
   // Read every KPI straight from its fixed cell, recording provenance.
@@ -262,4 +273,28 @@ export function parseDailyReportWorkbook(
     well_context,
     summary,
   };
+}
+
+// Backfill support: parse EVERY completed day tab in the workbook, in workbook
+// order (day 1 .. latest completed). Returns one ParsedDailyReport per
+// hand-entered day. Blank template tabs are skipped. Used by the manual
+// "Import workbook" backfill endpoint to load a job's prior days in one upload.
+export function parseAllCompletedDays(buf: Buffer): ParsedDailyReport[] {
+  let wb: XLSX.WorkBook;
+  try {
+    wb = XLSX.read(buf, { type: "buffer", cellDates: true });
+  } catch (e: any) {
+    throw new ExcelParseError(`Could not read Excel file: ${e?.message ?? e}`);
+  }
+  const days = reportDaySheets(wb);
+  if (days.length === 0)
+    throw new ExcelParseError(
+      "No daily-report day sheet found in the workbook.",
+    );
+  const completed = days.filter((d) => d.completed);
+  if (completed.length === 0)
+    throw new ExcelParseError(
+      "No completed day tabs found in the workbook. Fill in at least one Report Day before importing.",
+    );
+  return completed.map((d) => parseDaySheet(wb, d, false));
 }

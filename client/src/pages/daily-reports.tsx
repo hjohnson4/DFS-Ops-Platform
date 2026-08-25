@@ -1,8 +1,29 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import type { DailyReportWithLinks, DailyReportStatus } from "@shared/schema";
-import { Inbox, Search, Loader2, CheckCircle2, X } from "lucide-react";
+import type {
+  DailyReportWithLinks,
+  DailyReportStatus,
+  BackfillDailyReportResult,
+} from "@shared/schema";
+import {
+  Inbox,
+  Search,
+  Loader2,
+  CheckCircle2,
+  X,
+  Upload,
+  FileSpreadsheet,
+  AlertTriangle,
+} from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   ToggleGroup,
   ToggleGroupItem,
@@ -29,6 +50,231 @@ function fmt(d: string | null) {
 
 type StatusFilter = "all" | "pending" | "signed";
 
+// Read a File as a base64 string (no data: prefix) for JSON upload.
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const res = String(reader.result || "");
+      const comma = res.indexOf(",");
+      resolve(comma >= 0 ? res.slice(comma + 1) : res);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+// Admin / area manager "Import workbook" dialog: uploads a daily-report
+// workbook that already has completed day tabs and backfills every completed
+// day (day 1 .. latest) in one shot. Historical days import already signed off
+// and their centrifuge run hours accrue automatically.
+function ImportWorkbookDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const { toast } = useToast();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [result, setResult] = useState<BackfillDailyReportResult | null>(null);
+
+  const reset = () => {
+    setFile(null);
+    setResult(null);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const importMut = useMutation({
+    mutationFn: async (f: File) => {
+      const attachment_base64 = await fileToBase64(f);
+      const res = await apiRequest("POST", "/api/daily-reports/backfill", {
+        attachment_base64,
+        attachment_name: f.name,
+      });
+      return (await res.json()) as BackfillDailyReportResult;
+    },
+    onSuccess: (data) => {
+      setResult(data);
+      queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+      const parts: string[] = [`${data.days_imported} imported`];
+      if (data.days_duplicate) parts.push(`${data.days_duplicate} already loaded`);
+      if (data.days_error) parts.push(`${data.days_error} failed`);
+      toast({
+        title: data.matched_job
+          ? `Backfill complete — ${parts.join(", ")}`
+          : `Imported ${parts.join(", ")} — no matching job yet`,
+        variant: data.days_error ? "destructive" : undefined,
+      });
+    },
+    onError: (e: any) =>
+      toast({
+        title: "Import failed",
+        description: e.message,
+        variant: "destructive",
+      }),
+  });
+
+  const handleClose = (o: boolean) => {
+    if (!o) reset();
+    onOpenChange(o);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={handleClose}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Upload className="h-5 w-5 text-muted-foreground" />
+            Import daily-report workbook
+          </DialogTitle>
+          <DialogDescription>
+            Upload a workbook that already has completed day tabs and every
+            completed day is loaded at once — day 1 through the latest. Great for
+            rollout and seeding a job's prior days.
+          </DialogDescription>
+        </DialogHeader>
+
+        {!result ? (
+          <div className="space-y-4">
+            <div
+              className="rounded-lg border border-dashed border-card-border bg-muted/30 p-6 text-center cursor-pointer hover:bg-muted/50 transition-colors"
+              onClick={() => fileRef.current?.click()}
+              data-testid="dropzone-import-workbook"
+            >
+              <FileSpreadsheet className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
+              <div className="text-sm font-medium">
+                {file ? file.name : "Choose an .xlsx workbook"}
+              </div>
+              <div className="text-xs text-muted-foreground mt-1">
+                {file ? "Click to pick a different file" : "Click to browse"}
+              </div>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                className="hidden"
+                onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                data-testid="input-import-workbook"
+              />
+            </div>
+
+            <div className="rounded-md bg-amber-500/10 border border-amber-500/20 p-3 text-xs text-amber-800 dark:text-amber-300 flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+              <div>
+                Imported days are recorded as signed off (historical) and their
+                run hours are added to the job's centrifuges. The well name in
+                the workbook is matched to a job automatically; if no job
+                matches, the days land in the “Needs a job” queue. Re-uploading
+                the same file is safe — days already loaded are skipped.
+              </div>
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => handleClose(false)}
+                data-testid="button-cancel-import"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={() => file && importMut.mutate(file)}
+                disabled={!file || importMut.isPending}
+                data-testid="button-run-import"
+              >
+                {importMut.isPending ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    Importing…
+                  </>
+                ) : (
+                  <>
+                    <Upload className="mr-1.5 h-4 w-4" />
+                    Import all days
+                  </>
+                )}
+              </Button>
+            </DialogFooter>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-card-border p-3 text-sm">
+              <div className="font-medium">
+                {result.well_name ? `Well: ${result.well_name}` : "Well name not found in workbook"}
+              </div>
+              <div className="text-muted-foreground text-xs mt-0.5">
+                {result.matched_job
+                  ? "Matched to a job — days imported as signed off."
+                  : "No matching job — days are in the “Needs a job” queue."}
+              </div>
+              <div className="flex flex-wrap gap-2 mt-2 text-xs">
+                <span className="inline-flex items-center rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 px-2 py-0.5">
+                  {result.days_imported} imported
+                </span>
+                {result.days_duplicate > 0 && (
+                  <span className="inline-flex items-center rounded-full bg-muted text-muted-foreground px-2 py-0.5">
+                    {result.days_duplicate} already loaded
+                  </span>
+                )}
+                {result.days_error > 0 && (
+                  <span className="inline-flex items-center rounded-full bg-rose-500/15 text-rose-700 dark:text-rose-400 px-2 py-0.5">
+                    {result.days_error} failed
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="max-h-64 overflow-y-auto rounded-lg border border-card-border divide-y divide-card-border">
+              {result.results.map((r) => (
+                <div
+                  key={r.report_day}
+                  className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+                >
+                  <div className="min-w-0">
+                    <div className="font-medium">{r.source_sheet}</div>
+                    <div className="text-xs text-muted-foreground truncate">
+                      {fmt(r.report_date)}
+                      {r.run_hours_applied ? ` · ${r.run_hours_applied}` : ""}
+                      {r.message ? ` · ${r.message}` : ""}
+                    </div>
+                  </div>
+                  <span
+                    className={
+                      "shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs " +
+                      (r.status === "imported"
+                        ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                        : r.status === "duplicate"
+                          ? "bg-muted text-muted-foreground"
+                          : "bg-rose-500/15 text-rose-700 dark:text-rose-400")
+                    }
+                  >
+                    {r.status === "imported"
+                      ? "Imported"
+                      : r.status === "duplicate"
+                        ? "Skipped"
+                        : "Failed"}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={reset} data-testid="button-import-another">
+                Import another
+              </Button>
+              <Button onClick={() => handleClose(false)} data-testid="button-close-import">
+                Done
+              </Button>
+            </DialogFooter>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function DailyReportsPage() {
   const [, navigate] = useLocation();
   const { profile } = useAuth();
@@ -41,6 +287,8 @@ export default function DailyReportsPage() {
     profile?.role === "admin" ||
     profile?.role === "area" ||
     profile?.role === "super";
+  const canManage = profile?.role === "admin" || profile?.role === "area";
+  const [importOpen, setImportOpen] = useState(false);
 
   const { data: reports, isLoading } = useQuery<DailyReportWithLinks[]>({
     queryKey: ["/api/daily-reports"],
@@ -142,6 +390,17 @@ export default function DailyReportsPage() {
       <div className="flex items-center justify-between gap-2 mb-1">
         <h1 className="text-xl font-semibold">Daily Reports</h1>
         <div className="flex items-center gap-2">
+          {canManage && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setImportOpen(true)}
+              data-testid="button-import-workbook"
+            >
+              <Upload className="mr-1.5 h-4 w-4" />
+              Import workbook
+            </Button>
+          )}
           {needsMatch > 0 && (
             <span className="inline-flex items-center rounded-full bg-orange-500/15 text-orange-700 dark:text-orange-400 px-2.5 py-1 text-xs font-medium">
               {needsMatch} need a job
@@ -154,6 +413,10 @@ export default function DailyReportsPage() {
           )}
         </div>
       </div>
+      {canManage && (
+        <ImportWorkbookDialog open={importOpen} onOpenChange={setImportOpen} />
+      )}
+
       <p className="text-sm text-muted-foreground mb-4">
         Every crew's daily report in one place. Reports are emailed in to the
         intake inbox, with KPI values read straight from the Excel workbook's
