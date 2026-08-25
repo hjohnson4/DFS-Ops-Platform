@@ -1329,10 +1329,11 @@ export async function registerRoutes(
         .select()
         .single();
       if (error) {
-        // unique (job_number, area) violation
+        // Partial unique index (job_number, area) WHERE archived_at IS NULL:
+        // only an ACTIVE job blocks the number. Archived jobs free it for reuse.
         if (error.code === "23505")
           return res.status(409).json({
-            message: `Job ${parsed.data.job_number} already exists in ${parsed.data.area}`,
+            message: `Job ${parsed.data.job_number} is already active in ${parsed.data.area}. Archive that job first, or use a different number.`,
           });
         return res.status(400).json({ message: error.message });
       }
@@ -1526,7 +1527,17 @@ export async function registerRoutes(
         .eq("id", req.params.id)
         .select()
         .single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) {
+        // A job number can be reused while the original is archived, so
+        // restoring can now collide with a newer active job of the same
+        // number/area. The partial unique index rejects that (23505).
+        if (error.code === "23505")
+          return res.status(409).json({
+            message:
+              "Can't restore this job — its number is already in use by an active job in this area. Archive or renumber that job first.",
+          });
+        return res.status(400).json({ message: error.message });
+      }
       res.json(data);
     },
   );

@@ -1671,7 +1671,7 @@ async function registerRoutes(httpServer, app) {
       if (error) {
         if (error.code === "23505")
           return res.status(409).json({
-            message: `Job ${parsed.data.job_number} already exists in ${parsed.data.area}`
+            message: `Job ${parsed.data.job_number} is already active in ${parsed.data.area}. Archive that job first, or use a different number.`
           });
         return res.status(400).json({ message: error.message });
       }
@@ -1795,7 +1795,13 @@ async function registerRoutes(httpServer, app) {
       if (!job.archived_at)
         return res.status(409).json({ message: "Job is not archived" });
       const { data, error } = await client.from("jobs").update({ archived_at: null }).eq("id", req.params.id).select().single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) {
+        if (error.code === "23505")
+          return res.status(409).json({
+            message: "Can't restore this job \u2014 its number is already in use by an active job in this area. Archive or renumber that job first."
+          });
+        return res.status(400).json({ message: error.message });
+      }
       res.json(data);
     }
   );
