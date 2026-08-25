@@ -28,6 +28,16 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   { field: "daily_run_hours", cell: "AA37", numeric: true },
   { field: "total_run_hours", cell: "AA38", numeric: true },
   { field: "maintenance_hours", cell: "AA39", numeric: true },
+  // Volume processed by Centrifuge 1 (bbls): value in AR60, labeled in Y60.
+  { field: "volume_processed_bbl", cell: "AR60", numeric: true },
+  // Centrifuge operating parameters: values in the AA column (rows 31-36),
+  // labeled in col Q. Feed/effluent weight (AA35/AA36) are often blank.
+  { field: "centrifuge_feed_rate_gpm", cell: "AA31", numeric: true },
+  { field: "centrifuge_feed_pump_speed_rpm", cell: "AA32", numeric: true },
+  { field: "centrifuge_bowl_speed_rpm", cell: "AA33", numeric: true },
+  { field: "centrifuge_backdrive_rpm", cell: "AA34", numeric: true },
+  { field: "centrifuge_feed_weight_ppg", cell: "AA35", numeric: true },
+  { field: "centrifuge_effluent_weight_ppg", cell: "AA36", numeric: true },
   // Additions: value in merged cell H (H:J), Daily column.
   { field: "add_base_diesel_bbl", cell: "H45", numeric: true },
   { field: "add_water_bbl", cell: "H46", numeric: true },

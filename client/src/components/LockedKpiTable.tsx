@@ -25,6 +25,18 @@ const KPI_GROUPS: {
       { key: "daily_run_hours", label: "Daily run hours" },
       { key: "total_run_hours", label: "Total run hours" },
       { key: "maintenance_hours", label: "Maintenance hours" },
+      { key: "volume_processed_bbl", label: "Volume processed (bbl)" },
+    ],
+  },
+  {
+    group: "Centrifuge parameters",
+    fields: [
+      { key: "centrifuge_feed_rate_gpm", label: "Feed rate (gpm)" },
+      { key: "centrifuge_feed_pump_speed_rpm", label: "Feed pump speed (rpm)" },
+      { key: "centrifuge_bowl_speed_rpm", label: "Bowl speed (rpm)" },
+      { key: "centrifuge_backdrive_rpm", label: "Backdrive (rpm)" },
+      { key: "centrifuge_feed_weight_ppg", label: "Feed weight (ppg)" },
+      { key: "centrifuge_effluent_weight_ppg", label: "Effluent weight (ppg)" },
     ],
   },
   {

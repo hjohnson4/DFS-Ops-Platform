@@ -462,6 +462,15 @@ export interface DailyFieldKpis {
   daily_run_hours?: number | null;
   total_run_hours?: number | null;
   maintenance_hours?: number | null;
+  // Volume processed by Centrifuge 1 (bbls) — workbook cell AR60.
+  volume_processed_bbl?: number | null;
+  // Centrifuge operating parameters (workbook cells AA31–AA36).
+  centrifuge_feed_rate_gpm?: number | null;
+  centrifuge_feed_pump_speed_rpm?: number | null;
+  centrifuge_bowl_speed_rpm?: number | null;
+  centrifuge_backdrive_rpm?: number | null;
+  centrifuge_feed_weight_ppg?: number | null;
+  centrifuge_effluent_weight_ppg?: number | null;
   add_base_diesel_bbl?: number | null;
   add_water_bbl?: number | null;
   add_barite_bbl?: number | null;
