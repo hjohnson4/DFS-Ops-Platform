@@ -2720,35 +2720,78 @@ export async function registerRoutes(
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const client = supabaseAdmin || supabaseAnon;
-      // load the asset for area-scope check
+      // load the asset for area-scope check (plus job_id/category for edit guards)
       const { data: asset } = await client
         .from("assets")
-        .select("area")
+        .select("area, job_id, category")
         .eq("id", req.params.id)
         .single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       if (req.profile!.role === "area" && asset.area !== req.profile!.area)
         return res.status(403).json({ message: "Outside your area" });
+
+      // The edit form may change core fields (tag/name, category, area). Build a
+      // patch we can adjust before writing.
+      const patch: any = { ...parsed.data };
+
+      // The effective area after this update (may be edited).
+      const nextArea = patch.area ?? asset.area;
+
+      // Area managers can never move an asset out of their own area.
+      if (
+        req.profile!.role === "area" &&
+        patch.area &&
+        patch.area !== req.profile!.area
+      )
+        return res
+          .status(403)
+          .json({ message: "You can only keep assets within your own area" });
+
+      // Changing the area of an asset that is currently on a job would break the
+      // asset-and-job same-area rule. Require it be taken off the job first.
+      if (patch.area && patch.area !== asset.area && asset.job_id)
+        return res.status(400).json({
+          message:
+            "This asset is on a job. Unassign it from the job before changing its area.",
+        });
+
       // if assigning to a job, verify the job exists and is in the same area
-      if (parsed.data.job_id) {
+      if (patch.job_id) {
         const { data: job } = await client
           .from("jobs")
           .select("area")
-          .eq("id", parsed.data.job_id)
+          .eq("id", patch.job_id)
           .single();
         if (!job) return res.status(404).json({ message: "Job not found" });
-        if (job.area !== asset.area)
+        if (job.area !== nextArea)
           return res
             .status(400)
             .json({ message: "Asset and job must be in the same operating area" });
       }
+
+      // Service interval only applies to run-hour assets. If the category is
+      // being changed to one that doesn't track run hours, drop the interval so
+      // stale values don't linger.
+      const effectiveCategory = patch.category ?? asset.category;
+      if (!tracksRunHours(effectiveCategory)) delete patch.service_hours_interval;
+
       const { data, error } = await client
         .from("assets")
-        .update(parsed.data)
+        .update(patch)
         .eq("id", req.params.id)
         .select()
         .single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) {
+        // Surface a friendly message for a duplicate asset number.
+        const dup =
+          /duplicate|unique/i.test(error.message) &&
+          /tag/i.test(error.message);
+        return res.status(400).json({
+          message: dup
+            ? "That asset number is already in use. Choose a different one."
+            : error.message,
+        });
+      }
       res.json(data);
     },
   );

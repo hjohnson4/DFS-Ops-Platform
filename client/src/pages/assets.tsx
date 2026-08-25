@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -52,6 +52,7 @@ import {
   DollarSign,
   Wrench,
   FileText,
+  Pencil,
 } from "lucide-react";
 
 const NO_SCHEDULE = "__none__";
@@ -480,6 +481,265 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Edit asset dialog — admin/area only. Mirrors CreateAssetDialog but prefilled
+// from the selected asset and PATCHes /api/assets/:id. Editable: asset number
+// (name), type, deployable area, maintenance schedule, service interval (run-
+// hour assets), day rate, and description.
+// ---------------------------------------------------------------------------
+function EditAssetDialog({
+  asset,
+  open,
+  onOpenChange,
+}: {
+  asset: AssetDetail;
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+}) {
+  const { toast } = useToast();
+  const { profile } = useAuth();
+  const areaLocked = profile?.role === "area";
+
+  const { data: schedules } = useQuery<MaintenanceSchedule[]>({
+    queryKey: ["/api/maintenance-schedules"],
+  });
+  const scheduleList = schedules ?? [];
+
+  const [tag, setTag] = useState(asset.tag);
+  const [category, setCategory] = useState<string>(asset.category);
+  const [area, setArea] = useState<string>(asset.area);
+  const [scheduleId, setScheduleId] = useState<string>(
+    asset.maintenance_schedule_id ?? NO_SCHEDULE,
+  );
+  const [interval, setInterval] = useState<string>(
+    asset.service_hours_interval != null ? String(asset.service_hours_interval) : "",
+  );
+  const [description, setDescription] = useState(asset.description ?? "");
+  const [dayRate, setDayRate] = useState(
+    asset.day_rate != null ? String(asset.day_rate) : "",
+  );
+
+  // Re-seed the form whenever a different asset is opened.
+  useEffect(() => {
+    setTag(asset.tag);
+    setCategory(asset.category);
+    setArea(asset.area);
+    setScheduleId(asset.maintenance_schedule_id ?? NO_SCHEDULE);
+    setInterval(
+      asset.service_hours_interval != null
+        ? String(asset.service_hours_interval)
+        : "",
+    );
+    setDescription(asset.description ?? "");
+    setDayRate(asset.day_rate != null ? String(asset.day_rate) : "");
+  }, [asset]);
+
+  const onJob = !!asset.job_id;
+
+  const save = useMutation({
+    mutationFn: async () => {
+      if (!tag.trim()) throw new Error("Enter an asset number");
+      if (!category) throw new Error("Choose an equipment type");
+      if (!area) throw new Error("Choose a deployable area");
+      const rateStr = dayRate.trim();
+      if (rateStr && (isNaN(Number(rateStr)) || Number(rateStr) < 0))
+        throw new Error("Day rate must be a non-negative number");
+      const body: any = {
+        tag: tag.trim(),
+        category,
+        area,
+        description: description.trim() || null,
+        maintenance_schedule_id: scheduleId === NO_SCHEDULE ? null : scheduleId,
+        day_rate: rateStr === "" ? null : Number(rateStr),
+      };
+      // Only send a service interval for run-hour assets, and only if provided.
+      if (tracksRunHours(category as any)) {
+        const iv = interval.trim();
+        if (iv) {
+          if (isNaN(Number(iv)) || Number(iv) <= 0)
+            throw new Error("Service interval must be a positive number of hours");
+          body.service_hours_interval = Number(iv);
+        }
+      }
+      await apiRequest("PATCH", `/api/assets/${asset.id}`, body);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/assets", asset.id] });
+      onOpenChange(false);
+      toast({ title: "Asset updated" });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not update asset", description: e.message, variant: "destructive" }),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle>Edit asset</DialogTitle>
+          <DialogDescription>Update this equipment's details.</DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 overflow-y-auto flex-1 -mx-6 px-6">
+          {/* Equipment type */}
+          <div>
+            <Label>Type of equipment</Label>
+            <Select value={category} onValueChange={setCategory}>
+              <SelectTrigger data-testid="edit-select-asset-category">
+                <SelectValue placeholder="Choose equipment type…" />
+              </SelectTrigger>
+              <SelectContent>
+                {CATEGORIES.map((c) => (
+                  <SelectItem key={c} value={c}>
+                    {c}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Asset number (name) */}
+          <div>
+            <Label htmlFor="edit-asset-tag">Asset number</Label>
+            <Input
+              id="edit-asset-tag"
+              value={tag}
+              onChange={(e) => setTag(e.target.value)}
+              placeholder="e.g. BBC-104"
+              data-testid="edit-input-asset-tag"
+            />
+          </div>
+
+          {/* Deployable area */}
+          <div>
+            <Label>Deployable area</Label>
+            <Select
+              value={area}
+              onValueChange={setArea}
+              disabled={areaLocked || onJob}
+            >
+              <SelectTrigger data-testid="edit-select-asset-area">
+                <SelectValue placeholder="Choose an area…" />
+              </SelectTrigger>
+              <SelectContent>
+                {AREAS.map((a) => (
+                  <SelectItem key={a} value={a}>
+                    {a}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {onJob ? (
+              <p className="text-xs text-muted-foreground mt-1">
+                This asset is on a job. Unassign it from the job to change its
+                area.
+              </p>
+            ) : areaLocked ? (
+              <p className="text-xs text-muted-foreground mt-1">
+                Area managers keep assets within their own area.
+              </p>
+            ) : null}
+          </div>
+
+          {/* Maintenance schedule */}
+          <div>
+            <Label>Maintenance schedule</Label>
+            <Select value={scheduleId} onValueChange={setScheduleId}>
+              <SelectTrigger data-testid="edit-select-asset-schedule">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_SCHEDULE}>No schedule</SelectItem>
+                {scheduleList.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.name} · {scheduleSummary(s)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Service interval — run-hour assets only */}
+          {tracksRunHours(category as any) && (
+            <div>
+              <Label htmlFor="edit-asset-interval">
+                Service interval (run hours)
+              </Label>
+              <Input
+                id="edit-asset-interval"
+                type="number"
+                min="1"
+                step="1"
+                value={interval}
+                onChange={(e) => setInterval(e.target.value)}
+                placeholder="e.g. 250"
+                data-testid="edit-input-asset-interval"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Hours between full services for this centrifuge.
+              </p>
+            </div>
+          )}
+
+          {/* Rental day rate */}
+          <div>
+            <Label htmlFor="edit-asset-rate">Rental day rate (optional)</Label>
+            <div className="relative">
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
+              <Input
+                id="edit-asset-rate"
+                type="number"
+                min="0"
+                step="1"
+                value={dayRate}
+                onChange={(e) => setDayRate(e.target.value)}
+                placeholder="e.g. 1200"
+                className="pl-6"
+                data-testid="edit-input-asset-day-rate"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground mt-1">
+              Daily rental price for this unit. Used for utilization revenue.
+            </p>
+          </div>
+
+          {/* Description */}
+          <div>
+            <Label htmlFor="edit-asset-desc">Equipment description (optional)</Label>
+            <Textarea
+              id="edit-asset-desc"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Make, model, serial, or notes about this unit…"
+              rows={3}
+              data-testid="edit-input-asset-description"
+            />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => onOpenChange(false)}
+            data-testid="edit-button-cancel"
+          >
+            Cancel
+          </Button>
+          <Button
+            disabled={save.isPending}
+            onClick={() => save.mutate()}
+            data-testid="edit-button-submit-asset"
+          >
+            {save.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+            Save changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Asset detail pop-up — full asset info + maintenance/inspection history.
 // ---------------------------------------------------------------------------
 function AssetDetailDialog({
@@ -489,6 +749,9 @@ function AssetDetailDialog({
   assetId: string | null;
   onClose: () => void;
 }) {
+  const { profile } = useAuth();
+  const canManage = profile?.role === "admin" || profile?.role === "area";
+  const [editing, setEditing] = useState(false);
   const { data, isLoading } = useQuery<AssetDetail>({
     queryKey: ["/api/assets", assetId],
     enabled: !!assetId,
@@ -508,6 +771,20 @@ function AssetDetailDialog({
             {data ? `${data.category} \u00b7 ${data.area}` : "Equipment detail"}
           </DialogDescription>
         </DialogHeader>
+
+        {canManage && data && (
+          <div className="flex justify-end -mt-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setEditing(true)}
+              data-testid="button-edit-asset"
+            >
+              <Pencil className="h-4 w-4 mr-1.5" />
+              Edit asset
+            </Button>
+          </div>
+        )}
 
         {isLoading || !data ? (
           <div className="py-10 text-center text-sm text-muted-foreground">
@@ -621,6 +898,14 @@ function AssetDetailDialog({
               )}
             </div>
           </div>
+        )}
+
+        {data && (
+          <EditAssetDialog
+            asset={data}
+            open={editing}
+            onOpenChange={setEditing}
+          />
         )}
       </DialogContent>
     </Dialog>

@@ -276,6 +276,10 @@ export interface AssetHistoryEntry {
 // Full detail payload for the asset pop-up: the asset (with joins) + its history.
 export interface AssetDetail extends AssetWithSchedule {
   history: AssetHistoryEntry[];
+  // Derived at the detail endpoint via serviceStatusFor() for centrifuges:
+  // run_hours - run_hours_at_service ("since last full service").
+  run_hours_since_service?: number | null;
+  service_state?: ServiceState;
 }
 
 // One row of the utilization export.
@@ -676,7 +680,36 @@ export interface DailyReport {
   reviewed_by_name: string | null;
   reviewed_at: string | null;
   change_notes: string | null;
+  // True once this report's daily run hours (M33) have been rolled into the
+  // centrifuge assets on its job at sign-off. Guards against double-counting if
+  // a report is somehow reviewed twice.
+  run_hours_applied: boolean;
   created_at: string;
+}
+
+// One centrifuge on a report's job, used when the reviewer allocates the day's
+// run hours across multiple centrifuges at sign-off.
+export interface CentrifugeOnJob {
+  id: string;
+  tag: string;
+  category: Category;
+  run_hours: number | null;
+}
+
+// What GET /api/daily-reports/:id/centrifuges returns so the sign-off UI can
+// decide whether to auto-apply (0 or 1 centrifuge) or prompt for a per-asset
+// split (2+ centrifuges).
+export interface ReportRunHoursContext {
+  daily_run_hours: number | null; // the day's hours from cell M33
+  already_applied: boolean;
+  centrifuges: CentrifugeOnJob[];
+}
+
+// A per-asset allocation of the day's run hours, supplied at sign-off when a
+// job has 2+ centrifuges.
+export interface RunHourAllocation {
+  asset_id: string;
+  hours: number;
 }
 
 // Daily report joined with customer + job identifiers for lists/detail
@@ -1008,6 +1041,8 @@ export type AssignDailyReportJobInput = z.infer<typeof assignDailyReportJobSchem
 
 // Assign / unassign an asset to a job (and optionally flip its status)
 export const updateAssetSchema = z.object({
+  tag: z.string().min(1).optional(),
+  category: z.enum(CATEGORIES).optional(),
   job_id: z.string().uuid().nullable().optional(),
   status: z.string().optional(),
   job_or_well: z.string().nullable().optional(),
@@ -1080,6 +1115,17 @@ export const reviewDailyReportSchema = z
   .object({
     action: z.enum(["sign_off", "request_changes"]),
     change_notes: z.string().nullable().optional(),
+    // Optional per-centrifuge split of the day's run hours, supplied only when
+    // signing off a report whose job has 2+ centrifuges. When omitted, the
+    // server auto-applies the full day's hours to a single centrifuge (or none).
+    run_hour_allocations: z
+      .array(
+        z.object({
+          asset_id: z.string().min(1),
+          hours: z.number().min(0),
+        }),
+      )
+      .optional(),
   })
   .refine(
     (d) => d.action !== "request_changes" || !!(d.change_notes && d.change_notes.trim()),

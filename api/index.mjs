@@ -602,6 +602,8 @@ var assignDailyReportJobSchema = z.object({
   job_id: z.string().uuid()
 });
 var updateAssetSchema = z.object({
+  tag: z.string().min(1).optional(),
+  category: z.enum(CATEGORIES).optional(),
   job_id: z.string().uuid().nullable().optional(),
   status: z.string().optional(),
   job_or_well: z.string().nullable().optional(),
@@ -2645,18 +2647,33 @@ async function registerRoutes(httpServer, app) {
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const client = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client.from("assets").select("area").eq("id", req.params.id).single();
+      const { data: asset } = await client.from("assets").select("area, job_id, category").eq("id", req.params.id).single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       if (req.profile.role === "area" && asset.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
-      if (parsed.data.job_id) {
-        const { data: job } = await client.from("jobs").select("area").eq("id", parsed.data.job_id).single();
+      const patch = { ...parsed.data };
+      const nextArea = patch.area ?? asset.area;
+      if (req.profile.role === "area" && patch.area && patch.area !== req.profile.area)
+        return res.status(403).json({ message: "You can only keep assets within your own area" });
+      if (patch.area && patch.area !== asset.area && asset.job_id)
+        return res.status(400).json({
+          message: "This asset is on a job. Unassign it from the job before changing its area."
+        });
+      if (patch.job_id) {
+        const { data: job } = await client.from("jobs").select("area").eq("id", patch.job_id).single();
         if (!job) return res.status(404).json({ message: "Job not found" });
-        if (job.area !== asset.area)
+        if (job.area !== nextArea)
           return res.status(400).json({ message: "Asset and job must be in the same operating area" });
       }
-      const { data, error } = await client.from("assets").update(parsed.data).eq("id", req.params.id).select().single();
-      if (error) return res.status(400).json({ message: error.message });
+      const effectiveCategory = patch.category ?? asset.category;
+      if (!tracksRunHours(effectiveCategory)) delete patch.service_hours_interval;
+      const { data, error } = await client.from("assets").update(patch).eq("id", req.params.id).select().single();
+      if (error) {
+        const dup = /duplicate|unique/i.test(error.message) && /tag/i.test(error.message);
+        return res.status(400).json({
+          message: dup ? "That asset number is already in use. Choose a different one." : error.message
+        });
+      }
       res.json(data);
     }
   );
