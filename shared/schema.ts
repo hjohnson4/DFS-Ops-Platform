@@ -650,6 +650,12 @@ export interface DailyReport {
   // are locked (read-only). Field reports leave this empty.
   kpis: DailyFieldKpis;
   attachment_name: string | null;
+  // Original submitted workbook, kept so the detail page can link to the real
+  // document. Bytes are omitted from list/detail JSON and streamed on demand
+  // from /api/daily-reports/:id/attachment; `has_attachment` is the UI flag.
+  attachment_mime?: string | null;
+  attachment_size?: number | null;
+  has_attachment?: boolean;
   source_sheet: string | null; // e.g. "Report Day 1"
   report_day: number | null;
   kpi_cell_map: Record<string, KpiCellRef>;

@@ -3785,6 +3785,12 @@ export async function registerRoutes(
       raw_body: null,
       source: "email",
       attachment_name: p.attachment_name,
+      // Keep the original workbook so the report detail page can link to the
+      // actual submitted document (viewable/downloadable).
+      attachment_base64: p.attachment_base64,
+      attachment_mime:
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      attachment_size: Buffer.from(p.attachment_base64, "base64").length,
       source_sheet: excel.source_sheet,
       report_day: excel.report_day,
       report_date: excel.report_date,
@@ -3990,6 +3996,11 @@ export async function registerRoutes(
             raw_body: null,
             source: "email",
             attachment_name: p.attachment_name,
+            // Keep the original workbook so the report links to the real file.
+            attachment_base64: p.attachment_base64,
+            attachment_mime:
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            attachment_size: Buffer.from(p.attachment_base64, "base64").length,
             source_sheet: excel.source_sheet,
             report_day: excel.report_day,
             report_date: excel.report_date,
@@ -4166,6 +4177,11 @@ export async function registerRoutes(
       job_number: r.job?.job_number ?? null,
       submitted_by_name: r.submitter?.name ?? null,
       signed_by_name: r.signer?.name ?? null,
+      // Never ship the heavy workbook bytes in the list; the detail page and
+      // the /attachment route load them on demand. Keep a boolean flag so the
+      // UI can decide whether to show the "View document" link.
+      has_attachment: !!r.attachment_base64,
+      attachment_base64: undefined,
       customer: undefined,
       job: undefined,
       submitter: undefined,
@@ -4203,16 +4219,52 @@ export async function registerRoutes(
       .select("*")
       .eq("report_id", req.params.id)
       .order("occurred_at", { ascending: false });
-    const { customer, job, submitter, signer, ...rest } = data as any;
+    const { customer, job, submitter, signer, attachment_base64, ...rest } =
+      data as any;
     res.json({
       ...rest,
       customer_name: customer?.name ?? null,
       job_number: job?.job_number ?? null,
       submitted_by_name: submitter?.name ?? null,
       signed_by_name: signer?.name ?? null,
+      // Expose only a flag here; the bytes stream from /attachment on demand.
+      has_attachment: !!attachment_base64,
       events: events || [],
     });
   });
+
+  // Stream the original submitted daily-report workbook. Content-Disposition is
+  // inline so browsers that can preview it (or the download-fallback link on
+  // the detail page) open the real file. Area-scoped like the report itself.
+  app.get(
+    "/api/daily-reports/:id/attachment",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const { data, error } = await supabaseAnon
+        .from("daily_reports")
+        .select("area, job_id, attachment_name, attachment_mime, attachment_base64")
+        .eq("id", req.params.id)
+        .single();
+      if (error || !data || !data.attachment_base64)
+        return res.status(404).json({ message: "No document on file for this report" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && data.area !== scope)
+        return res.status(404).json({ message: "Report not found" });
+      const jobIds = await jobScopeOf(req.profile!);
+      if (jobIds && !jobIds.includes(data.job_id))
+        return res.status(404).json({ message: "Report not found" });
+      const buf = Buffer.from(data.attachment_base64, "base64");
+      res.setHeader(
+        "Content-Type",
+        data.attachment_mime || "application/octet-stream",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename=\"${(data.attachment_name || "daily-report.xlsx").replace(/\"/g, "")}\"`,
+      );
+      res.send(buf);
+    },
+  );
 
   // Run-hours context for the sign-off UI: the day's hours (M33) plus the
   // centrifuges on the report's matched job. The frontend uses this to decide

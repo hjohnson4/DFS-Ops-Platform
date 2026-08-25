@@ -31,6 +31,7 @@ import {
   Link2,
   ShieldCheck,
   Download,
+  Eye,
   FileText,
   Inbox,
   Table2,
@@ -105,6 +106,7 @@ export default function JsaIntakeDetailPage() {
 
   const [assignJobId, setAssignJobId] = useState("");
   const [downloading, setDownloading] = useState(false);
+  const [viewing, setViewing] = useState(false);
   const [showPreview, setShowPreview] = useState(true);
 
   const { data: preview, isLoading: previewLoading } = useQuery<PreviewResponse>({
@@ -166,6 +168,24 @@ export default function JsaIntakeDetailPage() {
       toast({ title: "Could not download attachment", description: e.message, variant: "destructive" });
     } finally {
       setDownloading(false);
+    }
+  }
+
+  // Open the original JSA document in a new tab (PDFs preview inline; Excel
+  // files download via the browser). Authenticated, so fetch as a blob first.
+  async function viewAttachment() {
+    if (!id) return;
+    setViewing(true);
+    try {
+      const res = await apiRequest("GET", `/api/jsa-intake/${id}/attachment`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e: any) {
+      toast({ title: "Could not open attachment", description: e.message, variant: "destructive" });
+    } finally {
+      setViewing(false);
     }
   }
 
@@ -257,20 +277,36 @@ export default function JsaIntakeDetailPage() {
               </div>
             </div>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={downloadAttachment}
-            disabled={downloading}
-            data-testid="button-download-attachment"
-          >
-            {downloading ? (
-              <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-            ) : (
-              <Download className="mr-1.5 h-4 w-4" />
-            )}
-            Download
-          </Button>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={viewAttachment}
+              disabled={viewing || downloading}
+              data-testid="button-view-attachment"
+            >
+              {viewing ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <Eye className="mr-1.5 h-4 w-4" />
+              )}
+              View
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={downloadAttachment}
+              disabled={downloading || viewing}
+              data-testid="button-download-attachment"
+            >
+              {downloading ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-1.5 h-4 w-4" />
+              )}
+              Download
+            </Button>
+          </div>
         </div>
       </div>
 

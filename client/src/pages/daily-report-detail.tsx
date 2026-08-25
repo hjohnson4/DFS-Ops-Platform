@@ -9,6 +9,7 @@ import type {
   DailyReportEvent,
   DailyReportStatus,
   JobWithCustomer,
+  ReportRunHoursContext,
 } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -42,6 +43,7 @@ import {
 type DetailResponse = DailyReport & {
   customer_name: string | null;
   job_number: string | null;
+  has_attachment?: boolean;
   events: DailyReportEvent[];
 };
 
@@ -74,8 +76,71 @@ export default function DailyReportDetailPage() {
   const [showChanges, setShowChanges] = useState(false);
   const [changeNotes, setChangeNotes] = useState("");
   const [assignJobId, setAssignJobId] = useState("");
+  // Per-asset run-hour split, keyed by asset id (as strings for the inputs).
+  const [alloc, setAlloc] = useState<Record<string, string>>({});
+  const [docBusy, setDocBusy] = useState<"view" | "download" | null>(null);
+
+  // Open the stored source workbook. Requests are authenticated, so we fetch
+  // the bytes as a blob (not a plain <a href>) and either open them in a new
+  // tab (view) or save them (download).
+  async function openSourceDocument(mode: "view" | "download") {
+    if (!id) return;
+    setDocBusy(mode);
+    try {
+      const res = await apiRequest("GET", `/api/daily-reports/${id}/attachment`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      if (mode === "view") {
+        window.open(url, "_blank", "noopener,noreferrer");
+      } else {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = report?.attachment_name || "daily-report.xlsx";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+      // Give the new tab / download a moment to grab the URL before revoking.
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e: any) {
+      toast({
+        title: "Could not open the document",
+        description: e.message,
+        variant: "destructive",
+      });
+    } finally {
+      setDocBusy(null);
+    }
+  }
 
   const needsMatch = report?.status === "Needs job match";
+  // Emailed reports pending review can roll run hours onto centrifuges at
+  // sign-off. Field reports use a different flow and don't apply here.
+  const wantsRunHours =
+    report?.source !== "field" && report?.status === "Pending Review" && canReview;
+
+  const { data: runCtx } = useQuery<ReportRunHoursContext>({
+    queryKey: ["/api/daily-reports", id, "centrifuges"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", `/api/daily-reports/${id}/centrifuges`);
+      return res.json();
+    },
+    enabled: !!id && !!wantsRunHours,
+  });
+
+  const multiCent = (runCtx?.centrifuges?.length ?? 0) >= 2;
+  const dailyHrs = runCtx?.daily_run_hours ?? null;
+  const allocSum = multiCent
+    ? (runCtx?.centrifuges ?? []).reduce(
+        (s, c) => s + (parseFloat(alloc[c.id] || "") || 0),
+        0,
+      )
+    : 0;
+  const allocValid =
+    !multiCent ||
+    dailyHrs == null ||
+    dailyHrs <= 0 ||
+    Math.abs(allocSum - dailyHrs) < 0.01;
 
   // Only load the jobs list when we actually need to assign one.
   const { data: jobs } = useQuery<JobWithCustomer[]>({
@@ -108,7 +173,11 @@ export default function DailyReportDetailPage() {
   // emailed review endpoint (which also emails suggestions back to the sender).
   const isField = report?.source === "field";
   const review = useMutation({
-    mutationFn: async (body: { action: "sign_off" | "request_changes"; change_notes?: string }) => {
+    mutationFn: async (body: {
+      action: "sign_off" | "request_changes";
+      change_notes?: string;
+      run_hour_allocations?: { asset_id: string; hours: number }[];
+    }) => {
       const url = report?.source === "field"
         ? `/api/field-daily-reports/${id}/signoff`
         : `/api/daily-reports/${id}/review`;
@@ -118,6 +187,9 @@ export default function DailyReportDetailPage() {
     onSuccess: (_data, vars) => {
       queryClient.invalidateQueries({ queryKey: ["/api/daily-reports", id] });
       queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+      // Centrifuge run hours may have changed — refresh asset/service views.
+      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/service"] });
       toast({
         title: vars.action === "sign_off" ? "Report signed off" : "Changes requested",
         description:
@@ -284,6 +356,57 @@ export default function DailyReportDetailPage() {
             />
           </div>
 
+          {/* Source document — link to the actual submitted workbook */}
+          {report.attachment_name && (
+            <div className="mt-3 rounded-lg border border-card-border bg-card p-4">
+              <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                Source document
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="min-w-0 flex items-center gap-2 text-sm">
+                  <Mail className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="truncate font-medium">
+                    {report.attachment_name}
+                  </span>
+                </div>
+                {report.has_attachment ? (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={docBusy !== null}
+                      onClick={() => openSourceDocument("view")}
+                      data-testid="button-view-source-document"
+                    >
+                      {docBusy === "view" ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        "View"
+                      )}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={docBusy !== null}
+                      onClick={() => openSourceDocument("download")}
+                      data-testid="button-download-source-document"
+                    >
+                      {docBusy === "download" ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        "Download"
+                      )}
+                    </Button>
+                  </div>
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    Original file not stored for this report.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Well header context (also read from the sheet) */}
           {hasCtx && (
             <div className="mt-3 rounded-lg border border-card-border bg-card p-4">
@@ -341,10 +464,82 @@ export default function DailyReportDetailPage() {
         <div className="mt-4 rounded-lg border border-card-border bg-card p-4">
           <div className="text-sm font-medium mb-3">Review this report</div>
           {!showChanges ? (
+            <>
+            {/* Run-hours roll-up onto the job's centrifuges at sign-off. */}
+            {!isField && dailyHrs != null && dailyHrs > 0 &&
+              (runCtx?.centrifuges?.length ?? 0) > 0 && !runCtx?.already_applied && (
+              <div className="mb-3 rounded-md border border-card-border bg-background/60 p-3 text-sm">
+                <div className="flex items-center gap-1.5 font-medium">
+                  <Wrench className="h-4 w-4" />
+                  Run hours for this day: {dailyHrs} hrs
+                </div>
+                {!multiCent ? (
+                  <div className="text-muted-foreground mt-1">
+                    Signing off adds {dailyHrs} hrs to{" "}
+                    <span className="font-medium text-foreground">
+                      {runCtx?.centrifuges?.[0]?.tag}
+                    </span>{" "}
+                    ({runCtx?.centrifuges?.[0]?.category}).
+                  </div>
+                ) : (
+                  <div className="mt-2 space-y-2">
+                    <div className="text-muted-foreground">
+                      This job has {runCtx?.centrifuges?.length} centrifuges.
+                      Split the {dailyHrs} hrs across the units that ran:
+                    </div>
+                    {(runCtx?.centrifuges ?? []).map((c) => (
+                      <div key={c.id} className="flex items-center gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="font-medium truncate">{c.tag}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {c.category} · current {c.run_hours ?? 0} hrs
+                          </div>
+                        </div>
+                        <input
+                          type="number"
+                          min={0}
+                          step="0.5"
+                          inputMode="decimal"
+                          className="w-24 rounded-md border border-card-border bg-background px-2 py-1 text-right text-sm"
+                          value={alloc[c.id] ?? ""}
+                          onChange={(e) =>
+                            setAlloc((p) => ({ ...p, [c.id]: e.target.value }))
+                          }
+                          placeholder="0"
+                          data-testid={`input-alloc-${c.id}`}
+                        />
+                        <span className="text-xs text-muted-foreground w-8">hrs</span>
+                      </div>
+                    ))}
+                    <div
+                      className={`text-xs ${allocValid ? "text-muted-foreground" : "text-rose-600 dark:text-rose-400"}`}
+                      data-testid="text-alloc-sum"
+                    >
+                      Allocated {allocSum} of {dailyHrs} hrs
+                      {!allocValid && " — must add up to the day's total"}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               <Button
-                onClick={() => review.mutate({ action: "sign_off" })}
-                disabled={review.isPending}
+                onClick={() =>
+                  review.mutate({
+                    action: "sign_off",
+                    ...(multiCent && dailyHrs != null && dailyHrs > 0
+                      ? {
+                          run_hour_allocations: (runCtx?.centrifuges ?? []).map(
+                            (c) => ({
+                              asset_id: c.id,
+                              hours: parseFloat(alloc[c.id] || "") || 0,
+                            }),
+                          ),
+                        }
+                      : {}),
+                  })
+                }
+                disabled={review.isPending || !allocValid}
                 data-testid="button-sign-off"
               >
                 {review.isPending && review.variables?.action === "sign_off" && (
@@ -361,6 +556,7 @@ export default function DailyReportDetailPage() {
                 <MessageSquareWarning className="mr-1.5 h-4 w-4" /> Suggest changes
               </Button>
             </div>
+            </>
           ) : (
             <div className="space-y-3">
               <div>
