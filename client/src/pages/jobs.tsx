@@ -35,11 +35,40 @@ function useJobRollup(jobId: string, dayRate: number | null, reports?: DailyRepo
   const jobReports = (reports ?? []).filter((r) => r.job_id === jobId);
   const timeline = buildWellTimeline(jobReports, dayRate);
 
-  // Accrued on the current well = that well's revenue in the timeline rollup.
+  // Accrued on the current well. The authoritative figure is workbook cell
+  // AS57 (kpis.accrued_current_well) — a running cumulative total that grows
+  // each report day — read from the MOST RECENT report for the current well.
+  // We fall back to the day_rate×days timeline rollup only when no report for
+  // the current well carries AS57 (e.g. reports imported before this field
+  // existed), so nothing is fabricated.
   const currentWellRow = timeline.currentWell
     ? timeline.wells.find((w) => w.well === timeline.currentWell)
     : undefined;
-  const accruedCurrent = currentWellRow ? currentWellRow.revenue : null;
+
+  // Most recent report naming the current well, by submission time then date.
+  const accruedFromWorkbook = (() => {
+    if (!timeline.currentWell) return null;
+    const wellReports = jobReports
+      .filter((r) => (r.well_name ?? "").trim() === timeline.currentWell)
+      .sort((a, b) => {
+        const sa = String(a.created_at || a.received_at || a.report_date || "");
+        const sb = String(b.created_at || b.received_at || b.report_date || "");
+        if (sa !== sb) return sa < sb ? 1 : -1; // newest first
+        return (b.report_day ?? 0) - (a.report_day ?? 0);
+      });
+    for (const r of wellReports) {
+      const v = (r.kpis as any)?.accrued_current_well;
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+    }
+    return null;
+  })();
+
+  const accruedCurrent =
+    accruedFromWorkbook != null
+      ? accruedFromWorkbook
+      : currentWellRow
+        ? currentWellRow.revenue
+        : null;
 
   // Job activity: latest dated report's Rig Activity section (verbatim).
   const dated = jobReports

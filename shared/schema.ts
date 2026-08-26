@@ -480,6 +480,12 @@ export interface DailyFieldKpis {
   cuttings_volume_bbl?: number | null;
   vac_trucks?: number | null;
   liquids_to_disposal_bbl?: number | null;
+  // Accrued total for the CURRENT well — workbook cell AS57. This is a running
+  // cumulative figure that grows each report day; the most recent report for a
+  // well therefore holds that well's latest accrued amount. Used by the jobs
+  // page "Accrued (current well)" column in preference to the day_rate×days
+  // rollup, which is only a fallback for reports imported before this field.
+  accrued_current_well?: number | null;
 }
 
 export const SIGNOFF_STATUS = [

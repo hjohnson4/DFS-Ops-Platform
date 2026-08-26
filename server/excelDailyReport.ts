@@ -49,6 +49,10 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   { field: "cuttings_volume_bbl", cell: "Q53", numeric: true },
   { field: "vac_trucks", cell: "Q54", numeric: true },
   { field: "liquids_to_disposal_bbl", cell: "Q55", numeric: true },
+  // Accrued total for the current well: running cumulative figure in AS57 that
+  // grows each report day. The most recent report for a well carries that
+  // well's latest accrued amount, which the jobs page displays directly.
+  { field: "accrued_current_well", cell: "AS57", numeric: true },
 ];
 
 // Well-header context cells on the "Report Day N" sheet.
