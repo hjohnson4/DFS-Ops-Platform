@@ -66,6 +66,69 @@ import type { ServiceAssetRow, ServiceDashboard } from "@shared/schema";
 // Set INGEST_TOKEN at deploy (M7); blank means ingest is closed.
 const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 
+// Resolve which job a daily/JSA report for `wellName` should attach to.
+//
+// Two signals, in priority order:
+//   1. A job whose own `well_name` equals the report's well (exact, case- and
+//      whitespace-insensitive). This is the explicit link.
+//   2. LEARNED FROM HISTORY: the most recent PRIOR daily report for the same
+//      well that is already attached to a job. Once a well has been assigned to
+//      a job on any report, every later report for that same well auto-attaches
+//      to that same job. This is what makes repeated wells stop needing manual
+//      assignment even when jobs don't carry a well_name.
+//
+// Returns nulls when the well is unknown or has never been linked to a job, so
+// the caller still routes it to the "Needs job match" queue (never guesses).
+async function resolveJobForWell(
+  client: any,
+  wellName: string | null | undefined,
+): Promise<{ job_id: string | null; area: string | null; customer_id: string | null }> {
+  const empty = { job_id: null, area: null, customer_id: null };
+  const target = (wellName || "").trim().toLowerCase();
+  if (!target) return empty;
+
+  // (1) Explicit job.well_name match.
+  const { data: jobs } = await client
+    .from("jobs")
+    .select("id, area, customer_id, well_name")
+    .not("well_name", "is", null);
+  const jobMatch = (jobs || []).find(
+    (j: any) => (j.well_name || "").trim().toLowerCase() === target,
+  );
+  if (jobMatch) {
+    return { job_id: jobMatch.id, area: jobMatch.area, customer_id: jobMatch.customer_id };
+  }
+
+  // (2) Learn from a prior assigned report on the same well. We compare on the
+  // trimmed/lowered well name in JS (not SQL) so it matches the same way the
+  // explicit path does, tolerating case/spacing differences between workbooks.
+  const { data: priorReports } = await client
+    .from("daily_reports")
+    .select("well_name, job_id, created_at, received_at, report_date")
+    .not("job_id", "is", null)
+    .not("well_name", "is", null)
+    .order("created_at", { ascending: false })
+    .limit(500);
+  const prior = (priorReports || []).find(
+    (r: any) => (r.well_name || "").trim().toLowerCase() === target,
+  );
+  if (prior?.job_id) {
+    // Pull the job's current area/customer so downstream area-scope checks and
+    // stored columns stay consistent with the job record itself.
+    const { data: job } = await client
+      .from("jobs")
+      .select("id, area, customer_id")
+      .eq("id", prior.job_id)
+      .maybeSingle();
+    if (job) {
+      return { job_id: job.id, area: job.area, customer_id: job.customer_id };
+    }
+    // Job row missing (deleted); fall through rather than attach to a dead id.
+  }
+
+  return empty;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
@@ -3756,24 +3819,12 @@ export async function registerRoutes(
     // Match the well name from the sheet to a job (job = job_number + area).
     // Matching is case-insensitive on trimmed well_name. Unmatched reports go
     // to a "Needs job match" review queue instead of being silently dropped.
-    let job_id: string | null = null;
-    let area: string | null = null;
-    let customer_id: string | null = null;
-    if (excel.well_name) {
-      const { data: jobs } = await client
-        .from("jobs")
-        .select("id, area, customer_id, well_name")
-        .not("well_name", "is", null);
-      const target = excel.well_name.trim().toLowerCase();
-      const match = (jobs || []).find(
-        (j: any) => (j.well_name || "").trim().toLowerCase() === target,
-      );
-      if (match) {
-        job_id = match.id;
-        area = match.area;
-        customer_id = match.customer_id;
-      }
-    }
+    // Resolve the job by well name: explicit job.well_name match first, then
+    // learned from any prior report already assigned to a job for this well.
+    const resolved = await resolveJobForWell(client, excel.well_name);
+    let job_id: string | null = resolved.job_id;
+    let area: string | null = resolved.area;
+    let customer_id: string | null = resolved.customer_id;
 
     const status = job_id ? "Pending Review" : "Needs job match";
     const row: Record<string, any> = {
@@ -3872,26 +3923,14 @@ export async function registerRoutes(
         });
       }
 
-      // Match the well name (same as the email intake) ONCE for the whole file.
+      // Match the well name (same as the email intake) ONCE for the whole file:
+      // explicit job.well_name match first, then learned from any prior report
+      // already assigned to a job for this well.
       const wellName = days.find((d) => d.well_name)?.well_name ?? null;
-      let job_id: string | null = null;
-      let area: string | null = null;
-      let customer_id: string | null = null;
-      if (wellName) {
-        const { data: jobs } = await client
-          .from("jobs")
-          .select("id, area, customer_id, well_name")
-          .not("well_name", "is", null);
-        const target = wellName.trim().toLowerCase();
-        const match = (jobs || []).find(
-          (j: any) => (j.well_name || "").trim().toLowerCase() === target,
-        );
-        if (match) {
-          job_id = match.id;
-          area = match.area;
-          customer_id = match.customer_id;
-        }
-      }
+      const resolved = await resolveJobForWell(client, wellName);
+      let job_id: string | null = resolved.job_id;
+      let area: string | null = resolved.area;
+      let customer_id: string | null = resolved.customer_id;
 
       // Area managers can only backfill into their own area's job. If the well
       // matched a job outside their area, refuse the whole import.
