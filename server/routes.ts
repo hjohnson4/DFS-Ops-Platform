@@ -4132,6 +4132,90 @@ export async function registerRoutes(
     },
   );
 
+  // ---- Recompute KPIs from stored workbooks (admin) ----------------------
+  // Re-parse the workbook that is already stored on each daily report and
+  // refresh its `kpis` + `kpi_cell_map` in place. This backfills KPI fields
+  // that were added to the parser AFTER a report was first imported — most
+  // importantly `accrued_current_well` (workbook cell AS57) — without asking
+  // the user to re-import anything by hand.
+  //
+  // Only rows that still have their original workbook (attachment_base64) can
+  // be recomputed; rows without a stored file are skipped and reported. The
+  // operation is idempotent: re-parsing the same bytes yields the same KPIs.
+  // Optional body { job_id } limits the pass to a single job.
+  app.post(
+    "/api/daily-reports/recompute-kpis",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const jobId =
+        typeof req.body?.job_id === "string" && req.body.job_id.trim()
+          ? req.body.job_id.trim()
+          : null;
+
+      // Pull only what we need to re-parse and update. attachment_base64 is
+      // large, so cap the batch and page through report_day-ordered rows.
+      let q = client
+        .from("daily_reports")
+        .select("id, report_day, well_name, kpis, attachment_base64")
+        .not("attachment_base64", "is", null)
+        .order("created_at", { ascending: true })
+        .limit(1000);
+      if (jobId) q = q.eq("job_id", jobId);
+      const { data: rows, error } = await q;
+      if (error) return res.status(400).json({ message: error.message });
+
+      let updated = 0;
+      let unchanged = 0;
+      let skipped_no_file = 0;
+      let errors = 0;
+      const problems: Array<{ id: string; message: string }> = [];
+
+      for (const r of rows || []) {
+        if (!r.attachment_base64) {
+          skipped_no_file += 1;
+          continue;
+        }
+        try {
+          const buf = Buffer.from(r.attachment_base64, "base64");
+          const excel = parseDailyReportWorkbook(buf, r.report_day ?? undefined);
+          // Merge freshly parsed KPIs over whatever was stored so no existing
+          // KPI is lost if the parser ever drops a field.
+          const mergedKpis = { ...(r.kpis || {}), ...(excel.kpis || {}) };
+          const before = JSON.stringify(r.kpis || {});
+          const after = JSON.stringify(mergedKpis);
+          if (before === after) {
+            unchanged += 1;
+            continue;
+          }
+          const { error: upErr } = await client
+            .from("daily_reports")
+            .update({ kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map })
+            .eq("id", r.id);
+          if (upErr) {
+            errors += 1;
+            problems.push({ id: r.id, message: upErr.message });
+          } else {
+            updated += 1;
+          }
+        } catch (e: any) {
+          errors += 1;
+          problems.push({ id: r.id, message: e?.message ?? String(e) });
+        }
+      }
+
+      res.status(200).json({
+        scanned: (rows || []).length,
+        updated,
+        unchanged,
+        skipped_no_file,
+        errors,
+        problems: problems.slice(0, 25),
+      });
+    },
+  );
+
   // Assign an unmatched Excel report to a job (review-queue action).
   // Supervisors+ only. Sets job/area/customer and moves it to Pending Review.
   app.post(

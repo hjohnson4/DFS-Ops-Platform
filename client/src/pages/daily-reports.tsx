@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   Eye,
   Download,
+  RefreshCw,
 } from "lucide-react";
 import {
   Dialog,
@@ -430,6 +431,43 @@ export default function DailyReportsPage() {
       }),
   });
 
+  const canRecompute = profile?.role === "admin";
+  const recomputeKpis = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest(
+        "POST",
+        "/api/daily-reports/recompute-kpis",
+        {},
+      );
+      return res.json() as Promise<{
+        scanned: number;
+        updated: number;
+        unchanged: number;
+        skipped_no_file: number;
+        errors: number;
+      }>;
+    },
+    onSuccess: (r) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+      toast({
+        title: `KPIs refreshed — ${r.updated} updated`,
+        description:
+          `${r.scanned} scanned · ${r.updated} updated · ${r.unchanged} already current` +
+          (r.skipped_no_file
+            ? ` · ${r.skipped_no_file} had no stored file`
+            : "") +
+          (r.errors ? ` · ${r.errors} errored` : ""),
+        variant: r.errors ? "destructive" : undefined,
+      });
+    },
+    onError: (e: any) =>
+      toast({
+        title: "Could not refresh KPIs",
+        description: e.message,
+        variant: "destructive",
+      }),
+  });
+
   const showSelectColumn = canReview && selectablePending.length > 0;
   const colCount = showSelectColumn ? 7 : 6;
 
@@ -447,6 +485,23 @@ export default function DailyReportsPage() {
             >
               <Upload className="mr-1.5 h-4 w-4" />
               Import workbook
+            </Button>
+          )}
+          {canRecompute && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => recomputeKpis.mutate()}
+              disabled={recomputeKpis.isPending}
+              data-testid="button-recompute-kpis"
+              title="Re-read KPIs (incl. Accrued/AS57) from each report's stored workbook"
+            >
+              {recomputeKpis.isPending ? (
+                <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+              )}
+              Refresh KPIs
             </Button>
           )}
           {needsMatch > 0 && (
