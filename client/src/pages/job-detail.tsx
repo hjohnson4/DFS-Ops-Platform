@@ -1286,15 +1286,56 @@ function PadsSection({ job }: { job: JobWithCustomer }) {
 
   // The new-well prompt. Fires when a well name appears in this job's reports
   // that is not yet attached to any pad. We suggest a pad name from the well.
+  //
+  // "Not now" dismissals PERSIST per job+well in localStorage, so selecting the
+  // job again does not re-spam the pop-up for a well the user already skipped.
+  // The dialog auto-opens at most ONCE per job per browser session (tracked in
+  // sessionStorage) — after that, un-dismissed wells surface through the calmer
+  // amber "unassigned wells" banner + its Review button instead of a modal. A
+  // genuinely new well the user has never skipped still prompts on first sight.
+  const dismissKey = `dfs.padPrompt.dismissed.${job.id}`;
+  const autoOpenedKey = `dfs.padPrompt.autoOpened.${job.id}`;
+
   const [promptWell, setPromptWell] = useState<UnassignedWell | null>(null);
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(dismissKey);
+      return raw ? new Set<string>(JSON.parse(raw)) : new Set<string>();
+    } catch {
+      return new Set<string>();
+    }
+  });
+
+  // Persist dismissals whenever they change (per job).
+  useEffect(() => {
+    try {
+      localStorage.setItem(dismissKey, JSON.stringify(Array.from(dismissed)));
+    } catch {
+      /* storage unavailable — fall back to in-memory only */
+    }
+  }, [dismissed, dismissKey]);
 
   const nextPrompt = (unassigned ?? []).find(
     (w) => !dismissed.has(w.name.toLowerCase()),
   );
+  // Auto-open the modal only once per job per session. On later selections of
+  // the same job, the un-dismissed well shows in the banner (no modal spam).
   useEffect(() => {
-    if (nextPrompt && !promptWell && !newPadOpen) setPromptWell(nextPrompt);
-  }, [nextPrompt, promptWell, newPadOpen]);
+    if (!nextPrompt || promptWell || newPadOpen) return;
+    let alreadyAutoOpened = false;
+    try {
+      alreadyAutoOpened = sessionStorage.getItem(autoOpenedKey) === "1";
+    } catch {
+      /* ignore */
+    }
+    if (alreadyAutoOpened) return;
+    try {
+      sessionStorage.setItem(autoOpenedKey, "1");
+    } catch {
+      /* ignore */
+    }
+    setPromptWell(nextPrompt);
+  }, [nextPrompt, promptWell, newPadOpen, autoOpenedKey]);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: padsKey });
