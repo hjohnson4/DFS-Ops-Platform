@@ -44,11 +44,18 @@ function Protected() {
     <AppShell>
       <Switch>
         <Route path="/" component={Dashboard} />
-        <Route path="/customers" component={CustomersPage} />
-        <Route path="/customers/:id" component={CustomerDetailPage} />
+        {/* Customers & Field Tickets are hidden from field techs. */}
+        {profile?.role !== "field" && (
+          <Route path="/customers" component={CustomersPage} />
+        )}
+        {profile?.role !== "field" && (
+          <Route path="/customers/:id" component={CustomerDetailPage} />
+        )}
         <Route path="/jobs" component={JobsPage} />
         <Route path="/jobs/:id" component={JobDetailPage} />
-        <Route path="/field-tickets" component={FieldTicketsPage} />
+        {profile?.role !== "field" && (
+          <Route path="/field-tickets" component={FieldTicketsPage} />
+        )}
         {/* Legacy path — field reports are now part of the unified Daily Reports list */}
         <Route path="/field-daily-reports" component={DailyReportsPage} />
         <Route path="/jsas" component={JsasPage} />

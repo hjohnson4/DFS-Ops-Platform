@@ -154,16 +154,43 @@ function FieldTechDashboard({ profile }: { profile: Profile }) {
   const supervisor = wc.supervisor ?? wc.company_man ?? null;
   const rig = wc.rig ?? null;
 
-  // Cost per current well up to date, derived from the daily-report timeline
-  // (same logic as the job detail page). Revenue == billable cost accrued.
+  // Cost per current well up to date. The authoritative figure is workbook
+  // cell AS57 (kpis.accrued_current_well) — a running cumulative total read
+  // from the MOST RECENT report for the current well — same as the accrued
+  // amount shown in the Field Ops / Jobs module. We fall back to the
+  // day_rate×days timeline rollup only when no report for the current well
+  // carries AS57 (e.g. reports imported before that field existed), so nothing
+  // is fabricated.
   const timeline = buildWellTimeline(jobReports, currentJob?.day_rate ?? null);
   const currentWell = timeline.currentWell;
   const currentWellTotal =
     currentWell != null
       ? timeline.wells.find((w) => w.well === currentWell) || null
       : null;
-  const currentWellCost = currentWellTotal?.revenue ?? null;
   const currentWellDays = currentWellTotal?.reportDays ?? 0;
+
+  // Most recent report naming the current well, by submission time then date.
+  const accruedFromWorkbook = (() => {
+    if (!currentWell) return null;
+    const wellReports = jobReports
+      .filter((r) => (r.well_name ?? "").trim() === currentWell)
+      .sort((a, b) => {
+        const sa = String(a.created_at || a.received_at || a.report_date || "");
+        const sb = String(b.created_at || b.received_at || b.report_date || "");
+        if (sa !== sb) return sa < sb ? 1 : -1; // newest first
+        return (b.report_day ?? 0) - (a.report_day ?? 0);
+      });
+    for (const r of wellReports) {
+      const v = (r.kpis as any)?.accrued_current_well;
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+    }
+    return null;
+  })();
+
+  const currentWellCost =
+    accruedFromWorkbook != null
+      ? accruedFromWorkbook
+      : currentWellTotal?.revenue ?? null;
 
   // Assets on the job.
   const jobAssets = (assets || []).filter(
@@ -362,8 +389,10 @@ function FieldTechDashboard({ profile }: { profile: Profile }) {
           <p className="text-sm text-muted-foreground mt-6">
             This view is scoped to your assigned job. Report number, rig
             activity, and KPIs come from the latest daily report; cost on the
-            current well is the job's day rate times the report days on that
-            well, so it reflects billable cost through the latest report.
+            current well is the cumulative accrued amount (cell AS57) from the
+            most recent daily report for that well — the same figure shown in
+            Field Ops / Jobs. If a well's reports predate that field, it falls
+            back to the job's day rate times report days.
           </p>
         </>
       )}

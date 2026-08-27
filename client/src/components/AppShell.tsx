@@ -68,11 +68,13 @@ function writeCollapsedPref(collapsed: boolean) {
 }
 
 const ALL = ["admin", "area", "super", "field"];
+// Everyone except field techs (field techs don't see Customers / Field Tickets).
+const NON_FIELD = ["admin", "area", "super"];
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, roles: ALL },
-  { href: "/customers", label: "Customers", icon: Building2, roles: ALL },
+  { href: "/customers", label: "Customers", icon: Building2, roles: NON_FIELD },
   { href: "/jobs", label: "Field Ops & Jobs", icon: Briefcase, roles: ALL },
-  { href: "/field-tickets", label: "Field Tickets", icon: Ticket, roles: ALL },
+  { href: "/field-tickets", label: "Field Tickets", icon: Ticket, roles: NON_FIELD },
   // Safety / JSAs is one nav area with several sub-tabs. `match` marks it active
   // for every Safety sub-tab route.
   { href: "/jsa-intake", label: "Safety / JSAs", icon: ShieldAlert, roles: ALL, match: ["/jsa-intake", "/rig-up-reports", "/certifications", "/employee-profiles"] },
