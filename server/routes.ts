@@ -5871,10 +5871,27 @@ export async function registerRoutes(
 
   const todayIso = () => new Date().toISOString().slice(0, 10);
 
-  // Normalize a well name for matching (trim + case-insensitive). Report and
-  // well-record names should agree, but crews type inconsistently.
-  const normWellName = (s: string | null | undefined) =>
-    (s ?? "").trim().toLowerCase();
+  // Key a well name for matching reports to pad wells. Field crews write the
+  // full lease name on reports (e.g. "SHOCK-N-AWE UL M 507H") while a pad well
+  // is usually entered short ("Shock-N-Awe 507H"). The stable, unique part is
+  // the well-number token at the end — the digits + optional single trailing
+  // letter, like "507H" or "4H". When a name has such a token we key on it so
+  // the long and short forms match; otherwise we fall back to the whole name,
+  // trimmed and lowercased. Space/dash differences are collapsed either way.
+  const normWellName = (s: string | null | undefined) => {
+    const base = (s ?? "").trim().toLowerCase().replace(/[\s-]+/g, " ");
+    // Trailing well number: digits then an optional single letter (H/h, etc.),
+    // as the last token of the name.
+    const m = base.match(/(\d+\s?[a-z]?)\s*$/);
+    if (m) {
+      const tok = m[1].replace(/\s+/g, "");
+      // Guard: require at least one digit (already true) and avoid keying on a
+      // bare single digit that could collide (e.g. "4"); a lone number is still
+      // fine because well numbers are unique within a pad.
+      return `#${tok}`;
+    }
+    return base;
+  };
   const reportDay = (r: any): string | null => {
     const d = String(r.report_date || r.received_at || "").slice(0, 10);
     return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
