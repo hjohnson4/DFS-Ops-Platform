@@ -1,5 +1,5 @@
 import { useAuth } from "@/lib/auth";
-import { ROLE_LABELS, AREAS } from "@shared/schema";
+import { ROLE_LABELS, AREAS, tracksRunHours } from "@shared/schema";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import type {
@@ -464,14 +464,21 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
   const missingRates = activeJobs - ratedActive.length;
 
   const totalAssets = assetsScoped.length;
-  const deployed = assetsScoped.filter(
-    (a) =>
-      !!a.job_id ||
-      ["On Job", "Deployed", "In Service", "Active"].includes(a.status),
-  ).length;
-  const idleAssets = totalAssets - deployed;
+  // Fleet utilization is a CENTRIFUGE metric: only Big Bowl / Small Bowl
+  // centrifuges count, and a centrifuge is "deployed" only when it is actually
+  // assigned to a job (job_id set) — not merely staged in an area by status.
+  const centrifuges = assetsScoped.filter((a) => tracksRunHours(a.category));
+  const totalCentrifuges = centrifuges.length;
+  const deployed = centrifuges.filter((a) => !!a.job_id).length;
   const utilization =
-    totalAssets > 0 ? Math.round((deployed / totalAssets) * 100) : null;
+    totalCentrifuges > 0
+      ? Math.round((deployed / totalCentrifuges) * 100)
+      : null;
+
+  // Whole-fleet idle count (any asset not assigned to a job) — powers the
+  // "Assets" card and the idle-assets alert, independent of the centrifuge-only
+  // utilization metric above.
+  const idleAssets = assetsScoped.filter((a) => !a.job_id).length;
 
   const pending = reportsScoped.filter(
     (r) => r.status === "Pending Sign-off",
@@ -643,9 +650,9 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
           label="Fleet utilization"
           value={utilization === null ? "—" : `${utilization}%`}
           sub={
-            totalAssets > 0
-              ? `${deployed} of ${totalAssets} assets deployed`
-              : "No assets on file yet"
+            totalCentrifuges > 0
+              ? `${deployed} of ${totalCentrifuges} centrifuges on jobs`
+              : "No centrifuges on file yet"
           }
           href="/assets"
           testid="stat-utilization"
