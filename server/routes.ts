@@ -2607,7 +2607,9 @@ export async function registerRoutes(
         const job = a.job;
         const location = job
           ? `${job.well_name || job.job_number} \u00b7 ${job.area}`
-          : a.job_or_well || "Yard / unassigned";
+          : a.area
+            ? `${a.area}/unassigned`
+            : "Unassigned";
         const daysDeployed = job ? clampOverlapDays(job.started_on, job.ended_on) : null;
         const utilPct =
           daysDeployed === null ? null : Math.round((daysDeployed / windowDays) * 1000) / 10;
@@ -2692,7 +2694,9 @@ export async function registerRoutes(
         const job = a.job;
         const location = job
           ? `${job.well_name || job.job_number} \u00b7 ${job.area}`
-          : a.job_or_well || "Yard / unassigned";
+          : a.area
+            ? `${a.area}/unassigned`
+            : "Unassigned";
         const daysDeployed = job ? clampOverlapDays(job.started_on, job.ended_on) : null;
         const utilPct =
           daysDeployed === null ? null : Math.round((daysDeployed / windowDays) * 1000) / 10;

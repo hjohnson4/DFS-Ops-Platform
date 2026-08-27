@@ -251,14 +251,18 @@ export interface AssetWithSchedule extends Asset {
 }
 
 // Human-readable current location of an asset, derived from its assigned job.
-// Falls back to job_or_well text, else "Yard / unassigned".
+// When the asset is deployed to a job we show the well/job and its area. When
+// it is NOT on a job (unassigned) we show its deployable area followed by
+// "/unassigned" (e.g. "West Texas/unassigned"), so the location still reflects
+// which area the asset belongs to. Falls back to "Unassigned" only when the
+// asset has no area at all.
 export function assetLocation(a: AssetWithSchedule): string {
   if (a.job) {
     const where = a.job.well_name || a.job.job_number;
     return `${where} \u00b7 ${a.job.area}`;
   }
-  if (a.job_or_well) return a.job_or_well;
-  return "Yard / unassigned";
+  if (a.area) return `${a.area}/unassigned`;
+  return "Unassigned";
 }
 
 // A maintenance/inspection history entry for an asset, with the supervisor name
