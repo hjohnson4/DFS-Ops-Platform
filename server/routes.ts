@@ -18,6 +18,8 @@ import {
   createAssetSchema,
   updateAssetSchema,
   createReportSchema,
+  createServiceReportSchema,
+  CENTRIFUGE_SERVICE_CHECKLIST,
   uploadServiceReportSchema,
   createCustomerSchema,
   updateCustomerSchema,
@@ -3338,6 +3340,259 @@ export async function registerRoutes(
         .eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
+    },
+  );
+
+  // ---- Structured centrifuge service reports (in-app form) ----------------
+  // Digital replacement for the Mitti/SafetyCulture centrifuge report. The
+  // supervisor fills the 13-item checklist in-app; we store it on a
+  // maintenance_reports row (checklist jsonb + score) so it drives the same
+  // sign-off flow and service-baseline reset as a maintenance report, and any
+  // flagged item can spawn a work order. Photos are stored as linked
+  // maintenance_report_files rows (report_id FK).
+
+  const SERVICE_FORM_SELECT =
+    "id, asset_id, supervisor_id, report_date, filed_at, status, notes, work_performed, run_hours, score_pass, score_total, flagged_count, checklist, " +
+    "asset:assets!maintenance_reports_asset_id_fkey(tag,category,area), " +
+    "supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)";
+
+  function flattenServiceForm(row: any) {
+    const { asset, supervisor, ...rest } = row;
+    const checklist = Array.isArray(rest.checklist) ? rest.checklist : [];
+    return {
+      ...rest,
+      asset_tag: asset?.tag ?? null,
+      asset_category: asset?.category ?? null,
+      area: asset?.area ?? null,
+      supervisor_name: supervisor?.name ?? null,
+      checklist,
+      photo_count: 0, // filled in by detail route
+    };
+  }
+
+  // List filed structured service reports. Area-scoped on the asset's area.
+  // Only rows that carry a checklist (the structured form) are returned, so
+  // legacy maintenance-log rows are excluded.
+  app.get(
+    "/api/service-forms",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client
+        .from("maintenance_reports")
+        .select(SERVICE_FORM_SELECT)
+        .not("checklist", "is", null)
+        .order("filed_at", { ascending: false });
+      if (error) return res.status(500).json({ message: error.message });
+      let rows = (data || []).map(flattenServiceForm);
+      const scope = areaScopeOf(req.profile!);
+      if (scope) rows = rows.filter((r: any) => r.area === scope);
+      // Field techs: only their own filed reports.
+      if (req.profile!.role === "field")
+        rows = rows.filter((r: any) => r.supervisor_id === req.profile!.id);
+      res.json(rows);
+    },
+  );
+
+  // Detail for one structured service report, including its photos (as data
+  // URLs so the client can render them inline). Area-scoped.
+  app.get(
+    "/api/service-forms/:id",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client
+        .from("maintenance_reports")
+        .select(SERVICE_FORM_SELECT)
+        .eq("id", req.params.id)
+        .not("checklist", "is", null)
+        .single();
+      if (error || !data)
+        return res.status(404).json({ message: "Service report not found" });
+      const row = flattenServiceForm(data);
+      const scope = areaScopeOf(req.profile!);
+      if (scope && row.area !== scope)
+        return res.status(404).json({ message: "Service report not found" });
+      if (req.profile!.role === "field" && row.supervisor_id !== req.profile!.id)
+        return res.status(404).json({ message: "Service report not found" });
+
+      // Photos linked to this report.
+      const { data: files } = await client
+        .from("maintenance_report_files")
+        .select("id, file_name, file_mime, file_base64, notes")
+        .eq("report_id", req.params.id)
+        .order("created_at", { ascending: true });
+      const photos = (files || []).map((f: any) => ({
+        id: f.id,
+        file_name: f.file_name,
+        caption: f.notes ?? null,
+        data_url: `data:${f.file_mime};base64,${f.file_base64}`,
+      }));
+      res.json({ ...row, photo_count: photos.length, photos });
+    },
+  );
+
+  // File a structured service report. admin + area + super. The asset must be
+  // in the filer's area scope. Sets the service baseline (run_hours_at_service)
+  // like a maintenance report, and opens a work order for each flagged item.
+  app.post(
+    "/api/service-forms",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const parsed = createServiceReportSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const input = parsed.data;
+      const client = supabaseAdmin || supabaseAnon;
+
+      const { data: asset } = await client
+        .from("assets")
+        .select("*")
+        .eq("id", input.asset_id)
+        .single();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && asset.area !== scope)
+        return res.status(403).json({ message: "Asset is outside your area" });
+
+      // Resolve each answer against the canonical checklist so labels + flags
+      // are trustworthy (never taken from the client).
+      const byKey = new Map(input.checklist.map((c) => [c.key, c]));
+      const answered: any[] = [];
+      let pass = 0;
+      let total = 0;
+      const flaggedItems: { key: string; label: string; note: string | null }[] = [];
+      for (const def of CENTRIFUGE_SERVICE_CHECKLIST) {
+        const a = byKey.get(def.key);
+        if (!a) continue;
+        const flagged = a.answer === def.flagOn;
+        if (a.answer !== "N/A") {
+          total += 1;
+          if (!flagged) pass += 1;
+        }
+        const note = a.note?.trim() ? a.note.trim() : null;
+        answered.push({ key: def.key, label: def.label, answer: a.answer, flagged, note });
+        if (flagged) flaggedItems.push({ key: def.key, label: def.label, note });
+      }
+      if (answered.length === 0)
+        return res.status(400).json({ message: "Answer at least one checklist item" });
+
+      const { data: report, error } = await client
+        .from("maintenance_reports")
+        .insert({
+          asset_id: asset.id,
+          supervisor_id: req.profile!.id,
+          work_type: "Inspection",
+          notes: input.notes ?? null,
+          work_performed: input.work_performed ?? null,
+          report_date: input.report_date,
+          status: "Pending Sign-off",
+          checklist: answered,
+          run_hours: input.run_hours ?? null,
+          score_pass: pass,
+          score_total: total,
+          flagged_count: flaggedItems.length,
+        })
+        .select()
+        .single();
+      if (error) return res.status(400).json({ message: error.message });
+
+      // Reset the service baseline off the meter reading, exactly like a
+      // maintenance report, so the Service dashboard status recomputes.
+      const patch: any = { last_maintained: input.report_date };
+      if (tracksRunHours(asset.category)) {
+        const meterAtService =
+          input.run_hours != null ? input.run_hours : asset.run_hours;
+        if (input.run_hours != null) patch.run_hours = input.run_hours;
+        if (meterAtService != null) patch.run_hours_at_service = meterAtService;
+      }
+      await client.from("assets").update(patch).eq("id", asset.id);
+
+      // Store photos as linked files.
+      if (input.photos && input.photos.length) {
+        const rows = input.photos.map((p) => {
+          const bytes = Buffer.from(p.file_base64, "base64");
+          return {
+            asset_id: asset.id,
+            report_id: report.id,
+            file_name: p.file_name,
+            file_mime: p.file_mime,
+            file_size: bytes.length,
+            file_base64: p.file_base64,
+            notes: p.caption ?? null,
+            uploaded_by: req.profile!.id,
+          };
+        });
+        await client.from("maintenance_report_files").insert(rows);
+      }
+
+      // Audit: Filed.
+      await client.from("audit_events").insert({
+        report_id: report.id,
+        asset_id: asset.id,
+        actor_id: req.profile!.id,
+        actor_name: req.profile!.name,
+        actor_role: req.profile!.role,
+        action: "Filed",
+      });
+
+      // Auto-open a work order for each flagged item so nothing falls through.
+      const createdWorkOrders: string[] = [];
+      for (const f of flaggedItems) {
+        try {
+          const { data: seqData, error: seqErr } = await client.rpc("nextval", {
+            seq: "work_order_seq",
+          });
+          let woNumber: string;
+          if (seqErr || seqData == null) {
+            const { count } = await client
+              .from("work_orders")
+              .select("id", { count: "exact", head: true });
+            woNumber = `WO-${5001 + (count || 0)}`;
+          } else {
+            woNumber = `WO-${seqData}`;
+          }
+          const title = `Service flag: ${f.label}`.slice(0, 200);
+          const woNote = [
+            `Auto-created from service report on ${input.report_date}.`,
+            f.note ? `Tech note: ${f.note}` : null,
+          ]
+            .filter(Boolean)
+            .join(" ");
+          const { data: wo } = await client
+            .from("work_orders")
+            .insert({
+              wo_number: woNumber,
+              asset_id: asset.id,
+              area: asset.area,
+              title,
+              wo_type: "Repair",
+              priority: "High",
+              status: "Scheduled",
+              assigned_to: null,
+              due_date: null,
+              est_hours: null,
+              notes: woNote,
+              created_by: req.profile!.id,
+            })
+            .select("id")
+            .single();
+          if (wo?.id) createdWorkOrders.push(wo.id);
+        } catch (e) {
+          console.error("[service-form] work order create failed", e);
+        }
+      }
+
+      // Notify area managers who want sign-off alerts (best effort).
+      sendNotificationEmails("needs_signoff", { report, asset }).catch((e) =>
+        console.error("[email] needs_signoff", e),
+      );
+
+      res.status(201).json({
+        ...flattenServiceForm({ ...report, asset, supervisor: { name: req.profile!.name } }),
+        work_orders_created: createdWorkOrders.length,
+      });
     },
   );
 

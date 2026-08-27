@@ -9,10 +9,13 @@ import type {
   ServiceAssetRow,
   ServiceState,
   ServiceReportWithLinks,
+  ServiceReportDetail,
 } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { UploadServiceReportDialog } from "@/components/UploadServiceReportDialog";
+import { NewServiceReportDialog } from "@/components/NewServiceReportDialog";
+import { ServiceReportDetailDialog } from "@/components/ServiceReportDetailDialog";
 import { ExportReportsDialog } from "@/components/ExportReportsDialog";
 import {
   exportServiceReportsPdf,
@@ -211,6 +214,14 @@ export default function Service() {
     queryKey: ["/api/service-reports"],
   });
 
+  // Structured in-app service reports (the digital form).
+  const { data: filedForms, isLoading: formsLoading } = useQuery<
+    ServiceReportDetail[]
+  >({
+    queryKey: ["/api/service-forms"],
+  });
+  const [detailId, setDetailId] = useState<string | null>(null);
+
   const m = data?.metrics;
   const rows = data?.centrifuges ?? [];
   const reports = serviceReports ?? [];
@@ -305,11 +316,25 @@ export default function Service() {
             }
           />
           {canManageReports && (
+            <NewServiceReportDialog
+              trigger={
+                <Button size="sm" data-testid="button-new-service-report">
+                  <ClipboardCheck className="mr-1.5 h-4 w-4" />
+                  New service report
+                </Button>
+              }
+            />
+          )}
+          {canManageReports && (
             <UploadServiceReportDialog
               trigger={
-                <Button size="sm" data-testid="button-upload-service-report">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  data-testid="button-upload-service-report"
+                >
                   <Upload className="mr-1.5 h-4 w-4" />
-                  Upload service report
+                  Upload PDF
                 </Button>
               }
             />
@@ -463,11 +488,136 @@ export default function Service() {
         {canEditInterval && " Click an interval value to change it per machine."}
       </p>
 
+      {/* Filed in-app service reports (structured form) ------------------- */}
+      <div className="mt-10 mb-2 flex items-baseline justify-between">
+        <div className="flex items-center gap-2">
+          <ClipboardCheck className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Filed service reports</h2>
+        </div>
+        {!formsLoading && (
+          <span className="text-xs text-muted-foreground">
+            {(filedForms ?? []).length} filed in-app
+          </span>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground mb-3">
+        Digital centrifuge inspections filed in the app. Each row shows the
+        inspection score and any flagged items (which open work orders
+        automatically).
+      </p>
+      {formsLoading ? (
+        <div className="text-sm text-muted-foreground py-8 text-center">
+          Loading…
+        </div>
+      ) : (filedForms ?? []).length === 0 ? (
+        <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
+          <ClipboardCheck className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
+          <div className="text-sm text-muted-foreground">
+            No in-app service reports have been filed yet.
+          </div>
+          {canManageReports && (
+            <div className="text-xs text-muted-foreground mt-1">
+              Use “New service report” to fill out an inspection in the app.
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-card-border overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-card-border bg-muted/40 text-left text-xs text-muted-foreground">
+                <th className="px-3 py-2 font-medium">Date</th>
+                <th className="px-3 py-2 font-medium">Asset</th>
+                <th className="px-3 py-2 font-medium">Technician</th>
+                <th className="px-3 py-2 font-medium">Score</th>
+                <th className="px-3 py-2 font-medium">Flags</th>
+                <th className="px-3 py-2 font-medium">Status</th>
+                <th className="px-3 py-2 font-medium text-right"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {(filedForms ?? []).map((r) => {
+                const pct =
+                  r.score_total > 0
+                    ? Math.round((r.score_pass / r.score_total) * 100)
+                    : null;
+                return (
+                  <tr
+                    key={r.id}
+                    className="border-b border-card-border last:border-0 hover:bg-muted/30 align-top cursor-pointer"
+                    onClick={() => setDetailId(r.id)}
+                    data-testid={`row-service-form-${r.id}`}
+                  >
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      {fmtDate(r.report_date)}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <div className="font-medium">{r.asset_tag ?? "—"}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {r.asset_category ?? "—"} · {r.area ?? "—"}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2.5">{r.supervisor_name ?? "—"}</td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      {r.score_total > 0
+                        ? `${r.score_pass}/${r.score_total}${pct != null ? ` (${pct}%)` : ""}`
+                        : "—"}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {r.flagged_count > 0 ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-red-100 dark:bg-red-950 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-300">
+                          <AlertTriangle className="h-3 w-3" />
+                          {r.flagged_count}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          None
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5 whitespace-nowrap">
+                      <span
+                        className={[
+                          "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+                          r.status === "Signed off"
+                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                            : "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300",
+                        ].join(" ")}
+                      >
+                        {r.status}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDetailId(r.id);
+                        }}
+                        data-testid={`button-view-form-${r.id}`}
+                      >
+                        View
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <ServiceReportDetailDialog
+        reportId={detailId}
+        onClose={() => setDetailId(null)}
+      />
+
       {/* Uploaded service reports ---------------------------------------- */}
       <div className="mt-10 mb-2 flex items-baseline justify-between">
         <div className="flex items-center gap-2">
           <FileText className="h-4 w-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold">Service reports</h2>
+          <h2 className="text-sm font-semibold">Uploaded PDFs (legacy)</h2>
         </div>
         {!reportsLoading && (
           <span className="text-xs text-muted-foreground">

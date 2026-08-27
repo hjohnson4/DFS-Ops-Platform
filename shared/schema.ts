@@ -865,6 +865,110 @@ export const createReportSchema = z.object({
 });
 export type CreateReportInput = z.infer<typeof createReportSchema>;
 
+// ---- Structured centrifuge service report ---------------------------------
+// Digital replacement for the Mitti/SafetyCulture centrifuge maintenance
+// report. Each checklist item is a Pass/Fail question (mirroring the paper
+// form) with an optional note. Items are stored as data on the maintenance
+// report so the whole report is queryable (score, flagged items, history)
+// instead of living inside an opaque uploaded PDF. Photos are attached
+// separately (maintenance_report_files rows linked by report_id).
+//
+// The `key` is a stable identifier so we can trend a specific item over time
+// even if the display label is reworded later.
+export interface ServiceChecklistItemDef {
+  key: string;
+  label: string;
+  // When true, a "No" answer means the item is GOOD (the question is phrased
+  // negatively, e.g. "No abnormal wear on RA?"). Answering "No" flags it.
+  // When false, "Yes" is good and "No" flags it.
+}
+
+// The 13-item centrifuge inspection, in the same order as the Mitti report.
+// `flagOn` is the answer that indicates a problem (drives flagged-item count
+// and auto work-order creation).
+export const CENTRIFUGE_SERVICE_CHECKLIST: {
+  key: string;
+  label: string;
+  flagOn: "Yes" | "No";
+}[] = [
+  { key: "gearbox_oil", label: "Was gear box oil checked?", flagOn: "No" },
+  { key: "back_drive_bearings", label: "Back drive bearings greased", flagOn: "No" },
+  { key: "back_drive_coupling", label: "Back drive coupling in good condition and has all screws", flagOn: "No" },
+  { key: "inner_outer_bearings", label: "Inner and outer bearings greased?", flagOn: "No" },
+  { key: "back_drive_belt", label: "Back drive belt in good condition?", flagOn: "No" },
+  { key: "main_drive_belt", label: "Main drive belt in good condition?", flagOn: "No" },
+  { key: "feed_tube", label: "Feed tube in good condition?", flagOn: "No" },
+  { key: "no_abnormal_wear_ra", label: "No abnormal wear on RA?", flagOn: "No" },
+  { key: "thrust_bearing_purged", label: "Thrust bearing purged", flagOn: "No" },
+  { key: "electrical_wires", label: "Electrical wires in good condition?", flagOn: "No" },
+  { key: "coffin_clamps", label: "Coffin clamps close coffin lid properly?", flagOn: "No" },
+  { key: "no_coffin_cracks", label: "No cracks on coffin or abnormal damage?", flagOn: "No" },
+  { key: "coffin_gasket", label: "Coffin gasket seals properly?", flagOn: "No" },
+];
+
+export const SERVICE_ANSWERS = ["Yes", "No", "N/A"] as const;
+export type ServiceAnswer = (typeof SERVICE_ANSWERS)[number];
+
+// One answered checklist row as stored in the report's `checklist` jsonb.
+export interface ServiceChecklistAnswer {
+  key: string;
+  label: string;
+  answer: ServiceAnswer;
+  flagged: boolean; // computed server-side from flagOn
+  note: string | null;
+}
+
+const serviceChecklistAnswerSchema = z.object({
+  key: z.string().min(1),
+  answer: z.enum(SERVICE_ANSWERS),
+  note: z.string().trim().max(2000).nullable().optional(),
+});
+
+// One inline photo submitted with a structured service report.
+const serviceReportPhotoSchema = z.object({
+  file_name: z.string().min(1).max(200),
+  file_mime: z.string().min(1).max(100),
+  file_base64: z.string().min(1),
+  caption: z.string().trim().max(200).nullable().optional(),
+});
+
+// Payload for filing a structured centrifuge service report in-app.
+// The asset is chosen directly (no external asset number). The optional
+// run-hours reading resets the service baseline exactly like a maintenance
+// report. Photos are optional and stored as linked files.
+export const createServiceReportSchema = z.object({
+  asset_id: z.string().uuid("Choose an asset"),
+  report_date: z.string().min(1, "A service date is required"),
+  run_hours: z.number().int().nonnegative().nullable().optional(),
+  work_performed: z.string().trim().max(4000).nullable().optional(),
+  notes: z.string().trim().max(4000).nullable().optional(),
+  checklist: z.array(serviceChecklistAnswerSchema).min(1, "Answer the checklist"),
+  photos: z.array(serviceReportPhotoSchema).max(24).optional(),
+});
+export type CreateServiceReportInput = z.infer<typeof createServiceReportSchema>;
+
+// A filed structured service report joined for detail/list display.
+export interface ServiceReportDetail {
+  id: string;
+  asset_id: string;
+  asset_tag: string | null;
+  asset_category: Category | null;
+  area: Area | null;
+  supervisor_id: string;
+  supervisor_name: string | null;
+  report_date: string;
+  filed_at: string;
+  status: ReportStatus;
+  run_hours: number | null;
+  work_performed: string | null;
+  notes: string | null;
+  score_pass: number;
+  score_total: number;
+  flagged_count: number;
+  checklist: ServiceChecklistAnswer[];
+  photo_count: number;
+}
+
 // Service report upload payload. The uploader is taken from the session; the
 // job must be one in the uploader's area (enforced server-side). File bytes
 // arrive base64-encoded (no data: prefix), matching the certification upload.
