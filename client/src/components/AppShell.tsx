@@ -20,6 +20,7 @@ import {
   Users,
   Settings,
   History,
+  TrendingUp,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
@@ -76,6 +77,7 @@ const NAV = [
   // for every Safety sub-tab route.
   { href: "/jsa-intake", label: "Safety / JSAs", icon: ShieldAlert, roles: ALL, match: ["/jsa-intake", "/rig-up-reports", "/certifications", "/employee-profiles"] },
   { href: "/daily-reports", label: "Daily Reports", icon: Mails, roles: ALL },
+  { href: "/revenue", label: "Revenue", icon: TrendingUp, roles: ["admin", "area"] },
   { href: "/assets", label: "Assets", icon: Boxes, roles: ALL },
   { href: "/service", label: "Service", icon: Wrench, roles: ALL },
   { href: "/reports", label: "Maintenance", icon: ClipboardList, roles: ALL },

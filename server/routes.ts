@@ -6079,6 +6079,311 @@ export async function registerRoutes(
     },
   );
 
+  // ---- Revenue module ----------------------------------------------------
+  // Admin sees all areas; area managers see only their own area's jobs.
+  // Revenue = the ACCRUED (cell AS57) cumulative figure from the most recent
+  // daily report per well, summed to the job. "Daily revenue" uses a simpler
+  // basis: one report-day = the job's day rate (day rate x report days).
+
+  // Compute, for a set of jobs, the accrued (AS57) revenue per job by summing
+  // each well's latest reported AS57 value. One pass over the jobs' reports.
+  async function jobAccruedRevenue(
+    jobIds: string[],
+  ): Promise<Map<string, { revenue: number | null; hasAccrued: boolean }>> {
+    const out = new Map<string, { revenue: number | null; hasAccrued: boolean }>();
+    for (const id of jobIds) out.set(id, { revenue: null, hasAccrued: false });
+    if (jobIds.length === 0) return out;
+    const client = padClient();
+    const { data: reports } = await client
+      .from("daily_reports")
+      .select("job_id, well_name, report_date, received_at, report_day, kpis")
+      .in("job_id", jobIds);
+    const accruedOf = (r: any): number | null => {
+      const raw = r?.kpis?.accrued_current_well;
+      if (raw == null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+    // Per (job, well) key, keep the accrued value from the most recent report
+    // that actually carries one (by date, then report day).
+    type Owner = { day: string; reportDay: number; accrued: number };
+    const latest = new Map<string, Owner>(); // key: jobId + "\u0000" + wellKey
+    for (const r of reports ?? []) {
+      const jid = r.job_id as string;
+      const day = reportDay(r);
+      const accrued = accruedOf(r);
+      if (!day || accrued == null) continue;
+      const wellKey = normWellName((r.well_name as string | null) ?? "");
+      const rd = Number((r as any).report_day);
+      const key = jid + "\u0000" + wellKey;
+      const owner = latest.get(key);
+      const isNewer =
+        !owner ||
+        day > owner.day ||
+        (day === owner.day && (Number.isFinite(rd) ? rd : 0) >= owner.reportDay);
+      if (isNewer)
+        latest.set(key, {
+          day,
+          reportDay: Number.isFinite(rd) ? rd : 0,
+          accrued,
+        });
+    }
+    for (const [key, owner] of Array.from(latest.entries())) {
+      const jid = key.split("\u0000")[0];
+      const cur = out.get(jid) ?? { revenue: null, hasAccrued: false };
+      cur.revenue = (cur.revenue ?? 0) + owner.accrued;
+      cur.hasAccrued = true;
+      out.set(jid, cur);
+    }
+    return out;
+  }
+
+  // Revenue summary: totals, by-area, by-job, by-customer, daily & monthly
+  // series, and an active/completed split. Admin + area only, area-scoped.
+  app.get(
+    "/api/revenue/summary",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const scope = areaScopeOf(req.profile!); // null for admin
+      const client = padClient();
+      // In-scope, non-archived jobs.
+      let jq = client
+        .from("jobs")
+        .select("id, job_number, area, day_rate, customer_id, well_name")
+        .is("archived_at", null);
+      if (scope) jq = jq.eq("area", scope);
+      const { data: jobs, error: jErr } = await jq;
+      if (jErr) return res.status(500).json({ message: jErr.message });
+      const jobRows = jobs ?? [];
+      const jobIds = jobRows.map((j: any) => j.id);
+
+      // Customer names for the in-scope jobs.
+      const custIds = Array.from(
+        new Set(jobRows.map((j: any) => j.customer_id).filter(Boolean)),
+      );
+      const custName = new Map<string, string>();
+      if (custIds.length) {
+        const { data: custs } = await client
+          .from("customers")
+          .select("id, name")
+          .in("id", custIds);
+        for (const c of custs ?? []) custName.set(c.id, c.name);
+      }
+
+      // Accrued revenue per job, plus which wells are "current" (for active
+      // vs completed) via wellReportStats per job.
+      const accrued = await jobAccruedRevenue(jobIds);
+
+      // All in-scope reports once, for daily/monthly day-rate revenue and
+      // active detection (a job is active if it has a most-recent-dated well).
+      const { data: reps } = await client
+        .from("daily_reports")
+        .select("job_id, report_date, received_at")
+        .in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
+      const dayRateOf = new Map<string, number | null>();
+      for (const j of jobRows) {
+        const dr =
+          j.day_rate != null && !isNaN(Number(j.day_rate))
+            ? Number(j.day_rate)
+            : null;
+        dayRateOf.set(j.id, dr);
+      }
+      // Daily revenue (day rate per report day) and per-job report-day counts.
+      const dailyMap = new Map<string, number>(); // yyyy-mm-dd -> revenue
+      const monthlyMap = new Map<string, number>(); // yyyy-mm -> revenue
+      const reportDaysByJob = new Map<string, number>();
+      const lastReportByJob = new Map<string, string>();
+      for (const r of reps ?? []) {
+        const jid = r.job_id as string;
+        const day = reportDay(r);
+        if (!day) continue;
+        const dr = dayRateOf.get(jid) ?? null;
+        reportDaysByJob.set(jid, (reportDaysByJob.get(jid) ?? 0) + 1);
+        const prev = lastReportByJob.get(jid);
+        if (!prev || day > prev) lastReportByJob.set(jid, day);
+        if (dr != null) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + dr);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + dr);
+        }
+      }
+
+      // Per-job rows (accrued revenue is the headline figure).
+      const byJob = jobRows.map((j: any) => {
+        const acc = accrued.get(j.id) ?? { revenue: null, hasAccrued: false };
+        const days = reportDaysByJob.get(j.id) ?? 0;
+        return {
+          job_id: j.id,
+          job_number: j.job_number,
+          area: j.area,
+          customer_id: j.customer_id ?? null,
+          customer_name: j.customer_id
+            ? custName.get(j.customer_id) ?? ""
+            : "",
+          day_rate: dayRateOf.get(j.id),
+          report_days: days,
+          revenue: acc.revenue, // accrued (AS57); null when no report had one
+          has_accrued: acc.hasAccrued,
+          active: days > 0, // has report activity
+          last_report: lastReportByJob.get(j.id) ?? null,
+        };
+      });
+
+      const sumRev = (rows: { revenue: number | null }[]) => {
+        const vals = rows
+          .map((r) => r.revenue)
+          .filter((v): v is number => v != null);
+        return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
+      };
+
+      // By area.
+      const areaMap = new Map<string, { revenue: number | null; jobs: number }>();
+      for (const r of byJob) {
+        const cur = areaMap.get(r.area) ?? { revenue: null, jobs: 0 };
+        if (r.revenue != null) cur.revenue = (cur.revenue ?? 0) + r.revenue;
+        cur.jobs += 1;
+        areaMap.set(r.area, cur);
+      }
+      const byArea = Array.from(areaMap.entries())
+        .map(([area, v]) => ({ area, revenue: v.revenue, jobs: v.jobs }))
+        .sort((a, b) => (b.revenue ?? 0) - (a.revenue ?? 0));
+
+      // By customer.
+      const custMap = new Map<
+        string,
+        { customer_id: string | null; name: string; revenue: number | null; jobs: number }
+      >();
+      for (const r of byJob) {
+        const cid = r.customer_id ?? "none";
+        const cur =
+          custMap.get(cid) ??
+          {
+            customer_id: r.customer_id ?? null,
+            name: r.customer_name || "(no customer)",
+            revenue: null,
+            jobs: 0,
+          };
+        if (r.revenue != null) cur.revenue = (cur.revenue ?? 0) + r.revenue;
+        cur.jobs += 1;
+        custMap.set(cid, cur);
+      }
+      const byCustomer = Array.from(custMap.values()).sort(
+        (a, b) => (b.revenue ?? 0) - (a.revenue ?? 0),
+      );
+
+      const daily = Array.from(dailyMap.entries())
+        .map(([date, revenue]) => ({ date, revenue }))
+        .sort((a, b) => (a.date < b.date ? -1 : 1));
+      const monthly = Array.from(monthlyMap.entries())
+        .map(([month, revenue]) => ({ month, revenue }))
+        .sort((a, b) => (a.month < b.month ? -1 : 1));
+
+      const activeJobs = byJob.filter((j) => j.active);
+      const completedJobs = byJob.filter((j) => !j.active);
+      const topJobs = [...byJob]
+        .filter((j) => j.revenue != null)
+        .sort((a, b) => (b.revenue ?? 0) - (a.revenue ?? 0))
+        .slice(0, 10);
+
+      res.json({
+        scope: scope ?? "all",
+        totals: {
+          revenue: sumRev(byJob),
+          jobs: byJob.length,
+          active_jobs: activeJobs.length,
+          completed_jobs: completedJobs.length,
+          active_revenue: sumRev(activeJobs),
+          completed_revenue: sumRev(completedJobs),
+          jobs_missing_accrued: byJob.filter((j) => !j.has_accrued).length,
+        },
+        by_area: byArea,
+        by_customer: byCustomer,
+        by_job: byJob.sort((a, b) => (b.revenue ?? 0) - (a.revenue ?? 0)),
+        top_jobs: topJobs,
+        daily,
+        monthly,
+      });
+    },
+  );
+
+  // CSV export of the by-job revenue breakdown (same scope as the summary).
+  app.get(
+    "/api/revenue/export",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const scope = areaScopeOf(req.profile!);
+      const client = padClient();
+      let jq = client
+        .from("jobs")
+        .select("id, job_number, area, day_rate, customer_id")
+        .is("archived_at", null);
+      if (scope) jq = jq.eq("area", scope);
+      const { data: jobs, error } = await jq;
+      if (error) return res.status(500).json({ message: error.message });
+      const jobRows = jobs ?? [];
+      const jobIds = jobRows.map((j: any) => j.id);
+      const custIds = Array.from(
+        new Set(jobRows.map((j: any) => j.customer_id).filter(Boolean)),
+      );
+      const custName = new Map<string, string>();
+      if (custIds.length) {
+        const { data: custs } = await client
+          .from("customers")
+          .select("id, name")
+          .in("id", custIds);
+        for (const c of custs ?? []) custName.set(c.id, c.name);
+      }
+      const accrued = await jobAccruedRevenue(jobIds);
+      const { data: reps } = await client
+        .from("daily_reports")
+        .select("job_id, report_date, received_at")
+        .in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
+      const reportDaysByJob = new Map<string, number>();
+      for (const r of reps ?? []) {
+        if (reportDay(r)) reportDaysByJob.set(r.job_id, (reportDaysByJob.get(r.job_id) ?? 0) + 1);
+      }
+      const esc = (v: any) => {
+        const s = v == null ? "" : String(v);
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const header = [
+        "Job Number",
+        "Area",
+        "Customer",
+        "Day Rate",
+        "Report Days",
+        "Revenue (Accrued AS57)",
+      ];
+      const lines = [header.join(",")];
+      for (const j of jobRows) {
+        const acc = accrued.get(j.id) ?? { revenue: null };
+        const dr =
+          j.day_rate != null && !isNaN(Number(j.day_rate))
+            ? Number(j.day_rate)
+            : null;
+        lines.push(
+          [
+            esc(j.job_number),
+            esc(j.area),
+            esc(j.customer_id ? custName.get(j.customer_id) ?? "" : ""),
+            esc(dr ?? ""),
+            esc(reportDaysByJob.get(j.id) ?? 0),
+            esc(acc.revenue ?? ""),
+          ].join(","),
+        );
+      }
+      const csv = lines.join("\r\n");
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="revenue-${scope ? scope.replace(/\s+/g, "-") : "all"}-${todayIso()}.csv"`,
+      );
+      res.send(csv);
+    },
+  );
+
   // Create a pad (optionally with initial wells) on a job.
   app.post(
     "/api/jobs/:jobId/pads",
