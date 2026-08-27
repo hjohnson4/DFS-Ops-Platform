@@ -53,7 +53,18 @@ import {
   Wrench,
   FileText,
   Pencil,
+  Trash2,
 } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 const NO_SCHEDULE = "__none__";
 
@@ -572,6 +583,27 @@ function EditAssetDialog({
       toast({ title: "Could not update asset", description: e.message, variant: "destructive" }),
   });
 
+  // Whether the delete-confirmation alert is open.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Permanently delete this asset ("wipe from the list"). Related maintenance
+  // reports, files, work orders, and audit events are removed automatically by
+  // the database (ON DELETE CASCADE).
+  const del = useMutation({
+    mutationFn: async () => {
+      await apiRequest("DELETE", `/api/assets/${asset.id}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
+      queryClient.removeQueries({ queryKey: ["/api/assets", asset.id] });
+      setConfirmDelete(false);
+      onOpenChange(false);
+      toast({ title: "Asset deleted" });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not delete asset", description: e.message, variant: "destructive" }),
+  });
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-lg max-h-[85vh] flex flex-col">
@@ -717,23 +749,76 @@ function EditAssetDialog({
           </div>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="sm:justify-between">
+          {/* Delete lives on the left, away from Save, so it isn't clicked by
+              accident. It always requires a confirmation. */}
           <Button
-            variant="outline"
-            onClick={() => onOpenChange(false)}
-            data-testid="edit-button-cancel"
+            variant="destructive"
+            onClick={() => setConfirmDelete(true)}
+            disabled={del.isPending}
+            data-testid="edit-button-delete-asset"
           >
-            Cancel
+            {del.isPending ? (
+              <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+            ) : (
+              <Trash2 className="h-4 w-4 mr-1.5" />
+            )}
+            Delete asset
           </Button>
-          <Button
-            disabled={save.isPending}
-            onClick={() => save.mutate()}
-            data-testid="edit-button-submit-asset"
-          >
-            {save.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
-            Save changes
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+              data-testid="edit-button-cancel"
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={save.isPending}
+              onClick={() => save.mutate()}
+              data-testid="edit-button-submit-asset"
+            >
+              {save.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+              Save changes
+            </Button>
+          </div>
         </DialogFooter>
+
+        {/* Wipe-from-the-list confirmation. */}
+        <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete this asset?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This permanently removes{" "}
+                <span className="font-medium">{asset.tag}</span> from the assets
+                list, along with its maintenance reports, work orders, and
+                history. This can't be undone.
+                {onJob
+                  ? " This asset is currently deployed to a job — deleting it will also remove it from that job."
+                  : ""}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel data-testid="confirm-delete-cancel">
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                onClick={(e) => {
+                  e.preventDefault();
+                  del.mutate();
+                }}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                data-testid="confirm-delete-asset"
+              >
+                {del.isPending && (
+                  <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+                )}
+                Delete asset
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </DialogContent>
     </Dialog>
   );

@@ -2914,6 +2914,35 @@ export async function registerRoutes(
     },
   );
 
+  // Delete an asset entirely ("wipe from the list"). Admin + area managers only;
+  // area managers can only delete assets within their own area. Child rows in
+  // audit_events, maintenance_report_files, maintenance_reports, and work_orders
+  // are removed automatically by ON DELETE CASCADE, so this is a clean delete.
+  app.delete(
+    "/api/assets/:id",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      // Load the asset for the area-scope check.
+      const { data: asset } = await client
+        .from("assets")
+        .select("area")
+        .eq("id", req.params.id)
+        .single();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      if (req.profile!.role === "area" && asset.area !== req.profile!.area)
+        return res.status(403).json({ message: "Outside your area" });
+
+      const { error } = await client
+        .from("assets")
+        .delete()
+        .eq("id", req.params.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
+    },
+  );
+
   // ---- Service dashboard --------------------------------------------------
   // Aggregates centrifuge fleet health for the Service module: active count,
   // machines needing service soon, overdue machines, and reports filed — plus
