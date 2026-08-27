@@ -12,7 +12,6 @@ import type {
   ServiceReportDetail,
 } from "@shared/schema";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { UploadServiceReportDialog } from "@/components/UploadServiceReportDialog";
@@ -31,7 +30,6 @@ import {
   Check,
   Download,
   FileText,
-  Pencil,
   Trash2,
   Upload,
   Wrench,
@@ -93,6 +91,10 @@ const STATE_META: Record<
     label: "No baseline",
     cls: "bg-muted text-muted-foreground",
   },
+  "Not tracked": {
+    label: "Not tracked",
+    cls: "bg-muted text-muted-foreground",
+  },
 };
 
 function StatusBadge({ state }: { state: ServiceState }) {
@@ -107,98 +109,10 @@ function StatusBadge({ state }: { state: ServiceState }) {
   );
 }
 
-// ---- Inline interval editor (admin / area only) ----------------------------
-function IntervalCell({
-  row,
-  canEdit,
-}: {
-  row: ServiceAssetRow;
-  canEdit: boolean;
-}) {
-  const { toast } = useToast();
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(String(row.service_hours_interval));
-
-  const save = useMutation({
-    mutationFn: async () => {
-      const n = parseInt(val, 10);
-      if (!Number.isFinite(n) || n <= 0) throw new Error("Enter a positive number of hours");
-      await apiRequest("PATCH", `/api/assets/${row.id}`, {
-        service_hours_interval: n,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/service/dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
-      setEditing(false);
-      toast({ title: "Interval updated" });
-    },
-    onError: (e: any) =>
-      toast({ title: "Could not update", description: e.message, variant: "destructive" }),
-  });
-
-  if (!canEdit) {
-    return (
-      <span className="tabular-nums">
-        {row.service_hours_interval.toLocaleString()} hrs
-      </span>
-    );
-  }
-  if (!editing) {
-    return (
-      <button
-        type="button"
-        onClick={() => {
-          setVal(String(row.service_hours_interval));
-          setEditing(true);
-        }}
-        className="group inline-flex items-center gap-1 tabular-nums hover:text-primary"
-        data-testid={`button-edit-interval-${row.tag}`}
-      >
-        {row.service_hours_interval.toLocaleString()} hrs
-        <Pencil className="h-3 w-3 opacity-0 group-hover:opacity-60" />
-      </button>
-    );
-  }
-  return (
-    <div className="flex items-center gap-1">
-      <Input
-        type="number"
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        className="h-7 w-20 px-2 text-sm"
-        min={1}
-        data-testid={`input-interval-${row.tag}`}
-        autoFocus
-      />
-      <Button
-        size="icon"
-        variant="ghost"
-        className="h-7 w-7"
-        disabled={save.isPending}
-        onClick={() => save.mutate()}
-        data-testid={`button-save-interval-${row.tag}`}
-      >
-        <Check className="h-4 w-4" />
-      </Button>
-      <Button
-        size="icon"
-        variant="ghost"
-        className="h-7 w-7"
-        onClick={() => setEditing(false)}
-      >
-        <X className="h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
-
 // ---- Page ------------------------------------------------------------------
 export default function Service() {
   const { profile } = useAuth();
   const { toast } = useToast();
-  const canEditInterval =
-    profile?.role === "admin" || profile?.role === "area";
   // Area managers and supervisors (and admins) upload and manage service
   // reports. Field techs can view within their scope but not upload/delete.
   const canManageReports =
@@ -352,10 +266,10 @@ export default function Service() {
       </div>
       <p className="text-sm text-muted-foreground mb-6">
         Centrifuge fleet health across{" "}
-        {profile?.area ? profile.area : "all areas"}. Run-hours since service are
-        measured from the meter reading captured at the last filed report;
-        machines are flagged as they approach (within 10%) and then pass their
-        service interval.
+        {profile?.area ? profile.area : "all areas"}. Job-assigned centrifuges
+        are on a weekly (7-day) service schedule, counted from the last filed
+        service report; machines are flagged as they approach and then pass
+        that weekly interval. Unassigned centrifuges are not tracked.
       </p>
 
       {/* Headline metrics */}
@@ -463,7 +377,7 @@ export default function Service() {
                 <th className="px-3 py-2 font-medium">Job / Area</th>
                 <th className="px-3 py-2 font-medium">Technician</th>
                 <th className="px-3 py-2 font-medium text-right">
-                  Run hrs since service
+                  Days since service
                 </th>
                 <th className="px-3 py-2 font-medium text-right">Interval</th>
                 <th className="px-3 py-2 font-medium">Status</th>
@@ -498,19 +412,27 @@ export default function Service() {
                     )}
                   </td>
                   <td className="px-3 py-2.5 text-right tabular-nums">
-                    {r.run_hours_since_service == null ? (
+                    {!r.assigned ? (
+                      <span className="text-muted-foreground">—</span>
+                    ) : r.days_since_service == null ? (
                       <span
                         className="text-muted-foreground"
-                        title="No service on record yet — file a report to set the baseline."
+                        title="No service report on record yet — file one to start the weekly clock."
                       >
                         —
                       </span>
                     ) : (
-                      `${r.run_hours_since_service.toLocaleString()} hrs`
+                      `${r.days_since_service} ${
+                        r.days_since_service === 1 ? "day" : "days"
+                      }`
                     )}
                   </td>
-                  <td className="px-3 py-2.5 text-right">
-                    <IntervalCell row={r} canEdit={canEditInterval} />
+                  <td className="px-3 py-2.5 text-right tabular-nums">
+                    {r.assigned ? (
+                      "Weekly"
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
                   </td>
                   <td className="px-3 py-2.5">
                     <StatusBadge state={r.service_state} />
@@ -523,10 +445,12 @@ export default function Service() {
       )}
 
       <p className="text-xs text-muted-foreground mt-4">
-        Technician shows the supervisor who last filed a service report on that
-        machine. Rows with “No baseline” have no service on record yet — file a
-        maintenance report to set the run-hour baseline.
-        {canEditInterval && " Click an interval value to change it per machine."}
+        Job-assigned centrifuges are serviced on a weekly (7-day) schedule,
+        counted from the last filed service report. “Service soon” shows the day
+        before it comes due; “Overdue” once 7 days have passed. Rows with “No
+        baseline” have no service report on record yet — file one to start the
+        weekly clock. Unassigned centrifuges are not tracked until they’re put
+        on a job.
       </p>
 
       {/* Filed in-app service reports (structured form) ------------------- */}

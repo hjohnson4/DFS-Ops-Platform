@@ -53,6 +53,8 @@ import {
   tracksRunHours,
   RUN_HOUR_CATEGORIES,
   serviceStatusFor,
+  weeklyServiceStatusFor,
+  WEEKLY_SERVICE_DAYS,
   createMaintenanceScheduleSchema,
   updateMaintenanceScheduleSchema,
   uploadMaintenanceFileSchema,
@@ -2995,10 +2997,18 @@ export async function registerRoutes(
         (r) => r.status !== "Signed off",
       ).length;
 
-      // Build per-asset service status.
+      // Build per-asset service status. Job-assigned centrifuges are serviced
+      // on a fixed weekly (7-day) cadence measured from their last service
+      // report date. Unassigned centrifuges are NOT tracked — their day fields
+      // are null and their state is "Not tracked". Run-hours fields are kept for
+      // reference but no longer drive the service state.
       const rows: (ServiceAssetRow & { _deployed: boolean })[] = assets.map(
         (a) => {
-          const { hoursSince, interval, state } = serviceStatusFor(a);
+          const { hoursSince } = serviceStatusFor(a);
+          const assigned = a.job_id != null;
+          const weekly = assigned
+            ? weeklyServiceStatusFor(a.last_maintained)
+            : { daysSince: null, intervalDays: WEEKLY_SERVICE_DAYS, state: "Not tracked" as const };
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
@@ -3007,25 +3017,30 @@ export async function registerRoutes(
             area: a.area,
             status: a.status,
             job_id: a.job_id,
-            assigned: a.job_id != null,
+            assigned,
             job_number: a.job?.job_number ?? null,
             job_or_well: a.job_or_well,
             technician: techByAsset.get(a.id) ?? null,
             run_hours: a.run_hours,
             run_hours_since_service: hoursSince,
-            service_hours_interval: interval,
+            service_hours_interval: a.service_hours_interval ?? 0,
+            days_since_service: weekly.daysSince,
+            service_interval_days: weekly.intervalDays,
             last_maintained: a.last_maintained,
-            service_state: state,
+            service_state: weekly.state,
             _deployed: deployed,
           };
         },
       );
 
+      // Metrics count only job-assigned (tracked) centrifuges for due/overdue.
+      const assignedRows = rows.filter((r) => r.assigned);
       const metrics: ServiceDashboard["metrics"] = {
-        active_centrifuges: rows.filter((r) => r._deployed).length,
+        active_centrifuges: assignedRows.length,
         total_centrifuges: rows.length,
-        due_soon: rows.filter((r) => r.service_state === "Soon").length,
-        overdue: rows.filter((r) => r.service_state === "Overdue").length,
+        due_soon: assignedRows.filter((r) => r.service_state === "Soon").length,
+        overdue: assignedRows.filter((r) => r.service_state === "Overdue")
+          .length,
         reports_filed: reportsFiled,
         reports_pending_signoff: reportsPending,
       };
@@ -3039,6 +3054,7 @@ export async function registerRoutes(
         Soon: 1,
         "No baseline": 2,
         OK: 3,
+        "Not tracked": 4,
       };
       const centrifuges: ServiceAssetRow[] = rows
         .sort(

@@ -350,7 +350,44 @@ export const DEFAULT_SERVICE_HOURS_INTERVAL = 250;
 // interval, and "overdue" once it has reached/passed the interval.
 export const SERVICE_SOON_FRACTION = 0.1;
 
-export type ServiceState = "OK" | "Soon" | "Overdue" | "No baseline";
+export type ServiceState =
+  | "OK"
+  | "Soon"
+  | "Overdue"
+  | "No baseline"
+  | "Not tracked";
+
+// Centrifuges assigned to a job are serviced on a fixed weekly (7-day) cadence,
+// measured from the date of their last filed service report. Unassigned
+// centrifuges are not tracked. "Soon" turns on the day before it comes due.
+export const WEEKLY_SERVICE_DAYS = 7;
+export const WEEKLY_SERVICE_SOON_DAYS = 1;
+
+// Whole days between a past ISO date and now (never negative).
+export function daysSince(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const ms = Date.now() - then;
+  return Math.max(0, Math.floor(ms / 86_400_000));
+}
+
+// Weekly time-based service status for a job-assigned centrifuge. Baseline is
+// the last filed service report date (`lastMaintained`); with none, the unit
+// has no baseline and is treated as due now.
+export function weeklyServiceStatusFor(lastMaintained: string | null): {
+  daysSince: number | null;
+  intervalDays: number;
+  state: ServiceState;
+} {
+  const intervalDays = WEEKLY_SERVICE_DAYS;
+  const d = daysSince(lastMaintained);
+  if (d == null) return { daysSince: null, intervalDays, state: "No baseline" };
+  let state: ServiceState = "OK";
+  if (d >= intervalDays) state = "Overdue";
+  else if (d >= intervalDays - WEEKLY_SERVICE_SOON_DAYS) state = "Soon";
+  return { daysSince: d, intervalDays, state };
+}
 
 // Compute service status for a run-hour asset from its meter + interval.
 // `run_hours_at_service` is the meter reading at the last service; when null
@@ -385,6 +422,10 @@ export interface ServiceAssetRow {
   run_hours: number | null;
   run_hours_since_service: number | null;
   service_hours_interval: number;
+  // Weekly (time-based) service tracking. Populated only for job-assigned
+  // centrifuges; null on unassigned units, whose service_state is "Not tracked".
+  days_since_service: number | null;
+  service_interval_days: number;
   last_maintained: string | null;
   service_state: ServiceState;
 }
