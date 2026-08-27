@@ -25,7 +25,6 @@ import RigUpReportsPage from "@/pages/rig-up-reports";
 import CertificationsPage from "@/pages/certifications";
 import EmployeeProfilesPage from "@/pages/employee-profiles";
 import ServicePage from "@/pages/service";
-import MaintenancePage from "@/pages/maintenance";
 import AuditTrailPage from "@/pages/audit-trail";
 import AssetsPage from "@/pages/assets";
 import RevenuePage from "@/pages/revenue";
@@ -68,7 +67,6 @@ function Protected() {
         <Route path="/employee-profiles" component={EmployeeProfilesPage} />
         <Route path="/assets" component={AssetsPage} />
         <Route path="/service" component={ServicePage} />
-        <Route path="/reports" component={MaintenancePage} />
         <Route path="/audit-trail" component={AuditTrailPage} />
         {(profile?.role === "admin" || profile?.role === "area") && (
           <Route path="/revenue" component={RevenuePage} />

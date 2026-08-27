@@ -18,6 +18,7 @@ import { UploadServiceReportDialog } from "@/components/UploadServiceReportDialo
 import { NewServiceReportDialog } from "@/components/NewServiceReportDialog";
 import { ServiceReportDetailDialog } from "@/components/ServiceReportDetailDialog";
 import { ExportReportsDialog } from "@/components/ExportReportsDialog";
+import { WorkOrdersSection } from "@/components/WorkOrdersSection";
 import {
   exportServiceReportsPdf,
   type ServiceExportReport,
@@ -692,6 +693,11 @@ export default function Service() {
           </table>
         </div>
       )}
+
+      {/* Work orders (moved from the Maintenance module) ------------------ */}
+      <div className="mt-10">
+        <WorkOrdersSection canManage={canManageReports} />
+      </div>
     </div>
   );
 }
