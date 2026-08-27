@@ -1165,7 +1165,7 @@ export async function registerRoutes(
   app.post(
     "/api/customers",
     requireAuth,
-    requireRole("admin", "area"),
+    requireRole("admin"),
     async (req: Request, res: Response) => {
       const parsed = createCustomerSchema.safeParse(req.body);
       if (!parsed.success)
@@ -1188,7 +1188,7 @@ export async function registerRoutes(
   app.patch(
     "/api/customers/:id",
     requireAuth,
-    requireRole("admin", "area"),
+    requireRole("admin"),
     async (req: Request, res: Response) => {
       const parsed = updateCustomerSchema.safeParse(req.body);
       if (!parsed.success)
@@ -1204,6 +1204,33 @@ export async function registerRoutes(
         .single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(data);
+    },
+  );
+
+  // Delete a customer (admin only). Blocked when the customer still has jobs so
+  // job history is never orphaned — the admin must reassign/remove those jobs
+  // first. Returns 409 with a count when jobs exist.
+  app.delete(
+    "/api/customers/:id",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { count, error: countErr } = await client
+        .from("jobs")
+        .select("id", { count: "exact", head: true })
+        .eq("customer_id", req.params.id);
+      if (countErr) return res.status(500).json({ message: countErr.message });
+      if ((count ?? 0) > 0)
+        return res.status(409).json({
+          message: `This customer has ${count} job${count === 1 ? "" : "s"}. Remove or reassign those jobs before deleting the customer.`,
+        });
+      const { error } = await client
+        .from("customers")
+        .delete()
+        .eq("id", req.params.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
     },
   );
 

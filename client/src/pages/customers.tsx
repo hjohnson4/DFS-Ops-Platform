@@ -24,7 +24,8 @@ export default function CustomersPage() {
   const { profile } = useAuth();
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
-  const canManage = profile?.role === "admin" || profile?.role === "area";
+  // Creating, editing, and deleting customers is admin-only.
+  const canManage = profile?.role === "admin";
 
   const { data: customers, isLoading } = useQuery<Customer[]>({
     queryKey: ["/api/customers"],
