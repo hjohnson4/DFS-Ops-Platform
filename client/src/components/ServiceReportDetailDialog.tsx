@@ -1,4 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
 import type { ServiceReportDetail, ServiceChecklistAnswer } from "@shared/schema";
 import {
   Dialog,
@@ -6,8 +9,10 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "@/components/ui/dialog";
-import { ClipboardCheck, AlertTriangle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { ClipboardCheck, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 
 interface Photo {
   id: string;
@@ -39,9 +44,45 @@ export function ServiceReportDetailDialog({
   reportId: string | null;
   onClose: () => void;
 }) {
+  const { profile } = useAuth();
+  const { toast } = useToast();
   const { data, isLoading } = useQuery<Detail>({
     queryKey: [`/api/service-forms/${reportId}`],
     enabled: !!reportId,
+  });
+
+  // Sign-off is the area manager's job (admins can act anywhere). Only an area
+  // manager of the report's own area, or an admin, may sign a pending report.
+  const canSignOff =
+    !!data &&
+    data.status !== "Signed off" &&
+    (profile?.role === "admin" ||
+      (profile?.role === "area" && profile?.area === data.area));
+
+  const signOff = useMutation({
+    mutationFn: async () => {
+      if (!reportId) throw new Error("No report");
+      const res = await apiRequest("POST", `/api/reports/${reportId}/signoff`, {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({
+        queryKey: [`/api/service-forms/${reportId}`],
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/service-forms"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/service/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
+      toast({
+        title: "Service report signed off",
+        description: "The supervisor who filed it has been notified.",
+      });
+    },
+    onError: (e: any) =>
+      toast({
+        title: "Could not sign off",
+        description: e.message,
+        variant: "destructive",
+      }),
   });
 
   const checklist: ServiceChecklistAnswer[] = data?.checklist ?? [];
@@ -193,6 +234,40 @@ export function ServiceReportDetailDialog({
               </div>
             )}
           </div>
+        )}
+
+        {data && (
+          <DialogFooter className="flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            {data.status === "Signed off" ? (
+              <span className="inline-flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
+                <CheckCircle2 className="h-4 w-4" />
+                Signed off
+              </span>
+            ) : (
+              <span className="text-sm text-muted-foreground">
+                Awaiting area manager sign-off
+              </span>
+            )}
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={onClose}>
+                Close
+              </Button>
+              {canSignOff && (
+                <Button
+                  onClick={() => signOff.mutate()}
+                  disabled={signOff.isPending}
+                  data-testid="button-sign-off-service-report"
+                >
+                  {signOff.isPending ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="mr-1.5 h-4 w-4" />
+                  )}
+                  Sign off
+                </Button>
+              )}
+            </div>
+          </DialogFooter>
         )}
       </DialogContent>
     </Dialog>
