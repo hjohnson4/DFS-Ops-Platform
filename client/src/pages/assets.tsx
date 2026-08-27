@@ -1116,11 +1116,24 @@ export default function AssetsPage() {
   // Currently opened asset detail pop-up (null = closed).
   const [detailId, setDetailId] = useState<string | null>(null);
 
+  // Assignment toggle: assigned (active = on a job) vs unassigned (idle = no
+  // job). "Assigned" is defined strictly by job_id, matching the fleet
+  // utilization metric — not the free-text status string.
+  const [view, setView] = useState<"all" | "assigned" | "idle">("all");
+  const assignedCount = rows.filter((a) => !!a.job_id).length;
+  const idleCount = rows.length - assignedCount;
+  const byAssignment =
+    view === "assigned"
+      ? rows.filter((a) => !!a.job_id)
+      : view === "idle"
+        ? rows.filter((a) => !a.job_id)
+        : rows;
+
   // Client-side search across the visible asset fields + linked schedule name.
   const [query, setQuery] = useState("");
   const q = query.trim().toLowerCase();
   const filtered = q
-    ? rows.filter((a) =>
+    ? byAssignment.filter((a) =>
         [
           a.tag,
           a.category,
@@ -1132,7 +1145,7 @@ export default function AssetsPage() {
           .filter(Boolean)
           .some((v) => (v as string).toLowerCase().includes(q)),
       )
-    : rows;
+    : byAssignment;
 
   return (
     <div className="p-6 max-w-6xl">
@@ -1161,28 +1174,63 @@ export default function AssetsPage() {
           : `Your equipment fleet across ${profile?.area ? profile.area : "all areas"}.`}
       </p>
 
-      {/* Search */}
+      {/* Assignment toggle + search */}
       {rows.length > 0 && (
-        <div className="relative mb-4 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search asset #, type, area, status, description…"
-            className="pl-9 pr-9"
-            data-testid="input-search-assets"
-          />
-          {query && (
-            <button
-              type="button"
-              onClick={() => setQuery("")}
-              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-              aria-label="Clear search"
-              data-testid="button-clear-search"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          )}
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          {/* Assigned (active) vs unassigned (idle) segmented toggle */}
+          <div
+            className="inline-flex rounded-md border border-card-border bg-muted/40 p-0.5"
+            role="group"
+            aria-label="Filter by assignment"
+          >
+            {(
+              [
+                { key: "all", label: "All", count: rows.length },
+                { key: "assigned", label: "Assigned", count: assignedCount },
+                { key: "idle", label: "Idle", count: idleCount },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.key}
+                type="button"
+                onClick={() => setView(opt.key)}
+                aria-pressed={view === opt.key}
+                className={`px-3 py-1.5 text-sm font-medium rounded transition-colors ${
+                  view === opt.key
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+                data-testid={`toggle-assets-${opt.key}`}
+              >
+                {opt.label}
+                <span className="ml-1.5 text-xs tabular-nums text-muted-foreground">
+                  {opt.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div className="relative flex-1 min-w-[16rem] max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search asset #, type, area, status, description…"
+              className="pl-9 pr-9"
+              data-testid="input-search-assets"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
+                data-testid="button-clear-search"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1208,16 +1256,27 @@ export default function AssetsPage() {
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <Search className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
           <div className="text-sm text-muted-foreground">
-            No assets match “{query}”.
+            {q
+              ? `No ${view === "assigned" ? "assigned" : view === "idle" ? "idle" : ""} assets match “${query}”.`
+              : view === "assigned"
+                ? "No assets are currently assigned to a job."
+                : view === "idle"
+                  ? "No idle assets — every asset is assigned to a job."
+                  : "No assets to show."}
           </div>
-          <button
-            type="button"
-            onClick={() => setQuery("")}
-            className="text-xs text-primary hover:underline mt-1"
-            data-testid="button-clear-search-empty"
-          >
-            Clear search
-          </button>
+          {(q || view !== "all") && (
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                setView("all");
+              }}
+              className="text-xs text-primary hover:underline mt-1"
+              data-testid="button-clear-search-empty"
+            >
+              Clear filters
+            </button>
+          )}
         </div>
       ) : (
         <div className="rounded-lg border border-card-border overflow-x-auto">
