@@ -66,24 +66,59 @@ import type { ServiceAssetRow, ServiceDashboard } from "@shared/schema";
 // Set INGEST_TOKEN at deploy (M7); blank means ingest is closed.
 const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 
-// Resolve which job a daily/JSA report for `wellName` should attach to.
+// Normalize a job identifier / rig name for comparison: uppercase, collapse
+// runs of whitespace, and treat spaces and dashes as equivalent, so that
+// "H&P 266", "H&P-266", and "h&p  266" all compare equal. (Shared with the
+// JSA intake matcher.)
+function normJobId(v: string | null | undefined): string {
+  return (v || "")
+    .toUpperCase()
+    .replace(/[\s-]+/g, " ")
+    .trim();
+}
+
+// Resolve which job a daily/JSA report should attach to.
 //
-// Two signals, in priority order:
+// Three signals, in priority order:
+//   0. The job number read from the report itself (daily report cell V8 =
+//      rig name / job number). When present, an exact normalized match to a
+//      job's `job_number` wins outright — this is the value the crew typed on
+//      the sheet, so it is the most authoritative link.
 //   1. A job whose own `well_name` equals the report's well (exact, case- and
-//      whitespace-insensitive). This is the explicit link.
+//      whitespace-insensitive). This is the explicit well link.
 //   2. LEARNED FROM HISTORY: the most recent PRIOR daily report for the same
 //      well that is already attached to a job. Once a well has been assigned to
 //      a job on any report, every later report for that same well auto-attaches
 //      to that same job. This is what makes repeated wells stop needing manual
 //      assignment even when jobs don't carry a well_name.
 //
-// Returns nulls when the well is unknown or has never been linked to a job, so
-// the caller still routes it to the "Needs job match" queue (never guesses).
+// Returns nulls when nothing matches, so the caller still routes the report to
+// the "Needs job match" queue (never guesses).
 async function resolveJobForWell(
   client: any,
   wellName: string | null | undefined,
+  jobNumber?: string | null,
 ): Promise<{ job_id: string | null; area: string | null; customer_id: string | null }> {
   const empty = { job_id: null, area: null, customer_id: null };
+
+  // (0) Job number from the report (V8). Highest priority when present.
+  const jobTarget = normJobId(jobNumber);
+  if (jobTarget) {
+    const { data: jobs } = await client
+      .from("jobs")
+      .select("id, area, customer_id, job_number");
+    const byNumber = (jobs || []).find(
+      (j: any) => normJobId(j.job_number) === jobTarget,
+    );
+    if (byNumber) {
+      return {
+        job_id: byNumber.id,
+        area: byNumber.area,
+        customer_id: byNumber.customer_id,
+      };
+    }
+  }
+
   const target = (wellName || "").trim().toLowerCase();
   if (!target) return empty;
 
@@ -3816,15 +3851,23 @@ export async function registerRoutes(
         .json({ message: `Failed to parse Excel attachment: ${e?.message ?? e}` });
     }
 
-    // Match the well name from the sheet to a job (job = job_number + area).
-    // Matching is case-insensitive on trimmed well_name. Unmatched reports go
-    // to a "Needs job match" review queue instead of being silently dropped.
-    // Resolve the job by well name: explicit job.well_name match first, then
-    // learned from any prior report already assigned to a job for this well.
-    const resolved = await resolveJobForWell(client, excel.well_name);
+    // Resolve the job for this report. Priority: the job number read from the
+    // workbook (cell V8 on the Report Day sheet) first, then the well name
+    // (explicit job.well_name match, then learned from a prior assigned report
+    // for the same well). Unmatched reports go to the "Needs job match" queue
+    // rather than being silently dropped.
+    const resolved = await resolveJobForWell(
+      client,
+      excel.well_name,
+      excel.job_number,
+    );
     let job_id: string | null = resolved.job_id;
     let area: string | null = resolved.area;
     let customer_id: string | null = resolved.customer_id;
+    const matchedByJobNumber =
+      !!job_id &&
+      !!excel.job_number &&
+      normJobId(excel.job_number).length > 0;
 
     const status = job_id ? "Pending Review" : "Needs job match";
     const row: Record<string, any> = {
@@ -3869,8 +3912,14 @@ export async function registerRoutes(
       action: "ingested",
       detail: `Imported ${excel.source_sheet} from \"${p.attachment_name}\"` +
         (job_id
-          ? ` and matched well \"${excel.well_name}\" to a job.`
-          : ` — well \"${excel.well_name ?? "(none)"}\" did not match any job; awaiting assignment.`),
+          ? matchedByJobNumber
+            ? ` and matched job \"${excel.job_number}\" (from workbook cell V8) to this report.`
+            : ` and matched well \"${excel.well_name}\" to a job.`
+          : ` — ${
+              excel.job_number
+                ? `job number \"${excel.job_number}\" (V8) and `
+                : ""
+            }well \"${excel.well_name ?? "(none)"}\" did not match any job; awaiting assignment.`),
     });
     // Incomplete workbook (no day tab had hand-entered activity): still imported,
     // but log a distinct alert so a supervisor / area manager knows to review
@@ -3923,11 +3972,13 @@ export async function registerRoutes(
         });
       }
 
-      // Match the well name (same as the email intake) ONCE for the whole file:
-      // explicit job.well_name match first, then learned from any prior report
-      // already assigned to a job for this well.
+      // Match the job (same precedence as the email intake) ONCE for the whole
+      // file: the workbook job number (cell V8) first, then the well name
+      // (explicit job.well_name match, then learned from a prior assigned
+      // report for this well).
       const wellName = days.find((d) => d.well_name)?.well_name ?? null;
-      const resolved = await resolveJobForWell(client, wellName);
+      const jobNumber = days.find((d) => d.job_number)?.job_number ?? null;
+      const resolved = await resolveJobForWell(client, wellName, jobNumber);
       let job_id: string | null = resolved.job_id;
       let area: string | null = resolved.area;
       let customer_id: string | null = resolved.customer_id;
@@ -4690,15 +4741,8 @@ export async function registerRoutes(
     return m ? m[0].replace(/\s+/g, "-").toUpperCase() : null;
   };
 
-  // Normalize a job identifier for tolerant comparison: uppercase, and treat
-  // spaces and dashes as equivalent (so "H&P 266", "H&P-266" and "WT 3050" /
-  // "WT-3050" all compare equal). Collapses internal whitespace.
-  const normJobId = (v: string | null | undefined): string =>
-    (v || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .replace(/[\s-]+/g, " ")
-      .toUpperCase();
+  // (normJobId is defined at module scope and shared with the daily-report
+  // matcher — uppercase, spaces and dashes equivalent.)
 
   // Read the rig / job name straight out of an .xlsx JSA workbook. In the JSA
   // template the rig name lives in cell K4 of the "JSA" sheet (labeled

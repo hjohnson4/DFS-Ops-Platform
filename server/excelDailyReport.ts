@@ -179,6 +179,10 @@ function reportDaySheets(
 export interface ParsedDailyReport {
   report_date: string | null;
   well_name: string | null;
+  // Job number / rig name read straight from cell V8 of the chosen Report Day
+  // sheet (labeled "Rig Name" in R8). Used to auto-match the report to a job.
+  // null when the cell is blank or non-text.
+  job_number: string | null;
   source_sheet: string;
   report_day: number;
   // True when NO day tab had hand-entered activity, so we fell back to the
@@ -274,6 +278,14 @@ function parseDaySheet(
 
   const report_date = toDateStr(rawCell(ws, DATE_CELL));
 
+  // Job number / rig name: read verbatim from V8 on this report-day sheet
+  // (labeled "Rig Name" in R8). This is the value crews type as the job/rig,
+  // e.g. "H&P 266". Blank templates leave V8 as 0 / a bare number, which is not
+  // a real job number, so drop purely-numeric values.
+  const v8raw = toText(rawCell(ws, "V8"));
+  const job_number =
+    v8raw && !/^\d+(\.\d+)?$/.test(v8raw) ? v8raw : null;
+
   // Well name: prefer the dedicated Well Recap / ROC cells.
   let well_name: string | null = null;
   for (const { sheet, cell } of WELL_NAME_CELLS) {
@@ -305,6 +317,7 @@ function parseDaySheet(
   return {
     report_date,
     well_name,
+    job_number,
     source_sheet: dayLabel,
     report_day: chosen.day,
     incomplete,
