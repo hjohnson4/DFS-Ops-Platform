@@ -12,7 +12,13 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { ClipboardCheck, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import {
+  ClipboardCheck,
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  Trash2,
+} from "lucide-react";
 
 interface Photo {
   id: string;
@@ -58,6 +64,32 @@ export function ServiceReportDetailDialog({
     data.status !== "Signed off" &&
     (profile?.role === "admin" ||
       (profile?.role === "area" && profile?.area === data.area));
+
+  // Admins, area managers, and supervisors may delete a service report.
+  const canDelete =
+    profile?.role === "admin" ||
+    profile?.role === "area" ||
+    profile?.role === "super";
+
+  const del = useMutation({
+    mutationFn: async () => {
+      if (!reportId) throw new Error("No report");
+      await apiRequest("DELETE", `/api/service-forms/${reportId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/service-forms"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/service/dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
+      toast({ title: "Service report deleted" });
+      onClose();
+    },
+    onError: (e: any) =>
+      toast({
+        title: "Could not delete report",
+        description: e.message,
+        variant: "destructive",
+      }),
+  });
 
   const signOff = useMutation({
     mutationFn: async () => {
@@ -249,6 +281,29 @@ export function ServiceReportDetailDialog({
               </span>
             )}
             <div className="flex gap-2">
+              {canDelete && (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Delete this service report? Its photos and sign-off record are removed too. This cannot be undone.",
+                      )
+                    )
+                      del.mutate();
+                  }}
+                  disabled={del.isPending}
+                  className="text-red-600 hover:text-red-700"
+                  data-testid="button-delete-service-report"
+                >
+                  {del.isPending ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="mr-1.5 h-4 w-4" />
+                  )}
+                  Delete
+                </Button>
+              )}
               <Button variant="outline" onClick={onClose}>
                 Close
               </Button>

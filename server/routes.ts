@@ -3436,6 +3436,37 @@ export async function registerRoutes(
     },
   );
 
+  // Delete a structured service report. admin + area + super, area-scoped on
+  // the asset. Child rows (photos, sign-offs, audit events) are removed by
+  // ON DELETE CASCADE. Work orders opened from flagged items reference the
+  // asset, not the report, so they intentionally remain.
+  app.delete(
+    "/api/service-forms/:id",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: existing } = await supabaseAnon
+        .from("maintenance_reports")
+        .select("id, asset:assets!maintenance_reports_asset_id_fkey(area)")
+        .eq("id", req.params.id)
+        .not("checklist", "is", null)
+        .single();
+      if (!existing)
+        return res.status(404).json({ message: "Service report not found" });
+      const scope = areaScopeOf(req.profile!);
+      const area = (existing as any).asset?.area ?? null;
+      if (scope && area !== scope)
+        return res.status(404).json({ message: "Service report not found" });
+      const { error } = await client
+        .from("maintenance_reports")
+        .delete()
+        .eq("id", req.params.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
+    },
+  );
+
   // File a structured service report. admin + area + super. The asset must be
   // in the filer's area scope. Sets the service baseline (run_hours_at_service)
   // like a maintenance report, and opens a work order for each flagged item.
