@@ -4690,6 +4690,42 @@ export async function registerRoutes(
     return m ? m[0].replace(/\s+/g, "-").toUpperCase() : null;
   };
 
+  // Normalize a job identifier for tolerant comparison: uppercase, and treat
+  // spaces and dashes as equivalent (so "H&P 266", "H&P-266" and "WT 3050" /
+  // "WT-3050" all compare equal). Collapses internal whitespace.
+  const normJobId = (v: string | null | undefined): string =>
+    (v || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/[\s-]+/g, " ")
+      .toUpperCase();
+
+  // Read the rig / job name straight out of an .xlsx JSA workbook. In the JSA
+  // template the rig name lives in cell K4 of the "JSA" sheet (labeled
+  // "Rig Name:" in J4). Returns the raw cell text, or null when the file is not
+  // a readable xlsx or the cell is empty. PDF JSAs return null (no cells).
+  const readJsaRigNameFromWorkbook = (
+    base64: string,
+    mime: string | null | undefined,
+  ): string | null => {
+    // Only spreadsheet JSAs have cells; skip PDFs and anything else.
+    if (mime && mime.includes("pdf")) return null;
+    try {
+      const buf = Buffer.from(base64, "base64");
+      const wb = XLSX.read(buf, { type: "buffer" });
+      // Prefer the sheet literally named "JSA"; fall back to the first sheet.
+      const sheetName =
+        wb.SheetNames.find((n) => n.trim().toUpperCase() === "JSA") ||
+        wb.SheetNames[0];
+      const ws = sheetName ? wb.Sheets[sheetName] : undefined;
+      const cell = ws ? (ws as any)["K4"] : undefined;
+      const raw = cell && cell.v != null ? String(cell.v).trim() : "";
+      return raw ? raw : null;
+    } catch {
+      return null;
+    }
+  };
+
   // Ingest a JSA email. Auth via the shared x-ingest-token (same as reports).
   app.post("/api/jsa-intake/ingest", async (req: Request, res: Response) => {
     if (!INGEST_TOKEN)
@@ -4710,9 +4746,28 @@ export async function registerRoutes(
       .maybeSingle();
     if (existing) return res.status(200).json({ ...existing, deduped: true });
 
-    // Match to a job by the job number parsed from the subject (or an explicit
-    // override). Unmatched JSAs go to a "Needs job match" queue.
-    const jobNumber = (p.job_number && p.job_number.trim()) || parseJobNumber(p.subject);
+    // Match to a job. Precedence for the job identifier:
+    //   1) explicit job_number override on the request (rare)
+    //   2) the rig name read from the JSA workbook cell K4 (primary)
+    //   3) a job number parsed from the email subject (fallback, e.g. PDFs)
+    // Comparison against jobs.job_number is space/dash-insensitive so that
+    // "H&P 266" (K4) matches "H&P 266", and "WT 3050" matches "WT-3050".
+    const rigFromWorkbook = readJsaRigNameFromWorkbook(
+      p.attachment_base64,
+      p.attachment_mime,
+    );
+    const explicit = p.job_number && p.job_number.trim();
+    const subjectNumber = parseJobNumber(p.subject);
+    // What we store as the human-readable "raw" identifier and what we match on.
+    const jobNumber = explicit || rigFromWorkbook || subjectNumber;
+    // Where the identifier came from, for the audit event.
+    const matchSource = explicit
+      ? "request"
+      : rigFromWorkbook
+        ? "workbook cell K4"
+        : subjectNumber
+          ? "email subject"
+          : null;
     let job_id: string | null = null;
     let area: string | null = null;
     let customer_id: string | null = null;
@@ -4720,9 +4775,9 @@ export async function registerRoutes(
       const { data: jobs } = await client
         .from("jobs")
         .select("id, area, customer_id, job_number");
-      const target = jobNumber.trim().toLowerCase();
+      const target = normJobId(jobNumber);
       const match = (jobs || []).find(
-        (j: any) => (j.job_number || "").trim().toLowerCase() === target,
+        (j: any) => normJobId(j.job_number) === target,
       );
       if (match) {
         job_id = match.id;
@@ -4764,10 +4819,10 @@ export async function registerRoutes(
       detail:
         `Received JSA \"${p.attachment_name}\"` +
         (job_id
-          ? ` and matched job ${jobNumber} to this JSA.`
+          ? ` and matched job \"${jobNumber}\" (from ${matchSource}) to this JSA.`
           : jobNumber
-            ? ` — job number \"${jobNumber}\" did not match any job; awaiting assignment.`
-            : ` — no job number found in the subject; awaiting assignment.`),
+            ? ` — \"${jobNumber}\" (from ${matchSource}) did not match any job; awaiting assignment.`
+            : ` — no rig name in the workbook (K4) and no job number in the subject; awaiting assignment.`),
     });
     res.status(201).json(data);
   });
