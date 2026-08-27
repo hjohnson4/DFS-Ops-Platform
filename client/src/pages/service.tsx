@@ -13,6 +13,8 @@ import type {
 } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { UploadServiceReportDialog } from "@/components/UploadServiceReportDialog";
 import { NewServiceReportDialog } from "@/components/NewServiceReportDialog";
 import { ServiceReportDetailDialog } from "@/components/ServiceReportDetailDialog";
@@ -221,10 +223,17 @@ export default function Service() {
     queryKey: ["/api/service-forms"],
   });
   const [detailId, setDetailId] = useState<string | null>(null);
+  // The live list shows only job-assigned centrifuges by default; this toggle
+  // adds the unassigned ones.
+  const [showUnassigned, setShowUnassigned] = useState(false);
 
   const m = data?.metrics;
   const rows = data?.centrifuges ?? [];
   const reports = serviceReports ?? [];
+  // Job-assigned vs unassigned split for the live list.
+  const assignedRows = rows.filter((r) => r.assigned);
+  const unassignedRows = rows.filter((r) => !r.assigned);
+  const visibleRows = showUnassigned ? rows : assignedRows;
 
   function fmtDate(d: string | null | undefined): string {
     if (!d) return "—";
@@ -394,28 +403,56 @@ export default function Service() {
       </div>
 
       {/* Active centrifuge list */}
-      <div className="mt-6 mb-2 flex items-baseline justify-between">
+      <div className="mt-6 mb-2 flex flex-wrap items-baseline justify-between gap-2">
         <h2 className="text-sm font-semibold">Active centrifuges</h2>
-        {!isLoading && (
-          <span className="text-xs text-muted-foreground">
-            {rows.length} deployed
-          </span>
-        )}
+        <div className="flex items-center gap-4">
+          {!isLoading && (
+            <span className="text-xs text-muted-foreground">
+              {assignedRows.length} on a job
+              {unassignedRows.length > 0 && ` · ${unassignedRows.length} unassigned`}
+            </span>
+          )}
+          <div className="flex items-center gap-2">
+            <Switch
+              id="show-unassigned"
+              checked={showUnassigned}
+              onCheckedChange={setShowUnassigned}
+              data-testid="toggle-show-unassigned"
+            />
+            <Label
+              htmlFor="show-unassigned"
+              className="text-xs text-muted-foreground cursor-pointer"
+            >
+              Show unassigned
+            </Label>
+          </div>
+        </div>
       </div>
 
       {isLoading ? (
         <div className="text-sm text-muted-foreground py-8 text-center">
           Loading…
         </div>
-      ) : rows.length === 0 ? (
+      ) : visibleRows.length === 0 ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <Activity className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
           <div className="text-sm text-muted-foreground">
-            No centrifuges are currently deployed to a job.
+            {showUnassigned
+              ? "No centrifuges found."
+              : "No centrifuges are currently assigned to a job."}
           </div>
-          <div className="text-xs text-muted-foreground mt-1">
-            Centrifuges appear here once they're assigned and marked on a job.
-          </div>
+          {!showUnassigned && unassignedRows.length > 0 && (
+            <div className="text-xs text-muted-foreground mt-1">
+              {unassignedRows.length} unassigned centrifuge
+              {unassignedRows.length === 1 ? "" : "s"} hidden — turn on “Show
+              unassigned” to see them.
+            </div>
+          )}
+          {!showUnassigned && unassignedRows.length === 0 && (
+            <div className="text-xs text-muted-foreground mt-1">
+              Centrifuges appear here once they're assigned to a job.
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-lg border border-card-border overflow-x-auto">
@@ -433,7 +470,7 @@ export default function Service() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
+              {visibleRows.map((r) => (
                 <tr
                   key={r.id}
                   className="border-b border-card-border last:border-0 hover:bg-muted/30"
@@ -447,7 +484,11 @@ export default function Service() {
                   </td>
                   <td className="px-3 py-2.5">
                     <div className="font-medium">
-                      {r.job_number ?? r.job_or_well ?? "—"}
+                      {r.assigned ? (
+                        r.job_number ?? r.job_or_well ?? "—"
+                      ) : (
+                        <span className="text-muted-foreground">Unassigned</span>
+                      )}
                     </div>
                     <div className="text-xs text-muted-foreground">{r.area}</div>
                   </td>

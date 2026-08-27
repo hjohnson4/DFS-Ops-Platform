@@ -378,6 +378,7 @@ export interface ServiceAssetRow {
   area: Area;
   status: string; // deployment status (e.g. On Job / Available)
   job_id: string | null;
+  assigned: boolean; // true when the centrifuge is assigned to a job
   job_number: string | null;
   job_or_well: string | null;
   technician: string | null; // supervisor who last filed a service report
@@ -398,7 +399,7 @@ export interface ServiceDashboard {
     reports_filed: number; // maintenance reports in scope
     reports_pending_signoff: number;
   };
-  centrifuges: ServiceAssetRow[]; // active (deployed) centrifuges only
+  centrifuges: ServiceAssetRow[]; // all in-scope centrifuges; use `assigned` to split job-assigned vs unassigned
 }
 
 // A single billable line on a field ticket. Total is Qty × Unit cost, computed

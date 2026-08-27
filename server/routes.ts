@@ -3007,6 +3007,7 @@ export async function registerRoutes(
             area: a.area,
             status: a.status,
             job_id: a.job_id,
+            assigned: a.job_id != null,
             job_number: a.job?.job_number ?? null,
             job_or_well: a.job_or_well,
             technician: techByAsset.get(a.id) ?? null,
@@ -3029,7 +3030,10 @@ export async function registerRoutes(
         reports_pending_signoff: reportsPending,
       };
 
-      // List shows active (deployed) centrifuges; overdue/soon first, then by tag.
+      // List shows ALL in-scope centrifuges. Job-assigned units come first, then
+      // unassigned; within each group, overdue/soon first, then by tag. The
+      // client uses the `assigned` flag to default to job-assigned only and
+      // toggle unassigned in.
       const rank: Record<string, number> = {
         Overdue: 0,
         Soon: 1,
@@ -3037,9 +3041,9 @@ export async function registerRoutes(
         OK: 3,
       };
       const centrifuges: ServiceAssetRow[] = rows
-        .filter((r) => r._deployed)
         .sort(
           (x, y) =>
+            Number(y.assigned) - Number(x.assigned) ||
             (rank[x.service_state] ?? 9) - (rank[y.service_state] ?? 9) ||
             x.tag.localeCompare(y.tag),
         )
