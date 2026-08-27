@@ -1594,7 +1594,13 @@ function PadCard({
   const { toast } = useToast();
   const wells = pad.wells ?? [];
   const totalDays = wells.reduce((sum, w) => sum + w.report_days, 0);
-  const totalRevenue = dayRate != null ? dayRate * totalDays : null;
+  // Pad revenue = sum of each well's revenue (the accrued AS57 figure from its
+  // latest report). If no well has a revenue value, show nothing.
+  const revenueWells = wells.filter((w) => w.revenue != null);
+  const totalRevenue =
+    revenueWells.length > 0
+      ? revenueWells.reduce((sum, w) => sum + (w.revenue ?? 0), 0)
+      : null;
   const currentWell = wells.find((w) => w.is_current);
 
   const [editing, setEditing] = useState(false);

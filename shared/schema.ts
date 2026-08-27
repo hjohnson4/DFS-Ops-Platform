@@ -172,7 +172,7 @@ export interface PadWellDerived {
   report_days: number; // number of daily reports naming this well
   first_report: string | null; // yyyy-mm-dd of earliest report on this well
   last_report: string | null; // yyyy-mm-dd of latest report on this well
-  revenue: number | null; // day_rate x report_days, or null when no day rate
+  revenue: number | null; // accrued (cell AS57) on the well's latest report; falls back to day_rate x report_days
   is_current: boolean; // true for the well on the job's most recent report
 }
 export interface PadWithDerivedWells extends Pad {

@@ -5901,23 +5901,52 @@ export async function registerRoutes(
   // report-inferred well model (days, first/last report, and which well is the
   // crew's current one = the well on the most recent dated report).
   async function wellReportStats(jobId: string): Promise<{
-    byName: Map<string, { days: number; first: string; last: string; display: string }>;
+    byName: Map<
+      string,
+      { days: number; first: string; last: string; display: string; accrued: number | null }
+    >;
     currentKey: string | null;
   }> {
     const client = padClient();
     const { data: reports } = await client
       .from("daily_reports")
-      .select("well_name, report_date, received_at")
+      .select("well_name, report_date, received_at, report_day, kpis")
       .eq("job_id", jobId);
-    const dated: { name: string; day: string }[] = [];
+    // Read the AS57 cumulative accrued figure out of the stored KPIs.
+    const accruedOf = (r: any): number | null => {
+      const raw = r?.kpis?.accrued_current_well;
+      if (raw == null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+    const dated: {
+      name: string;
+      day: string;
+      reportDay: number;
+      accrued: number | null;
+    }[] = [];
     for (const r of reports ?? []) {
       const day = reportDay(r);
       const name = (r.well_name as string | null) ?? "";
-      if (day && name.trim()) dated.push({ name: name.trim(), day });
+      const rd = Number((r as any).report_day);
+      if (day && name.trim())
+        dated.push({
+          name: name.trim(),
+          day,
+          reportDay: Number.isFinite(rd) ? rd : 0,
+          accrued: accruedOf(r),
+        });
     }
     dated.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
-    const byName = new Map<string, { days: number; first: string; last: string; display: string }>();
-    for (const { name, day } of dated) {
+    const byName = new Map<
+      string,
+      { days: number; first: string; last: string; display: string; accrued: number | null }
+    >();
+    // Track, per well, which dated report currently owns the accrued figure so
+    // a later report only overrides it when that report actually carries an
+    // AS57 value (blank/duplicate rows must not wipe a real number).
+    const accruedAt = new Map<string, { day: string; reportDay: number }>();
+    for (const { name, day, reportDay: rd, accrued } of dated) {
       const key = normWellName(name);
       const cur = byName.get(key);
       if (cur) {
@@ -5925,7 +5954,26 @@ export async function registerRoutes(
         if (day < cur.first) cur.first = day;
         if (day > cur.last) cur.last = day;
       } else {
-        byName.set(key, { days: 1, first: day, last: day, display: name!.trim() });
+        byName.set(key, {
+          days: 1,
+          first: day,
+          last: day,
+          display: name!.trim(),
+          accrued: null,
+        });
+      }
+      // Revenue = the accrued (AS57) total on the MOST RECENT report for the
+      // well that actually reports a value. Compare by date, then day number.
+      if (accrued != null) {
+        const owner = accruedAt.get(key);
+        const isNewer =
+          !owner ||
+          day > owner.day ||
+          (day === owner.day && rd >= owner.reportDay);
+        if (isNewer) {
+          byName.get(key)!.accrued = accrued;
+          accruedAt.set(key, { day, reportDay: rd });
+        }
       }
     }
     const last = dated[dated.length - 1];
@@ -5971,6 +6019,12 @@ export async function registerRoutes(
         const days = stat?.days ?? 0;
         const isCurrent = currentKey != null && key === currentKey;
         const status = isCurrent ? "Open" : days > 0 ? "Closed" : "Pending";
+        // Revenue is the cumulative accrued figure (cell AS57) from the most
+        // recent daily report for this well. Only fall back to the day-rate
+        // estimate (day rate x days) when no report carried an AS57 value.
+        const accrued = stat?.accrued ?? null;
+        const revenue =
+          accrued != null ? accrued : dayRate != null ? dayRate * days : null;
         const arr = wellsByPad.get(w.pad_id) ?? [];
         arr.push({
           id: w.id,
@@ -5981,7 +6035,7 @@ export async function registerRoutes(
           report_days: days,
           first_report: stat?.first ?? null,
           last_report: stat?.last ?? null,
-          revenue: dayRate != null ? dayRate * days : null,
+          revenue,
           is_current: isCurrent,
         });
         wellsByPad.set(w.pad_id, arr);
