@@ -4231,16 +4231,20 @@ export async function registerRoutes(
           ? req.body.job_id.trim()
           : null;
 
-      // Pull only what we need to re-parse and update. attachment_base64 is
-      // large, so cap the batch and page through report_day-ordered rows.
-      let q = client
+      // Fetch only the lightweight columns first (NO attachment_base64). Each
+      // stored workbook is ~1.7 MB of base64, so selecting them all at once for
+      // a fleet-wide recompute produces a tens-of-MB response that overruns the
+      // serverless function's memory/response/time limits and fails the whole
+      // pass. Instead we page the id list here and pull each workbook's bytes
+      // one row at a time below, keeping every round-trip small.
+      let listQ = client
         .from("daily_reports")
-        .select("id, report_day, well_name, kpis, attachment_base64")
+        .select("id, report_day, kpis")
         .not("attachment_base64", "is", null)
         .order("created_at", { ascending: true })
-        .limit(1000);
-      if (jobId) q = q.eq("job_id", jobId);
-      const { data: rows, error } = await q;
+        .limit(2000);
+      if (jobId) listQ = listQ.eq("job_id", jobId);
+      const { data: rows, error } = await listQ;
       if (error) return res.status(400).json({ message: error.message });
 
       let updated = 0;
@@ -4250,12 +4254,23 @@ export async function registerRoutes(
       const problems: Array<{ id: string; message: string }> = [];
 
       for (const r of rows || []) {
-        if (!r.attachment_base64) {
-          skipped_no_file += 1;
-          continue;
-        }
         try {
-          const buf = Buffer.from(r.attachment_base64, "base64");
+          // Pull just this one report's workbook bytes.
+          const { data: full, error: fErr } = await client
+            .from("daily_reports")
+            .select("attachment_base64")
+            .eq("id", r.id)
+            .single();
+          if (fErr) {
+            errors += 1;
+            problems.push({ id: r.id, message: fErr.message });
+            continue;
+          }
+          if (!full?.attachment_base64) {
+            skipped_no_file += 1;
+            continue;
+          }
+          const buf = Buffer.from(full.attachment_base64, "base64");
           const excel = parseDailyReportWorkbook(buf, r.report_day ?? undefined);
           // Merge freshly parsed KPIs over whatever was stored so no existing
           // KPI is lost if the parser ever drops a field.
