@@ -447,18 +447,39 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
 
   const jobsLoaded = !!jobs;
 
+  // Effective day rate for a job: cell AL57 from the most recent dated daily
+  // report that carries one (the rate can change mid-job by operation/period),
+  // else the job's stored fallback rate. Daily reports are the source of truth,
+  // so the dashboard's revenue tracks incoming reports — mirroring the logic
+  // the Jobs page uses (useJobRollup.currentDayRate) so the two never disagree.
+  const effectiveDayRate = (jobId: string, fallback: any): number | null => {
+    const jobReports = (dailyReports ?? [])
+      .filter((r) => r.job_id === jobId && r.report_date)
+      .sort((a, b) => {
+        if (a.report_date !== b.report_date)
+          return a.report_date! < b.report_date! ? 1 : -1; // newest first
+        return (b.report_day ?? 0) - (a.report_day ?? 0);
+      });
+    for (const r of jobReports) {
+      const v = (r.kpis as any)?.day_rate;
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+    }
+    if (fallback === null || fallback === undefined) return null;
+    const n = Number(fallback);
+    return Number.isFinite(n) ? n : null;
+  };
+
   // ---- Headline rollups ---------------------------------------------------
   const activeList = jobsScoped.filter((j) => j.status === "Active");
   const activeJobs = activeList.length;
 
-  const ratedActive = activeList.filter(
-    (j) =>
-      j.day_rate !== null &&
-      j.day_rate !== undefined &&
-      !isNaN(Number(j.day_rate)),
-  );
+  const activeRates = activeList.map((j) => ({
+    job: j,
+    rate: effectiveDayRate(j.id, j.day_rate),
+  }));
+  const ratedActive = activeRates.filter((x) => x.rate !== null);
   const dailyRevenue = ratedActive.reduce(
-    (sum, j) => sum + Number(j.day_rate),
+    (sum, x) => sum + (x.rate as number),
     0,
   );
   const missingRates = activeJobs - ratedActive.length;
@@ -496,13 +517,9 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
   const areaBreakdown = breakdownAreas
     .map((area) => {
       const inA = activeList.filter((j) => j.area === area);
-      const rated = inA.filter(
-        (j) =>
-          j.day_rate !== null &&
-          j.day_rate !== undefined &&
-          !isNaN(Number(j.day_rate)),
-      );
-      const revenue = rated.reduce((sum, j) => sum + Number(j.day_rate), 0);
+      const inARates = inA.map((j) => effectiveDayRate(j.id, j.day_rate));
+      const rated = inARates.filter((r) => r !== null) as number[];
+      const revenue = rated.reduce((sum, r) => sum + r, 0);
       return {
         area,
         activeJobs: inA.length,
