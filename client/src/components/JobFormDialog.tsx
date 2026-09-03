@@ -334,7 +334,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
           )}
 
           <div className="space-y-1.5">
-            <Label>Day rate (optional)</Label>
+            <Label>Starting day rate (optional)</Label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
               <Input
@@ -350,7 +350,9 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
               />
             </div>
             <p className="text-xs text-muted-foreground">
-              Billable rate per day. Active jobs roll up into daily revenue on the dashboard.
+              Optional starting rate used only until daily reports arrive. Once
+              reports come in, the day rate is read from each daily report
+              (cell AL57), so it updates automatically when the rate changes.
             </p>
           </div>
 

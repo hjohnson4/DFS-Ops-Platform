@@ -79,10 +79,29 @@ function useJobRollup(jobId: string, dayRate: number | null, reports?: DailyRepo
   const depth = latest?.well_context?.meas_depth_ft ?? null;
   const activityDate = latest?.report_date ?? null;
 
+  // Current day rate: cell AL57 from the most recent dated report that carries
+  // one (the rate can change mid-job by operation/period), else the job's
+  // stored fallback rate. Reports are the source of truth for the day rate.
+  const currentDayRate = (() => {
+    const byDate = jobReports
+      .filter((r) => r.report_date)
+      .sort((a, b) => {
+        if (a.report_date !== b.report_date)
+          return a.report_date! < b.report_date! ? 1 : -1; // newest first
+        return (b.report_day ?? 0) - (a.report_day ?? 0);
+      });
+    for (const r of byDate) {
+      const v = (r.kpis as any)?.day_rate;
+      if (typeof v === "number" && Number.isFinite(v) && v > 0) return v;
+    }
+    return dayRate;
+  })();
+
   return {
     hasReports: timeline.totalReportDays > 0,
     currentWell: timeline.currentWellKnown ? timeline.currentWell : null,
     accruedCurrent,
+    currentDayRate,
     activity,
     depth,
     activityDate,
@@ -135,12 +154,13 @@ function JobRow({
         )}
       </td>
 
-      {/* Day rate */}
+      {/* Day rate — current AL57 rate from the latest daily report, else the
+          job's stored fallback rate. */}
       <td className="px-4 py-2.5 whitespace-nowrap tabular-nums" data-testid={`job-day-rate-${job.id}`}>
-        {job.day_rate == null ? (
+        {r.currentDayRate == null ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          dayRateFmt(job.day_rate)
+          dayRateFmt(r.currentDayRate)
         )}
       </td>
 

@@ -532,6 +532,12 @@ export interface DailyFieldKpis {
   // page "Accrued (current well)" column in preference to the day_rate×days
   // rollup, which is only a fallback for reports imported before this field.
   accrued_current_well?: number | null;
+  // Billable day rate ($/day) for THIS report day — workbook cell AL57. The day
+  // rate can change mid-job by operation/period, so each report carries its own
+  // rate rather than the job holding one fixed value. Revenue's day_rate×days
+  // fallback sums each report-day's own rate, and the job's displayed day rate
+  // is taken from the most recent report that carried one.
+  day_rate?: number | null;
 }
 
 export const SIGNOFF_STATUS = [

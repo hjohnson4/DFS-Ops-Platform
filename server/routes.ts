@@ -5929,7 +5929,15 @@ export async function registerRoutes(
   async function wellReportStats(jobId: string): Promise<{
     byName: Map<
       string,
-      { days: number; first: string; last: string; display: string; accrued: number | null }
+      {
+        days: number;
+        first: string;
+        last: string;
+        display: string;
+        accrued: number | null;
+        dayRateSum: number; // sum of each report day's own AL57 rate
+        latestDayRate: number | null; // AL57 on the well's most recent report
+      }
     >;
     currentKey: string | null;
   }> {
@@ -5945,11 +5953,19 @@ export async function registerRoutes(
       const n = Number(raw);
       return Number.isFinite(n) ? n : null;
     };
+    // Read this report day's own AL57 day rate out of the stored KPIs.
+    const dayRateOfReport = (r: any): number | null => {
+      const raw = r?.kpis?.day_rate;
+      if (raw == null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
     const dated: {
       name: string;
       day: string;
       reportDay: number;
       accrued: number | null;
+      dayRate: number | null;
     }[] = [];
     for (const r of reports ?? []) {
       const day = reportDay(r);
@@ -5961,24 +5977,36 @@ export async function registerRoutes(
           day,
           reportDay: Number.isFinite(rd) ? rd : 0,
           accrued: accruedOf(r),
+          dayRate: dayRateOfReport(r),
         });
     }
     dated.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
     const byName = new Map<
       string,
-      { days: number; first: string; last: string; display: string; accrued: number | null }
+      {
+        days: number;
+        first: string;
+        last: string;
+        display: string;
+        accrued: number | null;
+        dayRateSum: number;
+        latestDayRate: number | null;
+      }
     >();
     // Track, per well, which dated report currently owns the accrued figure so
     // a later report only overrides it when that report actually carries an
     // AS57 value (blank/duplicate rows must not wipe a real number).
     const accruedAt = new Map<string, { day: string; reportDay: number }>();
-    for (const { name, day, reportDay: rd, accrued } of dated) {
+    // Track which report currently owns the well's "latest" AL57 day rate.
+    const rateAt = new Map<string, { day: string; reportDay: number }>();
+    for (const { name, day, reportDay: rd, accrued, dayRate } of dated) {
       const key = normWellName(name);
       const cur = byName.get(key);
       if (cur) {
         cur.days += 1;
         if (day < cur.first) cur.first = day;
         if (day > cur.last) cur.last = day;
+        if (dayRate != null) cur.dayRateSum += dayRate;
       } else {
         byName.set(key, {
           days: 1,
@@ -5986,6 +6014,8 @@ export async function registerRoutes(
           last: day,
           display: name!.trim(),
           accrued: null,
+          dayRateSum: dayRate != null ? dayRate : 0,
+          latestDayRate: null,
         });
       }
       // Revenue = the accrued (AS57) total on the MOST RECENT report for the
@@ -5999,6 +6029,18 @@ export async function registerRoutes(
         if (isNewer) {
           byName.get(key)!.accrued = accrued;
           accruedAt.set(key, { day, reportDay: rd });
+        }
+      }
+      // Latest AL57 day rate for the well: newest report that carried one.
+      if (dayRate != null) {
+        const owner = rateAt.get(key);
+        const isNewer =
+          !owner ||
+          day > owner.day ||
+          (day === owner.day && rd >= owner.reportDay);
+        if (isNewer) {
+          byName.get(key)!.latestDayRate = dayRate;
+          rateAt.set(key, { day, reportDay: rd });
         }
       }
     }
@@ -6047,10 +6089,20 @@ export async function registerRoutes(
         const status = isCurrent ? "Open" : days > 0 ? "Closed" : "Pending";
         // Revenue is the cumulative accrued figure (cell AS57) from the most
         // recent daily report for this well. Only fall back to the day-rate
-        // estimate (day rate x days) when no report carried an AS57 value.
+        // estimate when no report carried an AS57 value. That fallback now sums
+        // each report day's OWN AL57 rate (so mid-job rate changes are exact),
+        // and only when NO report carried an AL57 rate at all does it use the
+        // job's single fallback rate x days.
         const accrued = stat?.accrued ?? null;
+        const dayRateSum = stat?.dayRateSum ?? 0;
         const revenue =
-          accrued != null ? accrued : dayRate != null ? dayRate * days : null;
+          accrued != null
+            ? accrued
+            : dayRateSum > 0
+              ? dayRateSum
+              : dayRate != null
+                ? dayRate * days
+                : null;
         const arr = wellsByPad.get(w.pad_id) ?? [];
         arr.push({
           id: w.id,
@@ -6203,37 +6255,67 @@ export async function registerRoutes(
 
       // All in-scope reports once, for daily/monthly day-rate revenue and
       // active detection (a job is active if it has a most-recent-dated well).
+      // kpis carries each report day's own AL57 day rate (day_rate), which the
+      // revenue math prefers over the job's single fallback rate.
       const { data: reps } = await client
         .from("daily_reports")
-        .select("job_id, report_date, received_at")
+        .select("job_id, report_date, received_at, report_day, kpis")
         .in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
-      const dayRateOf = new Map<string, number | null>();
+      // Job fallback rate (used only when a report day carries no AL57 rate).
+      const jobFallbackRate = new Map<string, number | null>();
       for (const j of jobRows) {
         const dr =
           j.day_rate != null && !isNaN(Number(j.day_rate))
             ? Number(j.day_rate)
             : null;
-        dayRateOf.set(j.id, dr);
+        jobFallbackRate.set(j.id, dr);
       }
-      // Daily revenue (day rate per report day) and per-job report-day counts.
+      // Per-report AL57 day rate, when present and finite.
+      const reportDayRate = (r: any): number | null => {
+        const raw = r?.kpis?.day_rate;
+        if (raw == null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      // Daily revenue (each report day's own AL57 rate, else the job fallback)
+      // and per-job report-day counts. Also track the day rate on each job's
+      // most recent report so the job row shows the current rate.
       const dailyMap = new Map<string, number>(); // yyyy-mm-dd -> revenue
       const monthlyMap = new Map<string, number>(); // yyyy-mm -> revenue
       const reportDaysByJob = new Map<string, number>();
       const lastReportByJob = new Map<string, string>();
+      const currentRateByJob = new Map<string, number | null>(); // latest report's AL57
+      const currentRateDayByJob = new Map<string, string>();
       for (const r of reps ?? []) {
         const jid = r.job_id as string;
         const day = reportDay(r);
         if (!day) continue;
-        const dr = dayRateOf.get(jid) ?? null;
+        const perReport = reportDayRate(r);
+        const dr = perReport ?? jobFallbackRate.get(jid) ?? null;
         reportDaysByJob.set(jid, (reportDaysByJob.get(jid) ?? 0) + 1);
         const prev = lastReportByJob.get(jid);
         if (!prev || day > prev) lastReportByJob.set(jid, day);
+        // Track the AL57 rate from the newest report that carried one.
+        if (perReport != null) {
+          const rd = currentRateDayByJob.get(jid);
+          if (!rd || day >= rd) {
+            currentRateByJob.set(jid, perReport);
+            currentRateDayByJob.set(jid, day);
+          }
+        }
         if (dr != null) {
           dailyMap.set(day, (dailyMap.get(day) ?? 0) + dr);
           const mon = day.slice(0, 7);
           monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + dr);
         }
       }
+      // The rate shown on a job row: latest report's AL57 rate, else fallback.
+      const dayRateOf = new Map<string, number | null>();
+      for (const j of jobRows)
+        dayRateOf.set(
+          j.id,
+          currentRateByJob.get(j.id) ?? jobFallbackRate.get(j.id) ?? null,
+        );
 
       // Per-job rows (accrued revenue is the headline figure).
       const byJob = jobRows.map((j: any) => {
@@ -6364,11 +6446,31 @@ export async function registerRoutes(
       const accrued = await jobAccruedRevenue(jobIds);
       const { data: reps } = await client
         .from("daily_reports")
-        .select("job_id, report_date, received_at")
+        .select("job_id, report_date, received_at, report_day, kpis")
         .in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
       const reportDaysByJob = new Map<string, number>();
+      // Current AL57 day rate per job = the rate on its most recent report that
+      // carried one (so the CSV shows the current, possibly-changed rate).
+      const currentRateByJob = new Map<string, number | null>();
+      const currentRateDayByJob = new Map<string, string>();
+      const al57 = (r: any): number | null => {
+        const raw = r?.kpis?.day_rate;
+        if (raw == null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
       for (const r of reps ?? []) {
-        if (reportDay(r)) reportDaysByJob.set(r.job_id, (reportDaysByJob.get(r.job_id) ?? 0) + 1);
+        const day = reportDay(r);
+        if (!day) continue;
+        reportDaysByJob.set(r.job_id, (reportDaysByJob.get(r.job_id) ?? 0) + 1);
+        const rate = al57(r);
+        if (rate != null) {
+          const cur = currentRateDayByJob.get(r.job_id);
+          if (!cur || day >= cur) {
+            currentRateByJob.set(r.job_id, rate);
+            currentRateDayByJob.set(r.job_id, day);
+          }
+        }
       }
       const esc = (v: any) => {
         const s = v == null ? "" : String(v);
@@ -6385,10 +6487,12 @@ export async function registerRoutes(
       const lines = [header.join(",")];
       for (const j of jobRows) {
         const acc = accrued.get(j.id) ?? { revenue: null };
-        const dr =
+        const fallback =
           j.day_rate != null && !isNaN(Number(j.day_rate))
             ? Number(j.day_rate)
             : null;
+        // Prefer the current AL57 rate from the latest report; else fallback.
+        const dr = currentRateByJob.get(j.id) ?? fallback;
         lines.push(
           [
             esc(j.job_number),

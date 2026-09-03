@@ -53,6 +53,9 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   // grows each report day. The most recent report for a well carries that
   // well's latest accrued amount, which the jobs page displays directly.
   { field: "accrued_current_well", cell: "AS57", numeric: true },
+  // Billable day rate ($/day) for this report day: cell AL57. The rate can vary
+  // by operation/period across a job, so each report carries its own value.
+  { field: "day_rate", cell: "AL57", numeric: true },
 ];
 
 // Well-header context cells on the "Report Day N" sheet.
