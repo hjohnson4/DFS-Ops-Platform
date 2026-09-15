@@ -432,23 +432,60 @@ export default function DailyReportsPage() {
   });
 
   const canRecompute = profile?.role === "admin";
+  // Live progress text while the batched recompute loops (e.g. "24 / 67").
+  const [recomputeProgress, setRecomputeProgress] = useState<string | null>(
+    null,
+  );
+  type RecomputeBatch = {
+    scanned: number;
+    updated: number;
+    unchanged: number;
+    skipped_no_file: number;
+    errors: number;
+    total: number;
+    next_offset: number;
+    done: boolean;
+  };
   const recomputeKpis = useMutation({
+    // Re-read KPIs from every stored workbook. Each workbook is large, so the
+    // server processes a bounded batch per call; we loop here until it reports
+    // done, accumulating totals and showing progress. This keeps a fleet-wide
+    // refresh from ever hitting the serverless time limit.
     mutationFn: async () => {
-      const res = await apiRequest(
-        "POST",
-        "/api/daily-reports/recompute-kpis",
-        {},
-      );
-      return res.json() as Promise<{
-        scanned: number;
-        updated: number;
-        unchanged: number;
-        skipped_no_file: number;
-        errors: number;
-      }>;
+      let offset = 0;
+      const totals = {
+        scanned: 0,
+        updated: 0,
+        unchanged: 0,
+        skipped_no_file: 0,
+        errors: 0,
+        total: 0,
+      };
+      // Safety cap so a bug can never spin forever (25/batch × 200 = 5000 rows).
+      for (let i = 0; i < 200; i++) {
+        const res = await apiRequest(
+          "POST",
+          "/api/daily-reports/recompute-kpis",
+          { offset, limit: 12 },
+        );
+        const b = (await res.json()) as RecomputeBatch;
+        totals.scanned += b.scanned;
+        totals.updated += b.updated;
+        totals.unchanged += b.unchanged;
+        totals.skipped_no_file += b.skipped_no_file;
+        totals.errors += b.errors;
+        totals.total = b.total;
+        setRecomputeProgress(`${b.next_offset} / ${b.total}`);
+        // Refresh the list as batches land so the user sees KPIs updating.
+        queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+        if (b.done) break;
+        offset = b.next_offset;
+      }
+      return totals;
     },
     onSuccess: (r) => {
       queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+      setRecomputeProgress(null);
       toast({
         title: `KPIs refreshed — ${r.updated} updated`,
         description:
@@ -460,12 +497,14 @@ export default function DailyReportsPage() {
         variant: r.errors ? "destructive" : undefined,
       });
     },
-    onError: (e: any) =>
+    onError: (e: any) => {
+      setRecomputeProgress(null);
       toast({
         title: "Could not refresh KPIs",
         description: e.message,
         variant: "destructive",
-      }),
+      });
+    },
   });
 
   const showSelectColumn = canReview && selectablePending.length > 0;
@@ -501,7 +540,9 @@ export default function DailyReportsPage() {
               ) : (
                 <RefreshCw className="mr-1.5 h-4 w-4" />
               )}
-              Refresh KPIs
+              {recomputeKpis.isPending && recomputeProgress
+                ? `Refreshing… ${recomputeProgress}`
+                : "Refresh KPIs"}
             </Button>
           )}
           {needsMatch > 0 && (

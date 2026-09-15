@@ -4271,7 +4271,17 @@ export async function registerRoutes(
   // Only rows that still have their original workbook (attachment_base64) can
   // be recomputed; rows without a stored file are skipped and reported. The
   // operation is idempotent: re-parsing the same bytes yields the same KPIs.
-  // Optional body { job_id } limits the pass to a single job.
+  //
+  // BATCHED / RESUMABLE. Each stored workbook is ~1.7 MB, so re-parsing the
+  // whole fleet (60+ reports) in one request overruns the serverless
+  // function's time limit and dies mid-run — leaving the newest reports never
+  // recomputed. Instead this processes a bounded batch per call and returns
+  // `next_offset` + `done` so the client can loop until finished.
+  //
+  // Optional body:
+  //   { job_id }  limit the pass to a single job (small set — usually 1 call).
+  //   { limit }   how many reports to process this call (default 12, max 25).
+  //   { offset }  where to resume from (the previous response's next_offset).
   app.post(
     "/api/daily-reports/recompute-kpis",
     requireAuth,
@@ -4282,21 +4292,28 @@ export async function registerRoutes(
         typeof req.body?.job_id === "string" && req.body.job_id.trim()
           ? req.body.job_id.trim()
           : null;
+      // Bound the per-call batch so a single request stays well under the
+      // serverless time limit even with ~1.7 MB workbooks.
+      const rawLimit = Number(req.body?.limit);
+      const batchLimit =
+        Number.isFinite(rawLimit) && rawLimit > 0
+          ? Math.min(Math.floor(rawLimit), 25)
+          : 12;
+      const rawOffset = Number(req.body?.offset);
+      const offset =
+        Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
 
-      // Fetch only the lightweight columns first (NO attachment_base64). Each
-      // stored workbook is ~1.7 MB of base64, so selecting them all at once for
-      // a fleet-wide recompute produces a tens-of-MB response that overruns the
-      // serverless function's memory/response/time limits and fails the whole
-      // pass. Instead we page the id list here and pull each workbook's bytes
+      // Fetch only the lightweight columns first (NO attachment_base64), and
+      // only this batch's slice via range(). Each workbook's bytes are pulled
       // one row at a time below, keeping every round-trip small.
       let listQ = client
         .from("daily_reports")
-        .select("id, report_day, kpis")
+        .select("id, report_day, kpis", { count: "exact" })
         .not("attachment_base64", "is", null)
         .order("created_at", { ascending: true })
-        .limit(2000);
+        .range(offset, offset + batchLimit - 1);
       if (jobId) listQ = listQ.eq("job_id", jobId);
-      const { data: rows, error } = await listQ;
+      const { data: rows, error, count } = await listQ;
       if (error) return res.status(400).json({ message: error.message });
 
       let updated = 0;
@@ -4349,13 +4366,25 @@ export async function registerRoutes(
         }
       }
 
+      // How many matched reports exist in total (across all batches).
+      const total = typeof count === "number" ? count : (rows || []).length;
+      const processed = (rows || []).length;
+      const nextOffset = offset + processed;
+      const done = nextOffset >= total || processed === 0;
+
       res.status(200).json({
-        scanned: (rows || []).length,
+        // This batch
+        scanned: processed,
         updated,
         unchanged,
         skipped_no_file,
         errors,
         problems: problems.slice(0, 25),
+        // Progress across the whole run so the client can loop.
+        total,
+        offset,
+        next_offset: nextOffset,
+        done,
       });
     },
   );
