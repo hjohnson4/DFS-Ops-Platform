@@ -76,8 +76,6 @@ export default function DailyReportDetailPage() {
   const [showChanges, setShowChanges] = useState(false);
   const [changeNotes, setChangeNotes] = useState("");
   const [assignJobId, setAssignJobId] = useState("");
-  // Per-asset run-hour split, keyed by asset id (as strings for the inputs).
-  const [alloc, setAlloc] = useState<Record<string, string>>({});
   const [docBusy, setDocBusy] = useState<"view" | "download" | null>(null);
 
   // Open the stored source workbook. Requests are authenticated, so we fetch
@@ -130,17 +128,16 @@ export default function DailyReportDetailPage() {
 
   const multiCent = (runCtx?.centrifuges?.length ?? 0) >= 2;
   const dailyHrs = runCtx?.daily_run_hours ?? null;
-  const allocSum = multiCent
-    ? (runCtx?.centrifuges ?? []).reduce(
-        (s, c) => s + (parseFloat(alloc[c.id] || "") || 0),
-        0,
-      )
-    : 0;
-  const allocValid =
-    !multiCent ||
-    dailyHrs == null ||
-    dailyHrs <= 0 ||
-    Math.abs(allocSum - dailyHrs) < 0.01;
+  const cent1Hrs = runCtx?.daily_run_hours_cent1 ?? null;
+  const cent2Hrs = runCtx?.daily_run_hours_cent2 ?? null;
+  // With two centrifuges, hours route by each unit's mapped slot. Accrual is
+  // blocked until every centrifuge is mapped to Centrifuge 1 or 2.
+  const needsSlotMapping = !!runCtx?.needs_slot_mapping;
+  // Hours this centrifuge will receive from its mapped slot (1 -> AA37, 2 -> AM37).
+  const hoursForSlot = (slot: number | null | undefined): number | null =>
+    slot === 1 ? cent1Hrs : slot === 2 ? cent2Hrs : null;
+  // Sign-off is blocked only when two centrifuges still need slot mapping.
+  const allocValid = !multiCent || !needsSlotMapping;
 
   // Only load the jobs list when we actually need to assign one.
   const { data: jobs } = useQuery<JobWithCustomer[]>({
@@ -481,64 +478,65 @@ export default function DailyReportDetailPage() {
                     </span>{" "}
                     ({runCtx?.centrifuges?.[0]?.category}).
                   </div>
-                ) : (
-                  <div className="mt-2 space-y-2">
-                    <div className="text-muted-foreground">
-                      This job has {runCtx?.centrifuges?.length} centrifuges.
-                      Split the {dailyHrs} hrs across the units that ran:
+                ) : needsSlotMapping ? (
+                  <div
+                    className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                    data-testid="text-needs-slot-mapping"
+                  >
+                    <div className="font-medium">Map centrifuge slots first</div>
+                    <div className="text-xs mt-1">
+                      This job has two centrifuges. To route run hours correctly,
+                      open each centrifuge under Assets and set its
+                      {" "}“Centrifuge slot (on this job)” to Centrifuge 1 or
+                      Centrifuge 2, then reopen this report. Hours are not applied
+                      until both are mapped.
                     </div>
-                    {(runCtx?.centrifuges ?? []).map((c) => (
-                      <div key={c.id} className="flex items-center gap-2">
-                        <div className="flex-1 min-w-0">
-                          <div className="font-medium truncate">{c.tag}</div>
-                          <div className="text-xs text-muted-foreground">
-                            {c.category} · current {c.run_hours ?? 0} hrs
+                    <ul className="text-xs mt-1 list-disc pl-4">
+                      {(runCtx?.centrifuges ?? []).map((c) => (
+                        <li key={c.id}>
+                          {c.tag} —{" "}
+                          {c.centrifuge_slot === 1
+                            ? "Centrifuge 1"
+                            : c.centrifuge_slot === 2
+                              ? "Centrifuge 2"
+                              : "not mapped"}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : (
+                  <div className="mt-2 space-y-1.5">
+                    <div className="text-muted-foreground">
+                      Run hours route to each unit by its mapped centrifuge slot:
+                    </div>
+                    {(runCtx?.centrifuges ?? []).map((c) => {
+                      const hrs = hoursForSlot(c.centrifuge_slot);
+                      return (
+                        <div
+                          key={c.id}
+                          className="flex items-center justify-between gap-2"
+                          data-testid={`route-cent-${c.id}`}
+                        >
+                          <div className="min-w-0">
+                            <span className="font-medium">{c.tag}</span>{" "}
+                            <span className="text-xs text-muted-foreground">
+                              (Centrifuge {c.centrifuge_slot} · current{" "}
+                              {c.run_hours ?? 0} hrs)
+                            </span>
+                          </div>
+                          <div className="text-sm font-medium whitespace-nowrap">
+                            {hrs != null && hrs > 0 ? `+${hrs} hrs` : "—"}
                           </div>
                         </div>
-                        <input
-                          type="number"
-                          min={0}
-                          step="0.5"
-                          inputMode="decimal"
-                          className="w-24 rounded-md border border-card-border bg-background px-2 py-1 text-right text-sm"
-                          value={alloc[c.id] ?? ""}
-                          onChange={(e) =>
-                            setAlloc((p) => ({ ...p, [c.id]: e.target.value }))
-                          }
-                          placeholder="0"
-                          data-testid={`input-alloc-${c.id}`}
-                        />
-                        <span className="text-xs text-muted-foreground w-8">hrs</span>
-                      </div>
-                    ))}
-                    <div
-                      className={`text-xs ${allocValid ? "text-muted-foreground" : "text-rose-600 dark:text-rose-400"}`}
-                      data-testid="text-alloc-sum"
-                    >
-                      Allocated {allocSum} of {dailyHrs} hrs
-                      {!allocValid && " — must add up to the day's total"}
-                    </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
             )}
             <div className="flex flex-wrap gap-2">
               <Button
-                onClick={() =>
-                  review.mutate({
-                    action: "sign_off",
-                    ...(multiCent && dailyHrs != null && dailyHrs > 0
-                      ? {
-                          run_hour_allocations: (runCtx?.centrifuges ?? []).map(
-                            (c) => ({
-                              asset_id: c.id,
-                              hours: parseFloat(alloc[c.id] || "") || 0,
-                            }),
-                          ),
-                        }
-                      : {}),
-                  })
-                }
+                onClick={() => review.mutate({ action: "sign_off" })}
                 disabled={review.isPending || !allocValid}
                 data-testid="button-sign-off"
               >

@@ -232,6 +232,12 @@ export interface Asset {
   maintenance_schedule_id: string | null;
   // Rental day rate ($/day) for this unit; independent of any job. Null = not set.
   day_rate: number | null;
+  // Which centrifuge column on the daily report this asset represents while it
+  // is assigned to its current job: 1 = "Centrifuge 1" (workbook AA37),
+  // 2 = "Centrifuge 2" (workbook AM37), null = not mapped. Only meaningful for
+  // run-hour categories on jobs with 2+ centrifuges; drives which centrifuge's
+  // actual hours accrue to this asset at sign-off.
+  centrifuge_slot: number | null;
   created_at: string;
 }
 
@@ -508,6 +514,13 @@ export interface DailyFieldKpis {
   daily_run_hours?: number | null;
   total_run_hours?: number | null;
   maintenance_hours?: number | null;
+  // Per-centrifuge run hours. Centrifuge 1 = workbook AA37/AA38,
+  // Centrifuge 2 = workbook AM37/AM38. Used to accrue each centrifuge's
+  // actual hours to the asset mapped to that slot on the job.
+  daily_run_hours_cent1?: number | null;
+  total_run_hours_cent1?: number | null;
+  daily_run_hours_cent2?: number | null;
+  total_run_hours_cent2?: number | null;
   // Volume processed by Centrifuge 1 / 2 (bbls) — workbook cells AR60 / AR61.
   volume_processed_bbl?: number | null; // Centrifuge 1 (AR60)
   volume_processed_cent2_bbl?: number | null; // Centrifuge 2 (AR61)
@@ -768,15 +781,26 @@ export interface CentrifugeOnJob {
   tag: string;
   category: Category;
   run_hours: number | null;
+  // Which centrifuge column this asset is mapped to on the job (1 or 2), or
+  // null when it has not been mapped yet. Drives slot-based run-hours accrual.
+  centrifuge_slot: number | null;
 }
 
 // What GET /api/daily-reports/:id/centrifuges returns so the sign-off UI can
 // decide whether to auto-apply (0 or 1 centrifuge) or prompt for a per-asset
 // split (2+ centrifuges).
 export interface ReportRunHoursContext {
-  daily_run_hours: number | null; // the day's hours from cell M33
+  daily_run_hours: number | null; // combined day hours (Centrifuge 1, AA37)
+  // Per-centrifuge daily hours read from the workbook: slot 1 = AA37,
+  // slot 2 = AM37. Null when the report did not carry that slot's value.
+  daily_run_hours_cent1: number | null;
+  daily_run_hours_cent2: number | null;
   already_applied: boolean;
   centrifuges: CentrifugeOnJob[];
+  // True when the job has 2+ run-hour assets and at least one of them has no
+  // centrifuge_slot mapping — accrual is blocked until every centrifuge is
+  // mapped so hours are never applied to the wrong asset.
+  needs_slot_mapping: boolean;
 }
 
 // A per-asset allocation of the day's run hours, supplied at sign-off when a
@@ -875,6 +899,19 @@ const dayRateField = z
   ])
   .optional();
 
+// Centrifuge slot: 1 ("Centrifuge 1"), 2 ("Centrifuge 2"), or null/blank to
+// clear. null/"" are checked before coercion so clearing stays null. Any value
+// other than 1 or 2 is rejected.
+const centrifugeSlotField = z
+  .union([
+    z.null(),
+    z.literal("").transform(() => null),
+    z.coerce.number().int().refine((n) => n === 1 || n === 2, {
+      message: "Centrifuge slot must be 1 or 2",
+    }),
+  ])
+  .optional();
+
 export const createAssetSchema = z.object({
   tag: z.string().min(1),
   category: z.enum(CATEGORIES),
@@ -886,6 +923,7 @@ export const createAssetSchema = z.object({
   run_hours: z.number().int().nonnegative().nullable().optional(),
   service_hours_interval: z.number().int().positive().optional(),
   day_rate: dayRateField,
+  centrifuge_slot: centrifugeSlotField,
 });
 export type CreateAssetInput = z.infer<typeof createAssetSchema>;
 
@@ -1229,6 +1267,7 @@ export const updateAssetSchema = z.object({
   description: z.string().nullable().optional(),
   maintenance_schedule_id: z.string().uuid().nullable().optional(),
   day_rate: dayRateField,
+  centrifuge_slot: centrifugeSlotField,
 });
 export type UpdateAssetInput = z.infer<typeof updateAssetSchema>;
 

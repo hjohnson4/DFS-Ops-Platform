@@ -528,6 +528,15 @@ function EditAssetDialog({
   const [dayRate, setDayRate] = useState(
     asset.day_rate != null ? String(asset.day_rate) : "",
   );
+  // Which centrifuge column on the daily report this unit represents on its
+  // job: "1", "2", or "" (unmapped). Only shown for run-hour assets on a job.
+  // Radix Select can't use an empty-string item value, so NO_SLOT_VALUE is the
+  // sentinel for the "Not mapped" option; NO_SLOT ("") is the stored state.
+  const NO_SLOT = "";
+  const NO_SLOT_VALUE = "none";
+  const [centrifugeSlot, setCentrifugeSlot] = useState<string>(
+    asset.centrifuge_slot != null ? String(asset.centrifuge_slot) : NO_SLOT,
+  );
 
   // Re-seed the form whenever a different asset is opened.
   useEffect(() => {
@@ -542,6 +551,9 @@ function EditAssetDialog({
     );
     setDescription(asset.description ?? "");
     setDayRate(asset.day_rate != null ? String(asset.day_rate) : "");
+    setCentrifugeSlot(
+      asset.centrifuge_slot != null ? String(asset.centrifuge_slot) : NO_SLOT,
+    );
   }, [asset]);
 
   const onJob = !!asset.job_id;
@@ -570,6 +582,9 @@ function EditAssetDialog({
             throw new Error("Service interval must be a positive number of hours");
           body.service_hours_interval = Number(iv);
         }
+        // Centrifuge slot maps this unit to Centrifuge 1 or 2 on the report so
+        // run hours accrue to the right asset. Blank clears the mapping.
+        body.centrifuge_slot = centrifugeSlot === NO_SLOT ? null : Number(centrifugeSlot);
       }
       await apiRequest("PATCH", `/api/assets/${asset.id}`, body);
     },
@@ -709,6 +724,29 @@ function EditAssetDialog({
               />
               <p className="text-xs text-muted-foreground mt-1">
                 Hours between full services for this centrifuge.
+              </p>
+            </div>
+          )}
+
+          {/* Centrifuge slot — run-hour assets on a job only. Maps this unit to
+              Centrifuge 1 or 2 on the daily report so per-centrifuge run hours
+              accrue to the correct asset when a job has two centrifuges. */}
+          {tracksRunHours(category as any) && onJob && (
+            <div>
+              <Label>Centrifuge slot (on this job)</Label>
+              <Select value={centrifugeSlot || NO_SLOT_VALUE} onValueChange={(v) => setCentrifugeSlot(v === NO_SLOT_VALUE ? NO_SLOT : v)}>
+                <SelectTrigger data-testid="edit-select-centrifuge-slot">
+                  <SelectValue placeholder="Not mapped" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NO_SLOT_VALUE}>Not mapped</SelectItem>
+                  <SelectItem value="1">Centrifuge 1</SelectItem>
+                  <SelectItem value="2">Centrifuge 2</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground mt-1">
+                On a job with two centrifuges, map this unit to “Centrifuge 1” or
+                “Centrifuge 2” so its daily run hours from the report accrue here.
               </p>
             </div>
           )}

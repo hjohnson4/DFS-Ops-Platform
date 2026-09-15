@@ -28,6 +28,17 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   { field: "daily_run_hours", cell: "AA37", numeric: true },
   { field: "total_run_hours", cell: "AA38", numeric: true },
   { field: "maintenance_hours", cell: "AA39", numeric: true },
+  // Per-centrifuge run hours. The report has two centrifuge columns:
+  //   Centrifuge 1 -> AA37 (daily) / AA38 (total)
+  //   Centrifuge 2 -> AM37 (daily) / AM38 (total)
+  // `daily_run_hours` above equals Centrifuge 1's daily hours (AA37); we also
+  // expose it explicitly as _cent1 so run-hours accrual can route each
+  // centrifuge's actual hours to the asset mapped to that slot, instead of
+  // splitting a single total evenly.
+  { field: "daily_run_hours_cent1", cell: "AA37", numeric: true },
+  { field: "total_run_hours_cent1", cell: "AA38", numeric: true },
+  { field: "daily_run_hours_cent2", cell: "AM37", numeric: true },
+  { field: "total_run_hours_cent2", cell: "AM38", numeric: true },
   // Volume processed by Centrifuge 1 / 2 (bbls): AR60 / AR61, labeled in Y60/Y61.
   { field: "volume_processed_bbl", cell: "AR60", numeric: true },
   { field: "volume_processed_cent2_bbl", cell: "AR61", numeric: true },
