@@ -300,9 +300,15 @@ function parseDaySheet(
   const job_number =
     v8raw && !/^\d+(\.\d+)?$/.test(v8raw) ? v8raw : null;
 
-  // Well name: prefer the dedicated Well Recap / ROC cells.
-  let well_name: string | null = null;
-  for (const { sheet, cell } of WELL_NAME_CELLS) {
+  // Well name: read verbatim from V9 on this report-day sheet (labeled
+  // "Well Name" in R9). Crews update it per day tab, so it is the most
+  // reliable source when a workbook is reused for a new well. Blank templates
+  // leave V9 empty or 0, so drop purely-numeric values. Only when V9 is blank
+  // fall back to the Well Recap / ROC cells.
+  const v9raw = toText(rawCell(ws, "V9"));
+  let well_name: string | null =
+    v9raw && !/^\d+(\.\d+)?$/.test(v9raw) ? v9raw : null;
+  if (!well_name) for (const { sheet, cell } of WELL_NAME_CELLS) {
     const v = toText(rawCell(wb.Sheets[sheet], cell));
     if (v) {
       well_name = v;
