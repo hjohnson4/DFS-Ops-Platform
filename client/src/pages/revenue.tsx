@@ -2,6 +2,9 @@ import { useAuth } from "@/lib/auth";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import {
+  CalendarDays,
+  CalendarRange,
+  CalendarCheck,
   DollarSign,
   TrendingUp,
   Briefcase,
@@ -47,8 +50,15 @@ type CustomerRow = {
 };
 type DailyRow = { date: string; revenue: number };
 type MonthlyRow = { month: string; revenue: number };
+type Periods = {
+  as_of: string;
+  latest_day: { date: string; revenue: number | null; jobs: number } | null;
+  month_to_date: { month: string; revenue: number | null; days: number };
+  year_to_date: { year: string; revenue: number | null; days: number };
+};
 type Summary = {
   scope: string;
+  periods?: Periods;
   totals: {
     revenue: number | null;
     jobs: number;
@@ -197,6 +207,48 @@ export default function RevenuePage() {
 
       {data && (
         <>
+          {/* Daily / month-to-date / year-to-date (day-rate basis) */}
+          {data.periods && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3" data-testid="period-revenue">
+              <Stat
+                icon={CalendarDays}
+                label="Daily revenue"
+                value={money(data.periods.latest_day?.revenue ?? null)}
+                sub={
+                  data.periods.latest_day
+                    ? `${fmtDate(data.periods.latest_day.date)}${
+                        data.periods.latest_day.date === data.periods.as_of ? " (today)" : ""
+                      } · ${data.periods.latest_day.jobs} job${
+                        data.periods.latest_day.jobs === 1 ? "" : "s"
+                      } reporting`
+                    : "No report days yet"
+                }
+                accent
+                testid="stat-daily-revenue"
+              />
+              <Stat
+                icon={CalendarRange}
+                label="Monthly revenue (MTD)"
+                value={money(data.periods.month_to_date.revenue)}
+                sub={`${fmtMonth(data.periods.month_to_date.month)} to date · ${
+                  data.periods.month_to_date.days
+                } day${data.periods.month_to_date.days === 1 ? "" : "s"} with reports`}
+                accent
+                testid="stat-mtd-revenue"
+              />
+              <Stat
+                icon={CalendarCheck}
+                label="Year-to-date revenue"
+                value={money(data.periods.year_to_date.revenue)}
+                sub={`Jan 1 – ${fmtDate(data.periods.as_of)} · ${
+                  data.periods.year_to_date.days
+                } day${data.periods.year_to_date.days === 1 ? "" : "s"} with reports`}
+                accent
+                testid="stat-ytd-revenue"
+              />
+            </div>
+          )}
+
           {/* KPI cards */}
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <Stat
@@ -441,7 +493,10 @@ export default function RevenuePage() {
             Revenue is the cumulative accrued figure (cell AS57) from the most
             recent daily report carrying a value for each well, summed to the
             job. Jobs with no AS57 value yet show “—”. Daily and monthly trends
-            use a day-rate basis (each report day × the job’s day rate).
+            and the Daily, Monthly (MTD) and Year-to-date cards use a day-rate
+            basis: each report day’s own day rate (cell AL57, else the job’s
+            rate), summed by report date. Daily shows the most recent report
+            date on or before today (Central time).
           </p>
         </>
       )}

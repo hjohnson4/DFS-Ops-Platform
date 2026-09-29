@@ -6399,17 +6399,23 @@ export async function registerRoutes(
       // most recent report so the job row shows the current rate.
       const dailyMap = new Map<string, number>(); // yyyy-mm-dd -> revenue
       const monthlyMap = new Map<string, number>(); // yyyy-mm -> revenue
+      const dailyJobsMap = new Map<string, Set<string>>(); // yyyy-mm-dd -> job ids reporting
       const reportDaysByJob = new Map<string, number>();
       const lastReportByJob = new Map<string, string>();
       const currentRateByJob = new Map<string, number | null>(); // latest report's AL57
       const currentRateDayByJob = new Map<string, string>();
+      // One billable day per job per report date. Crews sometimes resend a
+      // corrected workbook for the same day (or the same file arrives twice),
+      // so several reports can share a job + date. Counting each would bill
+      // that day twice; instead keep ONE entry per job+date, preferring a
+      // report that carries its own AL57 rate, then the most recently received.
+      type DayPick = { rate: number | null; hasOwn: boolean; received: string };
+      const perJobDay = new Map<string, DayPick>(); // `${job}|${day}`
       for (const r of reps ?? []) {
         const jid = r.job_id as string;
         const day = reportDay(r);
         if (!day) continue;
         const perReport = reportDayRate(r);
-        const dr = perReport ?? jobFallbackRate.get(jid) ?? null;
-        reportDaysByJob.set(jid, (reportDaysByJob.get(jid) ?? 0) + 1);
         const prev = lastReportByJob.get(jid);
         if (!prev || day > prev) lastReportByJob.set(jid, day);
         // Track the AL57 rate from the newest report that carried one.
@@ -6420,10 +6426,31 @@ export async function registerRoutes(
             currentRateDayByJob.set(jid, day);
           }
         }
-        if (dr != null) {
-          dailyMap.set(day, (dailyMap.get(day) ?? 0) + dr);
+        const key = `${jid}|${day}`;
+        const cand: DayPick = {
+          rate: perReport ?? jobFallbackRate.get(jid) ?? null,
+          hasOwn: perReport != null,
+          received: String(r.received_at ?? ""),
+        };
+        const cur = perJobDay.get(key);
+        if (
+          !cur ||
+          (cand.hasOwn && !cur.hasOwn) ||
+          (cand.hasOwn === cur.hasOwn && cand.received > cur.received)
+        )
+          perJobDay.set(key, cand);
+      }
+      for (const [key, pick] of Array.from(perJobDay.entries())) {
+        const sep = key.lastIndexOf("|");
+        const jid = key.slice(0, sep);
+        const day = key.slice(sep + 1);
+        reportDaysByJob.set(jid, (reportDaysByJob.get(jid) ?? 0) + 1);
+        if (pick.rate != null) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + pick.rate);
+          if (!dailyJobsMap.has(day)) dailyJobsMap.set(day, new Set());
+          dailyJobsMap.get(day)!.add(jid);
           const mon = day.slice(0, 7);
-          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + dr);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + pick.rate);
         }
       }
       // The rate shown on a job row: latest report's AL57 rate, else fallback.
@@ -6504,6 +6531,49 @@ export async function registerRoutes(
         .map(([month, revenue]) => ({ month, revenue }))
         .sort((a, b) => (a.month < b.month ? -1 : 1));
 
+      // Period headline figures (day-rate basis, same series as the charts):
+      //  - latest day: the most recent report date on or before today (Central)
+      //  - month to date: current calendar month through today
+      //  - year to date: Jan 1 of the current year through today
+      // Null (rendered "—") when no report day falls in the period.
+      const todayCentral = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Chicago",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date()); // yyyy-mm-dd
+      const curMonth = todayCentral.slice(0, 7);
+      const curYear = todayCentral.slice(0, 4);
+      let latestDay: string | null = null;
+      let mtd: number | null = null;
+      let ytd: number | null = null;
+      let mtdDays = 0;
+      let ytdDays = 0;
+      for (const [d, v] of Array.from(dailyMap.entries())) {
+        if (d > todayCentral) continue; // ignore future-dated typos
+        if (!latestDay || d > latestDay) latestDay = d;
+        if (d.startsWith(curMonth)) {
+          mtd = (mtd ?? 0) + v;
+          mtdDays++;
+        }
+        if (d.startsWith(curYear)) {
+          ytd = (ytd ?? 0) + v;
+          ytdDays++;
+        }
+      }
+      const periods = {
+        as_of: todayCentral,
+        latest_day: latestDay
+          ? {
+              date: latestDay,
+              revenue: dailyMap.get(latestDay) ?? null,
+              jobs: dailyJobsMap.get(latestDay)?.size ?? 0,
+            }
+          : null,
+        month_to_date: { month: curMonth, revenue: mtd, days: mtdDays },
+        year_to_date: { year: curYear, revenue: ytd, days: ytdDays },
+      };
+
       const activeJobs = byJob.filter((j) => j.active);
       const completedJobs = byJob.filter((j) => !j.active);
       const topJobs = [...byJob]
@@ -6528,6 +6598,7 @@ export async function registerRoutes(
         top_jobs: topJobs,
         daily,
         monthly,
+        periods,
       });
     },
   );
