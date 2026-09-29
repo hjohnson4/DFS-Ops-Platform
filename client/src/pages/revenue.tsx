@@ -50,8 +50,23 @@ type CustomerRow = {
 };
 type DailyRow = { date: string; revenue: number };
 type MonthlyRow = { month: string; revenue: number };
+type CurrentDailyJob = {
+  job_id: string;
+  job_number: string;
+  area: string;
+  day_rate: number | null;
+  source: "report" | "job" | null;
+  report_date: string | null;
+  report_day: number | null;
+};
 type Periods = {
   as_of: string;
+  current_daily?: {
+    revenue: number | null;
+    active_jobs: number;
+    missing_rate: number;
+    jobs: CurrentDailyJob[];
+  };
   latest_day: { date: string; revenue: number | null; jobs: number } | null;
   month_to_date: { month: string; revenue: number | null; days: number };
   year_to_date: { year: string; revenue: number | null; days: number };
@@ -213,15 +228,17 @@ export default function RevenuePage() {
               <Stat
                 icon={CalendarDays}
                 label="Daily revenue"
-                value={money(data.periods.latest_day?.revenue ?? null)}
+                value={money(data.periods.current_daily?.revenue ?? null)}
                 sub={
-                  data.periods.latest_day
-                    ? `${fmtDate(data.periods.latest_day.date)}${
-                        data.periods.latest_day.date === data.periods.as_of ? " (today)" : ""
-                      } · ${data.periods.latest_day.jobs} job${
-                        data.periods.latest_day.jobs === 1 ? "" : "s"
-                      } reporting`
-                    : "No report days yet"
+                  !data.periods.current_daily || data.periods.current_daily.active_jobs === 0
+                    ? "No active jobs"
+                    : data.periods.current_daily.missing_rate > 0
+                      ? `${data.periods.current_daily.missing_rate} active job${
+                          data.periods.current_daily.missing_rate === 1 ? "" : "s"
+                        } missing a day rate`
+                      : `Latest day rate across ${data.periods.current_daily.active_jobs} active job${
+                          data.periods.current_daily.active_jobs === 1 ? "" : "s"
+                        }`
                 }
                 accent
                 testid="stat-daily-revenue"
@@ -246,6 +263,44 @@ export default function RevenuePage() {
                 accent
                 testid="stat-ytd-revenue"
               />
+            </div>
+          )}
+
+          {/* Where the Daily revenue figure comes from */}
+          {data.periods?.current_daily && data.periods.current_daily.jobs.some((j) => j.day_rate != null) && (
+            <div className="rounded-lg border border-card-border bg-card overflow-hidden" data-testid="table-current-daily">
+              <div className="text-sm font-medium px-4 py-3 border-b border-card-border flex items-center gap-2">
+                <CalendarDays className="h-4 w-4 text-primary" />
+                Daily revenue by job (latest daily report)
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-muted-foreground text-xs">
+                    <tr className="border-b border-card-border">
+                      <th className="text-left font-medium px-4 py-2">Job</th>
+                      <th className="text-left font-medium px-4 py-2">Area</th>
+                      <th className="text-left font-medium px-4 py-2">From report</th>
+                      <th className="text-right font-medium px-4 py-2">Day rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.periods.current_daily.jobs.filter((j) => j.day_rate != null).map((j) => (
+                      <tr key={j.job_id} className="border-b border-card-border/50 last:border-0" data-testid={`row-current-daily-${j.job_id}`}>
+                        <td className="px-4 py-2 font-medium">{j.job_number}</td>
+                        <td className="px-4 py-2">{j.area}</td>
+                        <td className="px-4 py-2 text-muted-foreground">
+                          {j.source === "report"
+                            ? `${fmtDate(j.report_date)}${j.report_day ? ` · Day ${j.report_day}` : ""}`
+                            : j.source === "job"
+                              ? "Job day rate (no AL57 on reports)"
+                              : "—"}
+                        </td>
+                        <td className="px-4 py-2 text-right tabular-nums font-medium">{money(j.day_rate)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
@@ -493,10 +548,11 @@ export default function RevenuePage() {
             Revenue is the cumulative accrued figure (cell AS57) from the most
             recent daily report carrying a value for each well, summed to the
             job. Jobs with no AS57 value yet show “—”. Daily and monthly trends
-            and the Daily, Monthly (MTD) and Year-to-date cards use a day-rate
-            basis: each report day’s own day rate (cell AL57, else the job’s
-            rate), summed by report date. Daily shows the most recent report
-            date on or before today (Central time).
+            Daily revenue sums the current day rate of every active job, taken
+            from cell AL57 on each job’s most recent daily report (else the
+            job’s rate), the same figure shown on the Dashboard. Monthly (MTD)
+            and Year-to-date add up each report day’s own day rate by report
+            date, counting each job-day once.
           </p>
         </>
       )}

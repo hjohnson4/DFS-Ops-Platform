@@ -6345,7 +6345,7 @@ export async function registerRoutes(
       // In-scope, non-archived jobs.
       let jq = client
         .from("jobs")
-        .select("id, job_number, area, day_rate, customer_id, well_name")
+        .select("id, job_number, area, day_rate, customer_id, well_name, status")
         .is("archived_at", null);
       if (scope) jq = jq.eq("area", scope);
       const { data: jobs, error: jErr } = await jq;
@@ -6561,8 +6561,49 @@ export async function registerRoutes(
           ytdDays++;
         }
       }
+      // Daily revenue = the current day rate of every ACTIVE job, summed.
+      // Each job's rate is cell AL57 from its most recent dated daily report
+      // that carries one (newest report_date, then highest report day), else
+      // the job's stored rate. This is exactly the Dashboard / Jobs page
+      // "Daily revenue" logic, so the numbers agree everywhere.
+      const newestRated = new Map<string, { date: string; day: number; rate: number }>();
+      for (const r of reps ?? []) {
+        const d = r.report_date ? String(r.report_date).slice(0, 10) : null;
+        if (!d) continue;
+        const rate = reportDayRate(r);
+        if (rate == null) continue;
+        const rd = Number(r.report_day ?? 0) || 0;
+        const cur = newestRated.get(r.job_id);
+        if (!cur || d > cur.date || (d === cur.date && rd > cur.day))
+          newestRated.set(r.job_id, { date: d, day: rd, rate });
+      }
+      const activeStatusJobs = jobRows.filter((j: any) => j.status === "Active");
+      const currentJobs = activeStatusJobs.map((j: any) => {
+        const nr = newestRated.get(j.id);
+        const rate = nr ? nr.rate : jobFallbackRate.get(j.id) ?? null;
+        return {
+          job_id: j.id,
+          job_number: j.job_number,
+          area: j.area,
+          day_rate: rate,
+          source: nr ? "report" : rate != null ? "job" : null,
+          report_date: nr?.date ?? null,
+          report_day: nr?.day ?? null,
+        };
+      });
+      const ratedCurrent = currentJobs.filter((c) => c.day_rate != null);
+      const current_daily = {
+        revenue: ratedCurrent.length
+          ? ratedCurrent.reduce((sum, c) => sum + (c.day_rate as number), 0)
+          : null,
+        active_jobs: currentJobs.length,
+        missing_rate: currentJobs.length - ratedCurrent.length,
+        jobs: currentJobs.sort((x, y) => (y.day_rate ?? 0) - (x.day_rate ?? 0)),
+      };
+
       const periods = {
         as_of: todayCentral,
+        current_daily,
         latest_day: latestDay
           ? {
               date: latestDay,
