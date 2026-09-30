@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { Upload, Inbox, Download, ShieldCheck, Trash2 } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 const STATUS_TONE: Record<RigUpStatus, string> = {
   "Pending sign-off": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
@@ -46,7 +47,7 @@ const STATUS_TONE: Record<RigUpStatus, string> = {
 
 function fmt(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleDateString();
 }
 

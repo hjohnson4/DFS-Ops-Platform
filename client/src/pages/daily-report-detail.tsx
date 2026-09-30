@@ -39,6 +39,7 @@ import {
   Wrench,
   Link2,
 } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 type DetailResponse = DailyReport & {
   customer_name: string | null;
@@ -56,7 +57,7 @@ const STATUS_TONE: Record<DailyReportStatus, string> = {
 
 function fmtDateTime(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleString();
 }
 
@@ -255,8 +256,16 @@ export default function DailyReportDetailPage() {
                 <Mail className="h-3.5 w-3.5" />
                 {report.sender_name ? `${report.sender_name} · ` : ""}
                 {report.sender_email}
+                {report.report_date ? (
+                  <>
+                    <span className="mx-1">·</span>
+                    <span data-testid="text-report-date">
+                      Report date {parseDisplayDate(report.report_date).toLocaleDateString()}
+                    </span>
+                  </>
+                ) : null}
                 <span className="mx-1">·</span>
-                {fmtDateTime(report.received_at)}
+                Received {fmtDateTime(report.received_at)}
               </>
             )}
           </div>

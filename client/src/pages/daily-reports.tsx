@@ -37,6 +37,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
+import { parseDisplayDate } from "@/lib/utils";
 
 const STATUS_TONE: Record<DailyReportStatus, string> = {
   "Needs job match": "bg-orange-500/15 text-orange-700 dark:text-orange-400",
@@ -47,7 +48,7 @@ const STATUS_TONE: Record<DailyReportStatus, string> = {
 
 function fmt(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleDateString();
 }
 

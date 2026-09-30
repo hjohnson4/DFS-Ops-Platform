@@ -2,6 +2,7 @@ import type { Customer, JobWithCustomer, Area } from "@shared/schema";
 import { AREAS } from "@shared/schema";
 import { DFS_LOGO_DATA_URI } from "./brandAssets";
 import { showPdfPreview } from "./pdfPreview";
+import { parseDisplayDate } from "./utils";
 
 // Client-side PDF export for the Customers module. We build a fully styled,
 // self-contained HTML report and hand it to the browser's native print-to-PDF
@@ -17,7 +18,7 @@ const esc = (s: unknown): string =>
 
 const fmtDate = (d: string | null | undefined): string => {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   if (isNaN(dt.getTime())) return "—";
   return dt.toLocaleDateString("en-US", {
     year: "numeric",

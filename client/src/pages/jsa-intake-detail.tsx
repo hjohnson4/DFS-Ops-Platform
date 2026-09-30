@@ -38,6 +38,7 @@ import {
   ChevronDown,
   ChevronRight,
 } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 type DetailResponse = JsaReport & {
   customer_name: string | null;
@@ -76,12 +77,12 @@ const STATUS_TONE: Record<JsaStatus, string> = {
 
 function fmtDateTime(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleString();
 }
 function fmtDate(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleDateString();
 }
 function fmtBytes(n: number | null) {

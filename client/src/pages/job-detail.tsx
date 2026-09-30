@@ -56,6 +56,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { Archive, ArchiveRestore, ArrowLeft, Building2, Calendar, Check, ChevronDown, ClipboardList, DollarSign, FileText, Info, Layers, Loader2, MapPin, Navigation, Pencil, Play, Plus, Power, PowerOff, ShieldAlert, Ticket, Trash2, User, Wrench, X } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 const money = (n: number | null) =>
   n == null
@@ -70,7 +71,7 @@ const STATUS_TONE: Record<JobStatus, string> = {
 
 function fmtDate(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleDateString();
 }
 

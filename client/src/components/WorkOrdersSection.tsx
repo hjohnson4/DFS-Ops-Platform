@@ -44,6 +44,7 @@ import {
   CheckCircle2,
   AlertTriangle,
 } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Work Orders — moved out of the (removed) Maintenance module and surfaced in
@@ -53,7 +54,7 @@ import {
 
 function fmtDate(iso: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
+  const d = parseDisplayDate(iso);
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleDateString(undefined, {
     year: "numeric",

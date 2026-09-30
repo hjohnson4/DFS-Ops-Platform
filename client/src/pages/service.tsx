@@ -36,6 +36,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 // ---- KPI card --------------------------------------------------------------
 function Stat({
@@ -152,7 +153,7 @@ export default function Service() {
 
   function fmtDate(d: string | null | undefined): string {
     if (!d) return "—";
-    const dt = new Date(d);
+    const dt = parseDisplayDate(d);
     if (isNaN(dt.getTime())) return "—";
     return dt.toLocaleDateString("en-US", {
       year: "numeric",

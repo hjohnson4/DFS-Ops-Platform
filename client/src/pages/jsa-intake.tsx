@@ -8,6 +8,7 @@ import type { JsaReportWithLinks, JsaStatus } from "@shared/schema";
 import { SafetyTabs } from "@/components/SafetyTabs";
 import { Button } from "@/components/ui/button";
 import { Mail, Inbox, ShieldCheck, Eye, Download, Loader2 } from "lucide-react";
+import { parseDisplayDate } from "@/lib/utils";
 
 const STATUS_TONE: Record<JsaStatus, string> = {
   "Needs job match": "bg-orange-500/15 text-orange-700 dark:text-orange-400",
@@ -17,7 +18,7 @@ const STATUS_TONE: Record<JsaStatus, string> = {
 
 function fmt(d: string | null) {
   if (!d) return "—";
-  const dt = new Date(d);
+  const dt = parseDisplayDate(d);
   return isNaN(dt.getTime()) ? d : dt.toLocaleDateString();
 }
 
