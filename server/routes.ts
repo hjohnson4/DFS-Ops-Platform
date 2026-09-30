@@ -6856,6 +6856,29 @@ export async function registerRoutes(
       const parsed = createWellSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
+      // A well lives on exactly one pad per job. If this job already has the
+      // well (same normalized name) on this pad, it's a no-op; if it's on a
+      // different pad, move it here instead of creating a duplicate.
+      const key = normWellName(parsed.data.name);
+      const { data: jobWells } = await client
+        .from("wells")
+        .select("id, pad_id, name")
+        .eq("job_id", pad.job_id);
+      const existingWell = (jobWells ?? []).find(
+        (w: any) => normWellName(w.name) === key,
+      );
+      if (existingWell) {
+        if (existingWell.pad_id === pad.id)
+          return res.json({ ...existingWell, stints: [], unchanged: true });
+        const { data: moved, error: mErr } = await client
+          .from("wells")
+          .update({ pad_id: pad.id })
+          .eq("id", existingWell.id)
+          .select()
+          .single();
+        if (mErr) return res.status(400).json({ message: mErr.message });
+        return res.json({ ...moved, stints: [], moved: true });
+      }
       const { data: well, error } = await client
         .from("wells")
         .insert({
@@ -6870,6 +6893,63 @@ export async function registerRoutes(
         .single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json({ ...well, stints: [] });
+    },
+  );
+
+  // Move a well to another pad on the same job.
+  app.patch(
+    "/api/wells/:wellId",
+    requireAuth,
+    requireRole("admin", "area", "super", "field"),
+    async (req: Request, res: Response) => {
+      const padId = typeof req.body?.pad_id === "string" ? req.body.pad_id : "";
+      if (!padId) return res.status(400).json({ message: "pad_id is required" });
+      const client = padClient();
+      const { data: well } = await client
+        .from("wells")
+        .select("id, job_id, pad_id")
+        .eq("id", req.params.wellId)
+        .single();
+      if (!well) return res.status(404).json({ message: "Well not found" });
+      const job = await loadScopedJob(req, res, well.job_id);
+      if (!job) return;
+      const { data: target } = await client
+        .from("pads")
+        .select("id, job_id")
+        .eq("id", padId)
+        .single();
+      if (!target || target.job_id !== well.job_id)
+        return res.status(400).json({ message: "Pad must be on the same job" });
+      const { data: moved, error } = await client
+        .from("wells")
+        .update({ pad_id: padId })
+        .eq("id", well.id)
+        .select()
+        .single();
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(moved);
+    },
+  );
+
+  // Remove a well from its pad. Daily reports are untouched — the well simply
+  // goes back to "not on a pad yet" and can be added to another pad.
+  app.delete(
+    "/api/wells/:wellId",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const client = padClient();
+      const { data: well } = await client
+        .from("wells")
+        .select("id, job_id")
+        .eq("id", req.params.wellId)
+        .single();
+      if (!well) return res.status(404).json({ message: "Well not found" });
+      const job = await loadScopedJob(req, res, well.job_id);
+      if (!job) return;
+      const { error } = await client.from("wells").delete().eq("id", well.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
     },
   );
 

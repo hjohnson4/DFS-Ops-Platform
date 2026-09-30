@@ -57,6 +57,13 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { Archive, ArchiveRestore, ArrowLeft, Building2, Calendar, Check, ChevronDown, ClipboardList, DollarSign, FileText, Info, Layers, Loader2, MapPin, Navigation, Pencil, Play, Plus, Power, PowerOff, ShieldAlert, Ticket, Trash2, User, Wrench, X } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const money = (n: number | null) =>
   n == null
@@ -1393,6 +1400,30 @@ function PadsSection({ job }: { job: JobWithCustomer }) {
   };
 
   const dayRate = job.day_rate ?? null;
+  const canRemoveWells =
+    !!profile && ["admin", "area", "super"].includes(profile.role);
+
+  // Add the prompted well to an EXISTING pad (instead of starting a new one).
+  const addPromptWellToPad = useMutation({
+    mutationFn: async (v: { padId: string; name: string }) => {
+      const res = await apiRequest("POST", `/api/pads/${v.padId}/wells`, {
+        name: v.name,
+      });
+      return res.json();
+    },
+    onSuccess: (_d, v) => {
+      setPromptWell(null);
+      invalidate();
+      const padName = (pads ?? []).find((p) => p.id === v.padId)?.name ?? "pad";
+      toast({ title: `${v.name} added to ${padName}` });
+    },
+    onError: (e: any) =>
+      toast({
+        title: "Could not add well",
+        description: e.message,
+        variant: "destructive",
+      }),
+  });
 
   return (
     <>
@@ -1433,9 +1464,33 @@ function PadsSection({ job }: { job: JobWithCustomer }) {
                       ? `, latest ${padDateFmt(promptWell.last_report)}`
                       : ""
                   })`}
-                . Start a new pad for it?
+                .{" "}
+                {(pads ?? []).length > 0
+                  ? "Add it to an existing pad, or start a new pad for it."
+                  : "Start a new pad for it?"}
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {(pads ?? []).length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {(pads ?? []).map((p) => (
+                  <Button
+                    key={p.id}
+                    size="sm"
+                    variant="outline"
+                    disabled={addPromptWellToPad.isPending}
+                    onClick={() =>
+                      addPromptWellToPad.mutate({
+                        padId: p.id,
+                        name: promptWell.name,
+                      })
+                    }
+                    data-testid={`button-add-to-pad-${p.id}`}
+                  >
+                    <Plus className="h-3.5 w-3.5 mr-1" /> Add to {p.name}
+                  </Button>
+                ))}
+              </div>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel onClick={dismissPrompt}>
                 Not now
@@ -1573,6 +1628,10 @@ function PadsSection({ job }: { job: JobWithCustomer }) {
               dayRate={dayRate}
               jobId={job.id}
               canManage={canManage}
+              canRemove={canRemoveWells}
+              unassigned={unassigned ?? []}
+              allPads={pads ?? []}
+              onChanged={invalidate}
             />
           ))}
         </div>
@@ -1586,13 +1645,97 @@ function PadCard({
   dayRate,
   jobId,
   canManage,
+  canRemove,
+  unassigned,
+  allPads,
+  onChanged,
 }: {
   pad: PadWithDerivedWells;
   dayRate: number | null;
   jobId: string;
   canManage: boolean;
+  canRemove: boolean;
+  unassigned: UnassignedWell[];
+  allPads: PadWithDerivedWells[];
+  onChanged: () => void;
 }) {
   const { toast } = useToast();
+  const otherPads = allPads.filter((p) => p.id !== pad.id);
+
+  // ---- Add existing wells to this pad ----
+  const [addOpen, setAddOpen] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [typedWell, setTypedWell] = useState("");
+  const addWells = useMutation({
+    mutationFn: async (names: string[]) => {
+      for (const name of names) {
+        await apiRequest("POST", `/api/pads/${pad.id}/wells`, { name });
+      }
+      return names.length;
+    },
+    onSuccess: (n) => {
+      setAddOpen(false);
+      setPicked(new Set());
+      setTypedWell("");
+      onChanged();
+      toast({ title: `${n} well${n === 1 ? "" : "s"} added to ${pad.name}` });
+    },
+    onError: (e: any) => {
+      onChanged();
+      toast({
+        title: "Could not add wells",
+        description: e.message,
+        variant: "destructive",
+      });
+    },
+  });
+  const togglePick = (name: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const submitAdd = () => {
+    const names = Array.from(picked);
+    typedWell
+      .split(/[\n,]/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .forEach((t) => {
+        if (!names.some((n) => n.toLowerCase() === t.toLowerCase())) names.push(t);
+      });
+    if (names.length === 0) return;
+    addWells.mutate(names);
+  };
+
+  // ---- Move / remove a well ----
+  const moveWell = useMutation({
+    mutationFn: async (v: { wellId: string; padId: string }) => {
+      const res = await apiRequest("PATCH", `/api/wells/${v.wellId}`, {
+        pad_id: v.padId,
+      });
+      return res.json();
+    },
+    onSuccess: (_d, v) => {
+      onChanged();
+      const to = allPads.find((p) => p.id === v.padId)?.name ?? "pad";
+      toast({ title: `Well moved to ${to}` });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not move well", description: e.message, variant: "destructive" }),
+  });
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; name: string } | null>(null);
+  const removeWell = useMutation({
+    mutationFn: async (wellId: string) => apiRequest("DELETE", `/api/wells/${wellId}`),
+    onSuccess: () => {
+      setRemoveTarget(null);
+      onChanged();
+      toast({ title: "Well removed from pad" });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not remove well", description: e.message, variant: "destructive" }),
+  });
   const wells = pad.wells ?? [];
   const totalDays = wells.reduce((sum, w) => sum + w.report_days, 0);
   // Pad revenue = sum of each well's revenue (the accrued AS57 figure from its
@@ -1711,13 +1854,109 @@ function PadCard({
             </>
           )}
         </div>
+        {canManage && !addOpen && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7"
+            onClick={() => setAddOpen(true)}
+            data-testid={`button-add-wells-${pad.id}`}
+          >
+            <Plus className="h-3.5 w-3.5 mr-1" /> Add wells
+          </Button>
+        )}
       </div>
+
+      {/* Add existing wells panel */}
+      {canManage && addOpen && (
+        <div className="border-b border-card-border px-4 py-3 space-y-3 bg-background">
+          {unassigned.length > 0 ? (
+            <div>
+              <div className="text-xs font-medium mb-1.5">
+                Wells from this job's daily reports not on a pad yet
+              </div>
+              <div className="space-y-1.5">
+                {unassigned.map((w) => (
+                  <label
+                    key={w.name}
+                    className="flex items-center gap-2 text-sm cursor-pointer"
+                    data-testid={`pick-well-${w.name}`}
+                  >
+                    <Checkbox
+                      checked={picked.has(w.name)}
+                      onCheckedChange={() => togglePick(w.name)}
+                    />
+                    <span className="font-medium">{w.name}</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {w.report_days} report day{w.report_days === 1 ? "" : "s"}
+                      {w.first_report ? ` · ${padDateFmt(w.first_report)}` : ""}
+                      {w.last_report && w.last_report !== w.first_report
+                        ? ` → ${padDateFmt(w.last_report)}`
+                        : ""}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              {unassigned.length > 1 && (
+                <button
+                  type="button"
+                  className="mt-1.5 text-[11px] text-primary hover:underline"
+                  onClick={() => setPicked(new Set(unassigned.map((w) => w.name)))}
+                  data-testid={`button-pick-all-${pad.id}`}
+                >
+                  Select all
+                </button>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Every well on this job's daily reports is already on a pad. Wells
+              on another pad can be moved from that pad's well list.
+            </p>
+          )}
+          <div>
+            <Label htmlFor={`typed-well-${pad.id}`} className="text-xs">
+              Or type a well name (not reported yet)
+            </Label>
+            <Input
+              id={`typed-well-${pad.id}`}
+              value={typedWell}
+              onChange={(e) => setTypedWell(e.target.value)}
+              placeholder="e.g. CHRISTINE-HAUSMANN 102H"
+              className="mt-1 h-8 text-sm"
+              data-testid={`input-typed-well-${pad.id}`}
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              onClick={submitAdd}
+              disabled={addWells.isPending || (picked.size === 0 && !typedWell.trim())}
+              data-testid={`button-save-add-wells-${pad.id}`}
+            >
+              {addWells.isPending && <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />}
+              Add to {pad.name}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setAddOpen(false);
+                setPicked(new Set());
+                setTypedWell("");
+              }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Wells table */}
       {wells.length === 0 ? (
         <div className="px-4 py-6 text-center text-sm text-muted-foreground">
-          No wells on this pad yet. Wells attach automatically as daily reports
-          name them.
+          No wells on this pad yet. Use Add wells to attach wells from this
+          job's daily reports.
         </div>
       ) : (
         <table className="w-full text-sm">
@@ -1728,6 +1967,7 @@ function PadCard({
               <th className="text-right font-medium px-3 py-2">Report days</th>
               <th className="text-right font-medium px-3 py-2">Dates</th>
               <th className="text-right font-medium px-3 py-2">Revenue</th>
+              {canManage && <th className="px-2 py-2" />}
             </tr>
           </thead>
           <tbody>
@@ -1778,6 +2018,51 @@ function PadCard({
                   <td className="px-3 py-2.5 text-right tabular-nums">
                     {w.revenue == null ? "—" : money(w.revenue)}
                   </td>
+                  {canManage && (
+                    <td className="px-2 py-2 text-right whitespace-nowrap">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7"
+                            aria-label={`Well actions for ${w.name}`}
+                            data-testid={`button-well-actions-${w.id}`}
+                          >
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {otherPads.length === 0 ? (
+                            <DropdownMenuItem disabled>
+                              No other pads to move to
+                            </DropdownMenuItem>
+                          ) : (
+                            otherPads.map((p) => (
+                              <DropdownMenuItem
+                                key={p.id}
+                                onClick={() =>
+                                  moveWell.mutate({ wellId: w.id, padId: p.id })
+                                }
+                                data-testid={`menu-move-${w.id}-${p.id}`}
+                              >
+                                Move to {p.name}
+                              </DropdownMenuItem>
+                            ))
+                          )}
+                          {canRemove && (
+                            <DropdownMenuItem
+                              className="text-destructive"
+                              onClick={() => setRemoveTarget({ id: w.id, name: w.name })}
+                              data-testid={`menu-remove-${w.id}`}
+                            >
+                              Remove from pad
+                            </DropdownMenuItem>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </td>
+                  )}
                 </tr>
               );
             })}
@@ -1793,10 +2078,37 @@ function PadCard({
               <td className="px-3 py-2 text-right tabular-nums font-medium text-primary">
                 {totalRevenue == null ? "—" : money(totalRevenue)}
               </td>
+              {canManage && <td />}
             </tr>
           </tfoot>
         </table>
       )}
+
+      <AlertDialog
+        open={!!removeTarget}
+        onOpenChange={(o) => {
+          if (!o) setRemoveTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {removeTarget?.name} from {pad.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              The well's daily reports are not deleted. It goes back to "not on a
+              pad yet" and can be added to any pad on this job.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => removeTarget && removeWell.mutate(removeTarget.id)}
+              data-testid="button-confirm-remove-well"
+            >
+              Remove from pad
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {dayRate == null && wells.length > 0 && (
         <div className="px-4 py-2 text-[11px] text-muted-foreground border-t border-card-border">
