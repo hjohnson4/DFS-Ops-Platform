@@ -1250,7 +1250,7 @@ export async function registerRoutes(
       .order("created_at", { ascending: false });
     if (scope) q = q.eq("area", scope);
     // Field techs assigned to jobs see ONLY those jobs.
-    if (jobIds) q = q.in("id", jobIds);
+    if (jobIds) q = q.in("id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
     if (onlyArchived) q = q.not("archived_at", "is", null);
     else if (!includeArchived) q = q.is("archived_at", null);
     const { data, error } = await q;
@@ -5022,6 +5022,9 @@ export async function registerRoutes(
       .select(`${JSA_LIST_COLS}, customer:customers(name), job:jobs(job_number)`)
       .order("received_at", { ascending: false });
     if (scope) q = q.eq("area", scope);
+    // Field techs: only JSAs matched to their assigned job(s).
+    const jsaJobIds = await jobScopeOf(req.profile!);
+    if (jsaJobIds) q = q.in("job_id", jsaJobIds.length ? jsaJobIds : ["00000000-0000-0000-0000-000000000000"]);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
     const rows = (data || []).map((r: any) => ({
@@ -5045,6 +5048,9 @@ export async function registerRoutes(
     const scope = areaScopeOf(req.profile!);
     if (scope && data.area !== scope)
       return res.status(404).json({ message: "JSA not found" });
+    const jsaJobIds = await jobScopeOf(req.profile!);
+    if (jsaJobIds && !jsaJobIds.includes((data as any).job_id))
+      return res.status(404).json({ message: "JSA not found" });
     const { data: events } = await supabaseAnon
       .from("jsa_report_events")
       .select("*")
@@ -5067,12 +5073,15 @@ export async function registerRoutes(
     async (req: Request, res: Response) => {
       const { data, error } = await supabaseAnon
         .from("jsa_reports")
-        .select("area, attachment_name, attachment_mime, attachment_base64")
+        .select("area, job_id, attachment_name, attachment_mime, attachment_base64")
         .eq("id", req.params.id)
         .single();
       if (error || !data) return res.status(404).json({ message: "JSA not found" });
       const scope = areaScopeOf(req.profile!);
       if (scope && data.area !== scope)
+        return res.status(404).json({ message: "JSA not found" });
+      const jsaJobIds = await jobScopeOf(req.profile!);
+      if (jsaJobIds && !jsaJobIds.includes((data as any).job_id))
         return res.status(404).json({ message: "JSA not found" });
       const buf = Buffer.from(data.attachment_base64, "base64");
       res.setHeader("Content-Type", data.attachment_mime || "application/octet-stream");
@@ -5095,12 +5104,15 @@ export async function registerRoutes(
     async (req: Request, res: Response) => {
       const { data, error } = await supabaseAnon
         .from("jsa_reports")
-        .select("area, attachment_name, attachment_mime, attachment_base64")
+        .select("area, job_id, attachment_name, attachment_mime, attachment_base64")
         .eq("id", req.params.id)
         .single();
       if (error || !data) return res.status(404).json({ message: "JSA not found" });
       const scope = areaScopeOf(req.profile!);
       if (scope && data.area !== scope)
+        return res.status(404).json({ message: "JSA not found" });
+      const jsaJobIds = await jobScopeOf(req.profile!);
+      if (jsaJobIds && !jsaJobIds.includes((data as any).job_id))
         return res.status(404).json({ message: "JSA not found" });
 
       const name = (data.attachment_name || "").toLowerCase();
@@ -5819,6 +5831,12 @@ export async function registerRoutes(
     }
     const scope = areaScopeOf(req.profile!);
     if (scope && data.area !== scope) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    // Field techs: only their assigned job(s).
+    const fieldJobIds = await jobScopeOf(req.profile!);
+    if (fieldJobIds && !fieldJobIds.includes(data.id)) {
       res.status(404).json({ message: "Job not found" });
       return null;
     }

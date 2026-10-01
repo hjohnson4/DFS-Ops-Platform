@@ -519,6 +519,9 @@ export default function JobDetailPage() {
         </div>
       )}
 
+      {/* Field tech accounts assigned to this job */}
+      <FieldTechAssignments job={job as any} canEdit={canEdit} />
+
       {/* Assigned assets */}
       <div className="mt-6 mb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold">
@@ -2388,5 +2391,118 @@ function Field({
       </div>
       <div className={value && value !== "—" ? "" : "text-muted-foreground"}>{value || "—"}</div>
     </div>
+  );
+}
+
+// ---- Field tech assignments ---------------------------------------------
+// Field techs only ever see the job(s) they are assigned to here. Admin, area
+// managers and supervisors can change who is assigned. Saves through
+// PATCH /api/jobs/:id { field_tech_ids }, which replaces the assignment set.
+function FieldTechAssignments({
+  job,
+  canEdit,
+}: {
+  job: { id: string; area: string; field_tech_ids?: string[]; assignments?: { profile_id: string; profile_name: string | null; profile_role: string | null }[] };
+  canEdit: boolean;
+}) {
+  const { toast } = useToast();
+  const [open, setOpen] = useState(false);
+  const [picked, setPicked] = useState<string[]>([]);
+  const { data: techs } = useQuery<{ id: string; name: string; area: string }[]>({
+    queryKey: [`/api/field-techs?area=${encodeURIComponent(job.area)}`],
+    enabled: canEdit && open,
+  });
+  const assigned = (job.assignments || []).filter(
+    (a) => !a.profile_role || a.profile_role === "field",
+  );
+  const save = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("PATCH", `/api/jobs/${job.id}`, {
+        field_tech_ids: picked,
+      });
+      return res.json();
+    },
+    onSuccess: (d: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/jobs", job.id] });
+      queryClient.invalidateQueries({ queryKey: ["/api/jobs"] });
+      if (d?.tech_assign_warning)
+        toast({ title: "Saved with a warning", description: String(d.tech_assign_warning) });
+      else toast({ title: "Field techs updated" });
+      setOpen(false);
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not update field techs", description: e.message, variant: "destructive" }),
+  });
+  return (
+    <>
+      <div className="mt-6 mb-2 flex items-center justify-between">
+        <h2 className="text-sm font-semibold">
+          Field techs{" "}
+          <span className="text-muted-foreground font-normal">({assigned.length})</span>
+        </h2>
+        {canEdit && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setPicked(assigned.map((a) => a.profile_id));
+              setOpen(true);
+            }}
+            data-testid="button-edit-field-techs"
+          >
+            <Pencil className="mr-2 h-4 w-4" /> Assign field techs
+          </Button>
+        )}
+      </div>
+      {assigned.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-4 text-sm text-muted-foreground">
+          No field tech accounts are assigned. A field tech only sees the job they are assigned to.
+        </div>
+      ) : (
+        <div className="rounded-lg border border-card-border bg-card divide-y divide-card-border">
+          {assigned.map((a) => (
+            <div key={a.profile_id} className="flex items-center gap-3 px-4 py-2.5 text-sm" data-testid={`field-tech-${a.profile_id}`}>
+              <User className="h-4 w-4 text-muted-foreground shrink-0" />
+              <span className="font-medium">{a.profile_name ?? "—"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Assign field techs</DialogTitle>
+          </DialogHeader>
+          <div className="text-xs text-muted-foreground">
+            Field tech accounts in {job.area}. Each one will only see the jobs they are ticked on.
+          </div>
+          <div className="max-h-72 overflow-y-auto rounded-md border border-card-border divide-y divide-card-border">
+            {(techs || []).length === 0 ? (
+              <div className="p-3 text-sm text-muted-foreground">No field tech accounts in this area.</div>
+            ) : (
+              (techs || []).map((t) => (
+                <label key={t.id} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer">
+                  <Checkbox
+                    checked={picked.includes(t.id)}
+                    onCheckedChange={(v) =>
+                      setPicked((p) => (v ? Array.from(new Set([...p, t.id])) : p.filter((x) => x !== t.id)))
+                    }
+                    data-testid={`check-field-tech-${t.id}`}
+                  />
+                  {t.name}
+                </label>
+              ))
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button onClick={() => save.mutate()} disabled={save.isPending} data-testid="button-save-field-techs">
+              {save.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

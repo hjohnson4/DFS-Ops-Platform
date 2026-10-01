@@ -82,16 +82,15 @@ export function areaScopeOf(p: Profile): string | null {
 /**
  * jobScopeOf — determines which jobs a caller may see.
  *
- * Only field techs are narrowed to specific jobs. A field tech who has been
- * assigned to one or more jobs sees ONLY those jobs (and data tied to them).
- * A field tech with NO assignments falls back to their area view (returns
- * null, meaning "do not restrict by job id"). Every other role
- * (admin/area/super) also returns null and keeps the existing area scoping.
+ * Only field techs are narrowed to specific jobs. A field tech sees ONLY the
+ * jobs they are assigned to (and data tied to them). A field tech with NO
+ * assignments gets an empty list and sees nothing. Every other role
+ * (admin/area/super) returns null and keeps the existing area scoping.
  *
  * Returns:
- *   - string[] : restrict queries to these job ids (field tech, assigned)
- *   - null     : do not restrict by job id (all non-field roles, and
- *                unassigned field techs falling back to area view)
+ *   - string[] : restrict queries to these job ids (every field tech;
+ *                empty when unassigned)
+ *   - null     : do not restrict by job id (all non-field roles)
  */
 export async function jobScopeOf(p: Profile): Promise<string[] | null> {
   if (p.role !== "field") return null;
@@ -104,7 +103,8 @@ export async function jobScopeOf(p: Profile): Promise<string[] | null> {
     console.error("[auth] jobScopeOf error", error);
     return [];
   }
-  const ids = (data || []).map((r: { job_id: string }) => r.job_id);
-  // No assignments -> fall back to area view (null = unrestricted by job).
-  return ids.length > 0 ? ids : null;
+  // Field techs ONLY ever see the job(s) they are assigned to. A field tech
+  // with no assignment sees no jobs (empty list) rather than their whole
+  // area — an unassigned account must never fall back to other jobs' data.
+  return (data || []).map((r: { job_id: string }) => r.job_id);
 }
