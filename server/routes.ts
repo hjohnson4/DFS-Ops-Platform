@@ -2913,6 +2913,19 @@ export async function registerRoutes(
   // machines needing service soon, overdue machines, and reports filed — plus
   // the active-centrifuge list (job/area, technician, run-hrs since service,
   // interval, status). Area-scoped for non-admins.
+  // Field techs only see service data for assets currently on their assigned
+  // job(s). Returns null for every other role (no asset restriction).
+  async function fieldAssetIdsOf(req: Request): Promise<Set<string> | null> {
+    if (req.profile!.role !== "field") return null;
+    const jobIds = (await jobScopeOf(req.profile!)) ?? [];
+    if (jobIds.length === 0) return new Set();
+    const { data } = await (supabaseAdmin || supabaseAnon)
+      .from("assets")
+      .select("id")
+      .in("job_id", jobIds);
+    return new Set((data || []).map((a: any) => a.id));
+  }
+
   app.get(
     "/api/service/dashboard",
     requireAuth,
@@ -2929,7 +2942,12 @@ export async function registerRoutes(
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
-      const assets = (assetsData || []) as any[];
+      const fieldJobIds = req.profile!.role === "field"
+        ? ((await jobScopeOf(req.profile!)) ?? [])
+        : null;
+      const assets = ((assetsData || []) as any[]).filter(
+        (a) => !fieldJobIds || (a.job_id && fieldJobIds.includes(a.job_id)),
+      );
 
       // Last service technician per asset = supervisor on that asset's most
       // recent maintenance report. One query, reduced client-side.
@@ -2950,9 +2968,13 @@ export async function registerRoutes(
       // Reports filed (scope-aware). Count total + pending sign-off.
       const { data: repRows } = await client
         .from("maintenance_reports")
-        .select("status, asset:assets(area)");
+        .select("status, asset:assets(area, job_id)");
       let reports = (repRows || []) as any[];
       if (scope) reports = reports.filter((r) => r.asset?.area === scope);
+      if (fieldJobIds)
+        reports = reports.filter(
+          (r) => r.asset?.job_id && fieldJobIds.includes(r.asset.job_id),
+        );
       const reportsFiled = reports.length;
       const reportsPending = reports.filter(
         (r) => r.status !== "Signed off",
@@ -3092,6 +3114,9 @@ export async function registerRoutes(
       let rows = (data || []).map(flattenServiceReport);
       // Area scope on the joined job area (null scope = admin, sees everything).
       if (scope) rows = rows.filter((r: any) => r.area === scope);
+      // Field techs: only reports on their assigned job(s).
+      const srJobIds = await jobScopeOf(req.profile!);
+      if (srJobIds) rows = rows.filter((r: any) => srJobIds.includes(r.job_id));
       res.json(rows);
     },
   );
@@ -3122,6 +3147,8 @@ export async function registerRoutes(
       if (error) return res.status(500).json({ message: error.message });
       let rows = (data || []).map(flattenServiceReport);
       if (scope) rows = rows.filter((r: any) => r.area === scope);
+      const srJobIds = await jobScopeOf(req.profile!);
+      if (srJobIds) rows = rows.filter((r: any) => srJobIds.includes(r.job_id));
 
       const byArea: Record<string, number> = {};
       const byCustomer: Record<string, number> = {};
@@ -3210,7 +3237,7 @@ export async function registerRoutes(
       const { data, error } = await supabaseAnon
         .from("service_reports")
         .select(
-          "file_name, file_mime, file_base64, job:jobs!service_reports_job_id_fkey(area)",
+          "job_id, file_name, file_mime, file_base64, job:jobs!service_reports_job_id_fkey(area)",
         )
         .eq("id", req.params.id)
         .single();
@@ -3219,6 +3246,9 @@ export async function registerRoutes(
       const scope = areaScopeOf(req.profile!);
       const jobArea = (data as any).job?.area ?? null;
       if (scope && jobArea !== scope)
+        return res.status(404).json({ message: "File not found" });
+      const srJobIds = await jobScopeOf(req.profile!);
+      if (srJobIds && !srJobIds.includes((data as any).job_id))
         return res.status(404).json({ message: "File not found" });
       const buf = Buffer.from((data as any).file_base64, "base64");
       res.setHeader(
@@ -3304,9 +3334,9 @@ export async function registerRoutes(
       let rows = (data || []).map(flattenServiceForm);
       const scope = areaScopeOf(req.profile!);
       if (scope) rows = rows.filter((r: any) => r.area === scope);
-      // Field techs: only their own filed reports.
-      if (req.profile!.role === "field")
-        rows = rows.filter((r: any) => r.supervisor_id === req.profile!.id);
+      // Field techs: only reports for assets on their assigned job(s).
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets) rows = rows.filter((r: any) => fieldAssets.has(r.asset_id));
       res.json(rows);
     },
   );
@@ -3330,7 +3360,8 @@ export async function registerRoutes(
       const scope = areaScopeOf(req.profile!);
       if (scope && row.area !== scope)
         return res.status(404).json({ message: "Service report not found" });
-      if (req.profile!.role === "field" && row.supervisor_id !== req.profile!.id)
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets && !fieldAssets.has((row as any).asset_id))
         return res.status(404).json({ message: "Service report not found" });
 
       // Photos linked to this report.
@@ -3607,7 +3638,11 @@ export async function registerRoutes(
       if (scope) query = query.eq("area", scope);
       const { data, error } = await query;
       if (error) return res.status(500).json({ message: error.message });
-      res.json((data || []).map(flattenWorkOrder));
+      let rows = (data || []).map(flattenWorkOrder);
+      // Field techs: only work orders for assets on their assigned job(s).
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets) rows = rows.filter((r: any) => fieldAssets.has(r.asset_id));
+      res.json(rows);
     },
   );
 
@@ -3811,6 +3846,9 @@ export async function registerRoutes(
     "/api/assets/:id/audit",
     requireAuth,
     async (req: Request, res: Response) => {
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets && !fieldAssets.has(String(req.params.id)))
+        return res.status(404).json({ message: "Asset not found" });
       const { data, error } = await supabaseAnon
         .from("audit_events")
         .select("*")
