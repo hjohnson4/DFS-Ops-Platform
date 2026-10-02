@@ -752,6 +752,11 @@ export default function DailyReportsPage() {
                       <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${STATUS_TONE[r.status]}`}>
                         {r.status}
                       </span>
+                      {(r.analysis?.missing_fields?.length ?? 0) > 0 && (
+                        <span className="inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-rose-500/15 text-rose-700 dark:text-rose-400" title={r.analysis?.missing_fields?.join("\n")} data-testid={`badge-missing-${r.id}`}>
+                          Missing data
+                        </span>
+                      )}
                     </td>
                     <td
                       className="px-4 py-2.5 whitespace-nowrap"
@@ -830,6 +835,11 @@ export default function DailyReportsPage() {
                     <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${STATUS_TONE[r.status]}`}>
                       {r.status}
                     </span>
+                    {(r.analysis?.missing_fields?.length ?? 0) > 0 && (
+                      <span className="inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-rose-500/15 text-rose-700 dark:text-rose-400" title={r.analysis?.missing_fields?.join("\n")} data-testid={`badge-missing-${r.id}`}>
+                        Missing data
+                      </span>
+                    )}
                     {showSelectColumn && isPending && (
                       <span onClick={(e) => e.stopPropagation()}>
                         <Checkbox

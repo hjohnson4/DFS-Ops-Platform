@@ -38,6 +38,7 @@ import {
   Waypoints,
   Wrench,
   Link2,
+  FileWarning,
 } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
 
@@ -271,6 +272,32 @@ export default function DailyReportDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* Missing critical data — set by email intake when hand-entered cells
+          were blank on the imported day tab. Reviewers check before sign-off. */}
+      {Array.isArray(report.analysis?.missing_fields) &&
+        report.analysis.missing_fields.length > 0 && (
+          <div
+            className="mt-4 flex gap-3 rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm"
+            data-testid="banner-missing-data"
+          >
+            <FileWarning className="h-5 w-5 shrink-0 text-rose-600 dark:text-rose-400" />
+            <div className="min-w-0">
+              <div className="font-medium text-rose-700 dark:text-rose-300">
+                This report is missing critical data
+              </div>
+              <ul className="mt-1 list-disc pl-5 text-rose-700/90 dark:text-rose-300/90">
+                {report.analysis.missing_fields.map((f: string) => (
+                  <li key={f}>{f}</li>
+                ))}
+              </ul>
+              <div className="mt-1.5 text-muted-foreground">
+                Check with the crew before signing off. If they resend a corrected
+                report, it comes in as a new report.
+              </div>
+            </div>
+          </div>
+        )}
 
       {/* Linkage chips */}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">

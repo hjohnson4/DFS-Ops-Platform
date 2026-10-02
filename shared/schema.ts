@@ -685,6 +685,10 @@ export interface DailyReportAnalysis {
   work_completed?: string; // narrative of work done
   crew?: string[]; // crew members on site
   hours?: string | null; // hours / run-hours called out
+  // Critical hand-entered fields that were blank on the imported day tab
+  // (e.g. "Report date (D3)", "Measured depth (AI9)"). Set by email intake;
+  // non-empty = reviewer is alerted and must check before signing off.
+  missing_fields?: string[];
 }
 
 // Provenance for a single KPI value: which sheet/cell it was read from.

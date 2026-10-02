@@ -163,9 +163,28 @@ const DEPTH_CELL = "AI9"; // Measured depth (ft) — hand-entered per worked day
 
 // True when a day sheet has real, hand-entered work on it (not just a
 // formula-inherited date/header from the blank template).
+// Remarks / operations summary (B57) is also typed in by hand each worked day
+// and is blank on every untouched template tab. Crews sometimes send a day tab
+// with remarks, waste and equipment filled in but forget the measured depth —
+// that day is still a real worked day and must be picked up (not skipped back
+// to the prior day, which would re-import yesterday's report).
+const REMARKS_CELL = "B57";
+
 function sheetIsCompleted(ws: XLSX.WorkSheet | undefined): boolean {
   if (!ws) return false;
-  return toNumber(rawCell(ws, DEPTH_CELL)) != null;
+  if (toNumber(rawCell(ws, DEPTH_CELL)) != null) return true;
+  const remarks = toText(rawCell(ws, REMARKS_CELL));
+  return !!(remarks && remarks.trim().length > 0);
+}
+
+// True when the worked day is missing the hand-entered depth (AI9) or date
+// (D3). Such a day is still imported but flagged for supervisor review.
+function sheetMissingKeyFields(ws: XLSX.WorkSheet | undefined): boolean {
+  if (!ws) return true;
+  return (
+    toNumber(rawCell(ws, DEPTH_CELL)) == null ||
+    toDateStr(rawCell(ws, DATE_CELL)) == null
+  );
 }
 
 // Enumerate the daily-report tabs in the order they appear in the workbook.
@@ -190,6 +209,22 @@ function reportDaySheets(
   return out;
 }
 
+// Critical hand-entered cells a reviewer needs before signing off. Any that are
+// blank on the imported day tab are listed so the report is flagged (still
+// imported — never dropped — but the sign-off reviewer is alerted).
+export function missingCriticalFields(ws: XLSX.WorkSheet | undefined): string[] {
+  const out: string[] = [];
+  if (!ws) return ["Day tab not found"];
+  if (toDateStr(rawCell(ws, DATE_CELL)) == null) out.push("Report date (D3)");
+  if (toNumber(rawCell(ws, DEPTH_CELL)) == null) out.push("Measured depth (AI9)");
+  const rate = toNumber(rawCell(ws, "AL57"));
+  if (rate == null || rate === 0) out.push("Day rate (AL57)");
+  if (!toText(rawCell(ws, "V9"))) out.push("Well name (V9)");
+  const v8 = toText(rawCell(ws, "V8"));
+  if (!v8 || /^\d+(\.\d+)?$/.test(v8.trim())) out.push("Rig / job (V8)");
+  return out;
+}
+
 export interface ParsedDailyReport {
   report_date: string | null;
   well_name: string | null;
@@ -202,6 +237,8 @@ export interface ParsedDailyReport {
   // True when NO day tab had hand-entered activity, so we fell back to the
   // first day tab. The caller flags these for supervisor / area-manager review.
   incomplete: boolean;
+  // Critical hand-entered fields that are blank on the chosen day tab.
+  missing_fields: string[];
   kpis: DailyFieldKpis;
   kpi_cell_map: Record<string, KpiCellRef>;
   well_context: DailyReportWellContext;
@@ -252,7 +289,24 @@ export function parseDailyReportWorkbook(
     incomplete = true;
   }
 
-  return parseDaySheet(wb, chosen, incomplete);
+  if (!incomplete && sheetMissingKeyFields(wb.Sheets[chosen.name]))
+    incomplete = true;
+
+  const result = parseDaySheet(wb, chosen, incomplete);
+
+  // Blank date (D3) on the chosen day: infer it from the nearest EARLIER day
+  // tab that has a real date — one calendar day per report day. Later template
+  // tabs are ignored because they can carry stale formula-inherited dates.
+  if (!result.report_date) {
+    for (let i = days.indexOf(chosen) - 1; i >= 0; i--) {
+      const prev = toDateStr(rawCell(wb.Sheets[days[i].name], DATE_CELL));
+      if (prev) {
+        result.report_date = addDaysToDateStr(prev, chosen.day - days[i].day);
+        break;
+      }
+    }
+  }
+  return result;
 }
 
 // Parse a single already-chosen day tab into a ParsedDailyReport. Shared by the
@@ -341,6 +395,7 @@ function parseDaySheet(
     source_sheet: dayLabel,
     report_day: chosen.day,
     incomplete,
+    missing_fields: missingCriticalFields(ws),
     kpis,
     kpi_cell_map: cellMap,
     well_context,

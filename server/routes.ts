@@ -466,7 +466,8 @@ export async function registerRoutes(
           | "signoff_overdue"
           | "signoff_pending"
           | "new_report"
-          | "changes_requested";
+          | "changes_requested"
+          | "missing_data";
         severity: "warning" | "info";
         title: string;
         detail: string;
@@ -509,7 +510,7 @@ export async function registerRoutes(
         let dq = client
           .from("daily_reports")
           .select(
-            "id, status, area, well_name, sender_name, sender_email, report_date, received_at",
+            "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis",
           )
           .in("status", ["Pending Review", "Needs job match"]);
         if (scope) dq = dq.eq("area", scope);
@@ -518,6 +519,24 @@ export async function registerRoutes(
         for (const r of (drData || []) as any[]) {
           const who = r.sender_name || r.sender_email || "Unknown sender";
           const well = r.well_name ? ` · ${r.well_name}` : "";
+          // Missing critical data: a dedicated warning so whoever signs off
+          // knows to check with the crew first (shown alongside the normal
+          // sign-off / job-match alert).
+          const missing: string[] = Array.isArray(r.analysis?.missing_fields)
+            ? r.analysis.missing_fields
+            : [];
+          if (missing.length) {
+            const short = missing.map((m: string) => m.split(" (")[0]).join(", ");
+            items.push({
+              id: `missing-${r.id}`,
+              type: "missing_data",
+              severity: "warning",
+              title: `Report missing critical data`,
+              detail: `${r.well_name || who}${r.report_day != null ? ` · Day ${r.report_day}` : ""} · ${short}`,
+              href: `/daily-reports/${r.id}`,
+              ts: r.received_at || r.report_date || null,
+            });
+          }
           if (r.status === "Needs job match") {
             items.push({
               id: `newrep-${r.id}`,
@@ -3934,6 +3953,13 @@ export async function registerRoutes(
       normJobId(excel.job_number).length > 0;
 
     const status = job_id ? "Pending Review" : "Needs job match";
+    // Critical blank fields on the imported day tab. When the date was blank
+    // but inferred from the prior day, say so, so the reviewer can confirm it.
+    const missingFields = (excel.missing_fields || []).map((f) =>
+      f === "Report date (D3)" && excel.report_date
+        ? `Report date (D3) — filled in as ${excel.report_date} from the prior day`
+        : f,
+    );
     const row: Record<string, any> = {
       email_message_id: p.email_message_id,
       sender_email: p.sender_email,
@@ -3957,7 +3983,7 @@ export async function registerRoutes(
       kpis: excel.kpis,
       kpi_cell_map: excel.kpi_cell_map,
       summary: excel.summary,
-      analysis: {},
+      analysis: missingFields.length ? { missing_fields: missingFields } : {},
       area,
       customer_id,
       job_id,
@@ -3988,16 +4014,16 @@ export async function registerRoutes(
     // Incomplete workbook (no day tab had hand-entered activity): still imported,
     // but log a distinct alert so a supervisor / area manager knows to review
     // and sign off. Per policy we never drop the email or fabricate values.
-    if (excel.incomplete) {
+    if (missingFields.length) {
       await client.from("daily_report_events").insert({
         report_id: data.id,
         actor_name: "System",
         actor_role: "field",
         action: "needs_review",
         detail:
-          `No completed day sheet was found in \"${p.attachment_name}\" — ` +
-          `imported ${excel.source_sheet} with the values present. ` +
-          `A supervisor or area manager should review and sign off.`,
+          `${excel.source_sheet} in \"${p.attachment_name}\" is missing critical ` +
+          `data: ${missingFields.join("; ")}. Imported with the values present — ` +
+          `check with the crew before signing off.`,
       });
     }
     res.status(201).json(data);
