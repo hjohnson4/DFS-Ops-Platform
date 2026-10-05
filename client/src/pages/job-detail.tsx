@@ -1405,6 +1405,9 @@ function PadsSection({ job }: { job: JobWithCustomer }) {
   const dayRate = job.day_rate ?? null;
   const canRemoveWells =
     !!profile && ["admin", "area", "super"].includes(profile.role);
+  // Deleting or merging whole pads is limited to admins and area managers.
+  const canRegroupPads =
+    !!profile && ["admin", "area"].includes(profile.role);
 
   // Add the prompted well to an EXISTING pad (instead of starting a new one).
   const addPromptWellToPad = useMutation({
@@ -1632,6 +1635,7 @@ function PadsSection({ job }: { job: JobWithCustomer }) {
               jobId={job.id}
               canManage={canManage}
               canRemove={canRemoveWells}
+              canRegroup={canRegroupPads}
               unassigned={unassigned ?? []}
               allPads={pads ?? []}
               onChanged={invalidate}
@@ -1649,6 +1653,7 @@ function PadCard({
   jobId,
   canManage,
   canRemove,
+  canRegroup,
   unassigned,
   allPads,
   onChanged,
@@ -1658,6 +1663,7 @@ function PadCard({
   jobId: string;
   canManage: boolean;
   canRemove: boolean;
+  canRegroup: boolean;
   unassigned: UnassignedWell[];
   allPads: PadWithDerivedWells[];
   onChanged: () => void;
@@ -1739,6 +1745,33 @@ function PadCard({
     onError: (e: any) =>
       toast({ title: "Could not remove well", description: e.message, variant: "destructive" }),
   });
+  // ---- Delete / merge the whole pad (admin + area manager) ----
+  const [padAction, setPadAction] = useState<
+    { kind: "delete" } | { kind: "merge"; intoId: string; intoName: string } | null
+  >(null);
+  const deletePad = useMutation({
+    mutationFn: async () => apiRequest("DELETE", `/api/pads/${pad.id}`),
+    onSuccess: () => {
+      setPadAction(null);
+      onChanged();
+      toast({ title: `${pad.name} deleted`, description: "Its wells are back to “not on a pad yet.”" });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not delete pad", description: e.message, variant: "destructive" }),
+  });
+  const mergePad = useMutation({
+    mutationFn: async (intoId: string) =>
+      apiRequest("POST", `/api/pads/${pad.id}/merge`, { into_pad_id: intoId }),
+    onSuccess: () => {
+      const into = padAction && padAction.kind === "merge" ? padAction.intoName : "pad";
+      setPadAction(null);
+      onChanged();
+      toast({ title: `${pad.name} merged into ${into}` });
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not merge pads", description: e.message, variant: "destructive" }),
+  });
+
   const wells = pad.wells ?? [];
   const totalDays = wells.reduce((sum, w) => sum + w.report_days, 0);
   // Pad revenue = sum of each well's revenue (the accrued AS57 figure from its
@@ -1857,17 +1890,53 @@ function PadCard({
             </>
           )}
         </div>
-        {canManage && !addOpen && (
-          <Button
-            size="sm"
-            variant="outline"
-            className="h-7"
-            onClick={() => setAddOpen(true)}
-            data-testid={`button-add-wells-${pad.id}`}
-          >
-            <Plus className="h-3.5 w-3.5 mr-1" /> Add wells
-          </Button>
-        )}
+        <div className="flex items-center gap-1.5">
+          {canManage && !addOpen && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7"
+              onClick={() => setAddOpen(true)}
+              data-testid={`button-add-wells-${pad.id}`}
+            >
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add wells
+            </Button>
+          )}
+          {canRegroup && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  data-testid={`button-pad-actions-${pad.id}`}
+                >
+                  Pad <ChevronDown className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {otherPads.map((p) => (
+                  <DropdownMenuItem
+                    key={p.id}
+                    onClick={() =>
+                      setPadAction({ kind: "merge", intoId: p.id, intoName: p.name })
+                    }
+                    data-testid={`menu-merge-${pad.id}-${p.id}`}
+                  >
+                    Merge into {p.name}
+                  </DropdownMenuItem>
+                ))}
+                <DropdownMenuItem
+                  className="text-destructive"
+                  onClick={() => setPadAction({ kind: "delete" })}
+                  data-testid={`menu-delete-pad-${pad.id}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5 mr-1.5" /> Delete pad
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+        </div>
       </div>
 
       {/* Add existing wells panel */}
@@ -2108,6 +2177,47 @@ function PadCard({
               data-testid="button-confirm-remove-well"
             >
               Remove from pad
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!padAction}
+        onOpenChange={(o) => {
+          if (!o) setPadAction(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {padAction?.kind === "merge"
+                ? `Merge ${pad.name} into ${padAction.intoName}?`
+                : `Delete ${pad.name}?`}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {padAction?.kind === "merge"
+                ? `All ${wells.length} well${wells.length === 1 ? "" : "s"} on ${pad.name} move to ${padAction.intoName}, then ${pad.name} is removed. Daily reports, days and revenue are not changed.`
+                : wells.length > 0
+                  ? `The ${wells.length} well${wells.length === 1 ? "" : "s"} on this pad go back to “not on a pad yet” and can be added to another pad. Daily reports, days and revenue are not deleted.`
+                  : "This pad has no wells. Daily reports are not affected."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                if (padAction?.kind === "merge") mergePad.mutate(padAction.intoId);
+                else if (padAction?.kind === "delete") deletePad.mutate();
+              }}
+              disabled={deletePad.isPending || mergePad.isPending}
+              data-testid="button-confirm-pad-action"
+            >
+              {(deletePad.isPending || mergePad.isPending) && (
+                <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+              )}
+              {padAction?.kind === "merge" ? "Merge pads" : "Delete pad"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

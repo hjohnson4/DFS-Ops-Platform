@@ -6840,11 +6840,17 @@ export async function registerRoutes(
       // Pads are generic containers distinguished by the wells inside them, so
       // we assign a plain sequential name ("Pad 1", "Pad 2", ...) rather than a
       // user-typed name. Number from the current pad count on this job.
-      const { count: padCount } = await client
+      // Next number = highest existing "Pad N" + 1 (not the pad count), so a
+      // deleted or merged pad never causes two pads with the same name.
+      const { data: existingPads } = await client
         .from("pads")
-        .select("id", { count: "exact", head: true })
+        .select("name")
         .eq("job_id", job.id);
-      const padName = `Pad ${(padCount ?? 0) + 1}`;
+      const maxN = (existingPads ?? []).reduce((m: number, p: any) => {
+        const mm = /^Pad\s+(\d+)$/i.exec(String(p.name ?? "").trim());
+        return mm ? Math.max(m, Number(mm[1])) : m;
+      }, 0);
+      const padName = `Pad ${Math.max(maxN, (existingPads ?? []).length) + 1}`;
       const { data: pad, error } = await client
         .from("pads")
         .insert({
@@ -6916,6 +6922,65 @@ export async function registerRoutes(
         .single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(pad);
+    },
+  );
+
+  // Delete a pad (admin / area manager only). Its wells come off the pad and
+  // go back to "not on a pad yet"; daily reports are never touched, so the
+  // wells can be added to another pad and their days/revenue reattach.
+  app.delete(
+    "/api/pads/:padId",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const client = padClient();
+      const { data: pad } = await client
+        .from("pads")
+        .select("id, job_id, name")
+        .eq("id", req.params.padId)
+        .single();
+      if (!pad) return res.status(404).json({ message: "Pad not found" });
+      const job = await loadScopedJob(req, res, pad.job_id);
+      if (!job) return;
+      const { error } = await client.from("pads").delete().eq("id", pad.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
+    },
+  );
+
+  // Merge a pad into another pad on the same job (admin / area manager only):
+  // every well moves to the target pad, then the emptied pad is deleted.
+  app.post(
+    "/api/pads/:padId/merge",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const intoId =
+        typeof req.body?.into_pad_id === "string" ? req.body.into_pad_id : "";
+      if (!intoId)
+        return res.status(400).json({ message: "into_pad_id is required" });
+      if (intoId === req.params.padId)
+        return res.status(400).json({ message: "Pick a different pad" });
+      const client = padClient();
+      const { data: pads } = await client
+        .from("pads")
+        .select("id, job_id, name")
+        .in("id", [req.params.padId, intoId]);
+      const src = (pads ?? []).find((p: any) => p.id === req.params.padId);
+      const dst = (pads ?? []).find((p: any) => p.id === intoId);
+      if (!src || !dst) return res.status(404).json({ message: "Pad not found" });
+      if (src.job_id !== dst.job_id)
+        return res.status(400).json({ message: "Pads must be on the same job" });
+      const job = await loadScopedJob(req, res, src.job_id);
+      if (!job) return;
+      const { error: mErr } = await client
+        .from("wells")
+        .update({ pad_id: dst.id })
+        .eq("pad_id", src.id);
+      if (mErr) return res.status(400).json({ message: mErr.message });
+      const { error: dErr } = await client.from("pads").delete().eq("id", src.id);
+      if (dErr) return res.status(400).json({ message: dErr.message });
+      res.json({ merged: true, into: dst });
     },
   );
 
