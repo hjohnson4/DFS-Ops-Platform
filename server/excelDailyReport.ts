@@ -197,6 +197,11 @@ function reportDaySheets(
 ): { day: number; name: string; completed: boolean }[] {
   const out: { day: number; name: string; completed: boolean }[] = [];
   let day = 0;
+  // Latest real date seen on an earlier completed tab. Unused template tabs
+  // inherit Day 1's date via formula, so a later tab whose date goes BACKWARD
+  // from an earlier completed day is template junk (e.g. a stray depth typed
+  // into tab 8 while the real latest day is tab 7) — never a worked day.
+  let latestDate: string | null = null;
   for (const name of wb.SheetNames) {
     const t = name.trim();
     const isFirst = /^Report Day 1$/i.test(t);
@@ -204,7 +209,13 @@ function reportDaySheets(
     if (!isFirst && !isNumbered) continue;
     day += 1;
     const ws = wb.Sheets[name];
-    out.push({ day, name, completed: sheetIsCompleted(ws) });
+    let completed = sheetIsCompleted(ws);
+    if (completed) {
+      const d = ws ? toDateStr(rawCell(ws, DATE_CELL)) : null;
+      if (d && latestDate && d < latestDate) completed = false;
+      else if (d && (!latestDate || d > latestDate)) latestDate = d;
+    }
+    out.push({ day, name, completed });
   }
   return out;
 }
