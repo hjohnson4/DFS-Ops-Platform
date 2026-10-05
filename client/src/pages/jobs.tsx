@@ -8,7 +8,15 @@ import {
   type JobWithCustomer,
   type JobStatus,
   type DailyReportWithLinks,
+  AREAS,
 } from "@shared/schema";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { JobFormDialog } from "@/components/JobFormDialog";
 import { buildWellTimeline, fmtWellMoney } from "@/lib/wellTimeline";
@@ -204,6 +212,24 @@ export default function JobsPage() {
   const [view, setView] = useState<"active" | "archived">("active");
   const showingArchived = view === "archived";
 
+  // Admins see every area, so they get an area filter. Other roles are
+  // already limited to their own area by the server. The choice is kept for
+  // the browser session so it survives opening a job and coming back.
+  const isAdmin = profile?.role === "admin";
+  const [areaFilter, setAreaFilterState] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem("jobs-area-filter") || "all";
+    } catch {
+      return "all";
+    }
+  });
+  const setAreaFilter = (v: string) => {
+    setAreaFilterState(v);
+    try {
+      sessionStorage.setItem("jobs-area-filter", v);
+    } catch {}
+  };
+
   const { data: jobs, isLoading } = useQuery<JobWithCustomer[]>({
     queryKey: showingArchived ? ["/api/jobs", "archived"] : ["/api/jobs"],
     queryFn: async () => {
@@ -217,6 +243,12 @@ export default function JobsPage() {
     queryKey: ["/api/daily-reports"],
   });
   const noCustomers = customers && customers.length === 0;
+  const activeArea = isAdmin ? areaFilter : "all";
+  const visibleJobs =
+    activeArea === "all"
+      ? jobs
+      : (jobs ?? []).filter((j) => j.area === activeArea);
+  const areaCount = (a: string) => (jobs ?? []).filter((j) => j.area === a).length;
 
   return (
     <div className="p-6 max-w-7xl">
@@ -238,8 +270,9 @@ export default function JobsPage() {
         daily reports; job activity is the Rig Activity from the latest report.
       </p>
 
+      <div className="mb-5 flex flex-wrap items-center gap-3">
       {/* Active / Archived view toggle */}
-      <div className="mb-5 inline-flex rounded-md border border-card-border p-0.5 text-sm">
+      <div className="inline-flex rounded-md border border-card-border p-0.5 text-sm">
         <button
           type="button"
           onClick={() => setView("active")}
@@ -261,6 +294,23 @@ export default function JobsPage() {
           <Archive className="h-3.5 w-3.5" /> Archived
         </button>
       </div>
+      {isAdmin && (
+        <Select value={areaFilter} onValueChange={setAreaFilter}>
+          <SelectTrigger className="h-9 w-[210px]" data-testid="select-jobs-area">
+            <MapPin className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+            <SelectValue placeholder="All areas" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All areas ({(jobs ?? []).length})</SelectItem>
+            {AREAS.map((a) => (
+              <SelectItem key={a} value={a}>
+                {a} ({areaCount(a)})
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      </div>
 
       {noCustomers && (
         <div className="mb-5 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
@@ -270,11 +320,15 @@ export default function JobsPage() {
 
       {isLoading ? (
         <div className="text-sm text-muted-foreground py-8 text-center">Loading…</div>
-      ) : jobs && jobs.length === 0 ? (
+      ) : visibleJobs && visibleJobs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <Briefcase className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
           <div className="text-sm text-muted-foreground">
-            {showingArchived ? "No archived jobs." : "No jobs yet."}
+            {activeArea !== "all"
+              ? `No ${showingArchived ? "archived " : ""}jobs in ${activeArea}.`
+              : showingArchived
+                ? "No archived jobs."
+                : "No jobs yet."}
           </div>
         </div>
       ) : (
@@ -293,7 +347,7 @@ export default function JobsPage() {
               </tr>
             </thead>
             <tbody>
-              {jobs?.map((j) => (
+              {visibleJobs?.map((j) => (
                 <JobRow
                   key={j.id}
                   job={j}
