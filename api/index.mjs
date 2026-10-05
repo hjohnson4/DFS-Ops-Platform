@@ -96,8 +96,7 @@ async function jobScopeOf(p) {
     console.error("[auth] jobScopeOf error", error);
     return [];
   }
-  const ids = (data || []).map((r) => r.job_id);
-  return ids.length > 0 ? ids : null;
+  return (data || []).map((r) => r.job_id);
 }
 
 // server/email.ts
@@ -230,12 +229,37 @@ var KPI_CELLS = [
   { field: "lgs_pct", cell: "G15", numeric: true },
   // Retort R.O.C %: labeled row 26 (value cell blank when not run that day).
   { field: "retort_roc_pct", cell: "I26", numeric: true },
-  // Fluid recovery & run hours: value in merged cell M (M:P).
+  // Fluid recovery: value in merged cell M (M:P).
   { field: "daily_fluid_recovery_bbl", cell: "M31", numeric: true },
   { field: "total_fluid_recovery_bbl", cell: "M32", numeric: true },
-  { field: "daily_run_hours", cell: "M33", numeric: true },
-  { field: "total_run_hours", cell: "M34", numeric: true },
-  { field: "maintenance_hours", cell: "M35", numeric: true },
+  // Centrifuge run/maintenance hours: value in the merged AA block (AA:AF),
+  // labeled in col R. This is the block the crews actually fill in — the old
+  // col-M rows 33-35 are a legacy summary area that stays zero.
+  { field: "daily_run_hours", cell: "AA37", numeric: true },
+  { field: "total_run_hours", cell: "AA38", numeric: true },
+  { field: "maintenance_hours", cell: "AA39", numeric: true },
+  // Per-centrifuge run hours. The report has two centrifuge columns:
+  //   Centrifuge 1 -> AA37 (daily) / AA38 (total)
+  //   Centrifuge 2 -> AM37 (daily) / AM38 (total)
+  // `daily_run_hours` above equals Centrifuge 1's daily hours (AA37); we also
+  // expose it explicitly as _cent1 so run-hours accrual can route each
+  // centrifuge's actual hours to the asset mapped to that slot, instead of
+  // splitting a single total evenly.
+  { field: "daily_run_hours_cent1", cell: "AA37", numeric: true },
+  { field: "total_run_hours_cent1", cell: "AA38", numeric: true },
+  { field: "daily_run_hours_cent2", cell: "AM37", numeric: true },
+  { field: "total_run_hours_cent2", cell: "AM38", numeric: true },
+  // Volume processed by Centrifuge 1 / 2 (bbls): AR60 / AR61, labeled in Y60/Y61.
+  { field: "volume_processed_bbl", cell: "AR60", numeric: true },
+  { field: "volume_processed_cent2_bbl", cell: "AR61", numeric: true },
+  // Centrifuge operating parameters: values in the AA column (rows 31-36),
+  // labeled in col Q. Feed/effluent weight (AA35/AA36) are often blank.
+  { field: "centrifuge_feed_rate_gpm", cell: "AA31", numeric: true },
+  { field: "centrifuge_feed_pump_speed_rpm", cell: "AA32", numeric: true },
+  { field: "centrifuge_bowl_speed_rpm", cell: "AA33", numeric: true },
+  { field: "centrifuge_backdrive_rpm", cell: "AA34", numeric: true },
+  { field: "centrifuge_feed_weight_ppg", cell: "AA35", numeric: true },
+  { field: "centrifuge_effluent_weight_ppg", cell: "AA36", numeric: true },
   // Additions: value in merged cell H (H:J), Daily column.
   { field: "add_base_diesel_bbl", cell: "H45", numeric: true },
   { field: "add_water_bbl", cell: "H46", numeric: true },
@@ -245,7 +269,14 @@ var KPI_CELLS = [
   { field: "end_dumps_loaded", cell: "Q52", numeric: true },
   { field: "cuttings_volume_bbl", cell: "Q53", numeric: true },
   { field: "vac_trucks", cell: "Q54", numeric: true },
-  { field: "liquids_to_disposal_bbl", cell: "Q55", numeric: true }
+  { field: "liquids_to_disposal_bbl", cell: "Q55", numeric: true },
+  // Accrued total for the current well: running cumulative figure in AS57 that
+  // grows each report day. The most recent report for a well carries that
+  // well's latest accrued amount, which the jobs page displays directly.
+  { field: "accrued_current_well", cell: "AS57", numeric: true },
+  // Billable day rate ($/day) for this report day: cell AL57. The rate can vary
+  // by operation/period across a job, so each report carries its own value.
+  { field: "day_rate", cell: "AL57", numeric: true }
 ];
 var CONTEXT_CELLS = [
   { field: "operator", cell: "H8" },
@@ -275,10 +306,16 @@ function toText(v) {
   const s = String(v).trim();
   return s === "" ? null : s;
 }
+function ymdLocal(d) {
+  const y = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${mm}-${dd}`;
+}
 function toDateStr(v) {
   if (v === null || v === void 0 || v === "") return null;
   if (v instanceof Date) {
-    return v.toISOString().slice(0, 10);
+    return ymdLocal(v);
   }
   if (typeof v === "number") {
     const d = XLSX.SSF ? XLSX.SSF.parse_date_code(v) : null;
@@ -292,17 +329,30 @@ function toDateStr(v) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
   if (m) return `${m[1]}-${m[2]}-${m[3]}`;
   const parsed = new Date(s);
-  if (!isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
+  if (!isNaN(parsed.getTime())) return ymdLocal(parsed);
   return null;
 }
+function addDaysToDateStr(dateStr, days) {
+  const d = /* @__PURE__ */ new Date(`${dateStr}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 var DEPTH_CELL = "AI9";
+var REMARKS_CELL = "B57";
 function sheetIsCompleted(ws2) {
   if (!ws2) return false;
-  return toNumber(rawCell(ws2, DEPTH_CELL)) != null;
+  if (toNumber(rawCell(ws2, DEPTH_CELL)) != null) return true;
+  const remarks = toText(rawCell(ws2, REMARKS_CELL));
+  return !!(remarks && remarks.trim().length > 0);
+}
+function sheetMissingKeyFields(ws2) {
+  if (!ws2) return true;
+  return toNumber(rawCell(ws2, DEPTH_CELL)) == null || toDateStr(rawCell(ws2, DATE_CELL)) == null;
 }
 function reportDaySheets(wb) {
   const out = [];
   let day = 0;
+  let latestDate = null;
   for (const name of wb.SheetNames) {
     const t = name.trim();
     const isFirst = /^Report Day 1$/i.test(t);
@@ -310,8 +360,26 @@ function reportDaySheets(wb) {
     if (!isFirst && !isNumbered) continue;
     day += 1;
     const ws2 = wb.Sheets[name];
-    out.push({ day, name, completed: sheetIsCompleted(ws2) });
+    let completed = sheetIsCompleted(ws2);
+    if (completed) {
+      const d = ws2 ? toDateStr(rawCell(ws2, DATE_CELL)) : null;
+      if (d && latestDate && d < latestDate) completed = false;
+      else if (d && (!latestDate || d > latestDate)) latestDate = d;
+    }
+    out.push({ day, name, completed });
   }
+  return out;
+}
+function missingCriticalFields(ws2) {
+  const out = [];
+  if (!ws2) return ["Day tab not found"];
+  if (toDateStr(rawCell(ws2, DATE_CELL)) == null) out.push("Report date (D3)");
+  if (toNumber(rawCell(ws2, DEPTH_CELL)) == null) out.push("Measured depth (AI9)");
+  const rate = toNumber(rawCell(ws2, "AL57"));
+  if (rate == null || rate === 0) out.push("Day rate (AL57)");
+  if (!toText(rawCell(ws2, "V9"))) out.push("Well name (V9)");
+  const v8 = toText(rawCell(ws2, "V8"));
+  if (!v8 || /^\d+(\.\d+)?$/.test(v8.trim())) out.push("Rig / job (V8)");
   return out;
 }
 var ExcelParseError = class extends Error {
@@ -344,7 +412,19 @@ function parseDailyReportWorkbook(buf, requestedDay) {
     chosen = days[0];
     incomplete = true;
   }
-  return parseDaySheet(wb, chosen, incomplete);
+  if (!incomplete && sheetMissingKeyFields(wb.Sheets[chosen.name]))
+    incomplete = true;
+  const result = parseDaySheet(wb, chosen, incomplete);
+  if (!result.report_date) {
+    for (let i = days.indexOf(chosen) - 1; i >= 0; i--) {
+      const prev = toDateStr(rawCell(wb.Sheets[days[i].name], DATE_CELL));
+      if (prev) {
+        result.report_date = addDaysToDateStr(prev, chosen.day - days[i].day);
+        break;
+      }
+    }
+  }
+  return result;
 }
 function parseDaySheet(wb, chosen, incomplete) {
   const ws2 = wb.Sheets[chosen.name];
@@ -367,8 +447,11 @@ function parseDaySheet(wb, chosen, incomplete) {
   well_context.meas_depth_ft = toNumber(rawCell(ws2, "AI9"));
   well_context.supervisor = toText(rawCell(ws2, "AI11"));
   const report_date = toDateStr(rawCell(ws2, DATE_CELL));
-  let well_name = null;
-  for (const { sheet, cell } of WELL_NAME_CELLS) {
+  const v8raw = toText(rawCell(ws2, "V8"));
+  const job_number = v8raw && !/^\d+(\.\d+)?$/.test(v8raw) ? v8raw : null;
+  const v9raw = toText(rawCell(ws2, "V9"));
+  let well_name = v9raw && !/^\d+(\.\d+)?$/.test(v9raw) ? v9raw : null;
+  if (!well_name) for (const { sheet, cell } of WELL_NAME_CELLS) {
     const v = toText(rawCell(wb.Sheets[sheet], cell));
     if (v) {
       well_name = v;
@@ -387,9 +470,11 @@ function parseDaySheet(wb, chosen, incomplete) {
   return {
     report_date,
     well_name,
+    job_number,
     source_sheet: dayLabel,
     report_day: chosen.day,
     incomplete,
+    missing_fields: missingCriticalFields(ws2),
     kpis,
     kpi_cell_map: cellMap,
     well_context,
@@ -413,7 +498,26 @@ function parseAllCompletedDays(buf) {
     throw new ExcelParseError(
       "No completed day tabs found in the workbook. Fill in at least one Report Day before importing."
     );
-  return completed.map((d) => parseDaySheet(wb, d, false));
+  const parsed = completed.map((d) => parseDaySheet(wb, d, false));
+  for (let i = 1; i < parsed.length; i++) {
+    if (!parsed[i].report_date && parsed[i - 1].report_date) {
+      const gap = parsed[i].report_day - parsed[i - 1].report_day;
+      parsed[i].report_date = addDaysToDateStr(
+        parsed[i - 1].report_date,
+        gap
+      );
+    }
+  }
+  for (let i = parsed.length - 2; i >= 0; i--) {
+    if (!parsed[i].report_date && parsed[i + 1].report_date) {
+      const gap = parsed[i + 1].report_day - parsed[i].report_day;
+      parsed[i].report_date = addDaysToDateStr(
+        parsed[i + 1].report_date,
+        -gap
+      );
+    }
+  }
+  return parsed;
 }
 
 // server/routes.ts
@@ -451,6 +555,24 @@ var CREWING = ["Manned", "Unmanned"];
 var SCHEDULE_CADENCE = ["run_hours", "calendar_days"];
 var DEFAULT_SERVICE_HOURS_INTERVAL = 250;
 var SERVICE_SOON_FRACTION = 0.1;
+var WEEKLY_SERVICE_DAYS = 7;
+var WEEKLY_SERVICE_SOON_DAYS = 1;
+function daysSince(iso) {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const ms = Date.now() - then;
+  return Math.max(0, Math.floor(ms / 864e5));
+}
+function weeklyServiceStatusFor(lastMaintained) {
+  const intervalDays = WEEKLY_SERVICE_DAYS;
+  const d = daysSince(lastMaintained);
+  if (d == null) return { daysSince: null, intervalDays, state: "No baseline" };
+  let state = "OK";
+  if (d >= intervalDays) state = "Overdue";
+  else if (d >= intervalDays - WEEKLY_SERVICE_SOON_DAYS) state = "Soon";
+  return { daysSince: d, intervalDays, state };
+}
 function serviceStatusFor(a) {
   const interval = a.service_hours_interval ?? DEFAULT_SERVICE_HOURS_INTERVAL;
   if (a.run_hours == null || a.run_hours_at_service == null)
@@ -490,6 +612,13 @@ var dayRateField = z.union([
   z.literal("").transform(() => null),
   z.coerce.number().nonnegative()
 ]).optional();
+var centrifugeSlotField = z.union([
+  z.null(),
+  z.literal("").transform(() => null),
+  z.coerce.number().int().refine((n) => n === 1 || n === 2, {
+    message: "Centrifuge slot must be 1 or 2"
+  })
+]).optional();
 var createAssetSchema = z.object({
   tag: z.string().min(1),
   category: z.enum(CATEGORIES),
@@ -500,7 +629,8 @@ var createAssetSchema = z.object({
   status: z.string().optional(),
   run_hours: z.number().int().nonnegative().nullable().optional(),
   service_hours_interval: z.number().int().positive().optional(),
-  day_rate: dayRateField
+  day_rate: dayRateField,
+  centrifuge_slot: centrifugeSlotField
 });
 var createMaintenanceScheduleSchema = z.object({
   name: z.string().min(1),
@@ -516,6 +646,42 @@ var createReportSchema = z.object({
   report_date: z.string(),
   run_hours: z.number().int().nonnegative().nullable().optional()
   // updates asset meter
+});
+var CENTRIFUGE_SERVICE_CHECKLIST = [
+  { key: "gearbox_oil", label: "Was gear box oil checked?", flagOn: "No" },
+  { key: "back_drive_bearings", label: "Back drive bearings greased", flagOn: "No" },
+  { key: "back_drive_coupling", label: "Back drive coupling in good condition and has all screws", flagOn: "No" },
+  { key: "inner_outer_bearings", label: "Inner and outer bearings greased?", flagOn: "No" },
+  { key: "back_drive_belt", label: "Back drive belt in good condition?", flagOn: "No" },
+  { key: "main_drive_belt", label: "Main drive belt in good condition?", flagOn: "No" },
+  { key: "feed_tube", label: "Feed tube in good condition?", flagOn: "No" },
+  { key: "no_abnormal_wear_ra", label: "No abnormal wear on RA?", flagOn: "No" },
+  { key: "thrust_bearing_purged", label: "Thrust bearing purged", flagOn: "No" },
+  { key: "electrical_wires", label: "Electrical wires in good condition?", flagOn: "No" },
+  { key: "coffin_clamps", label: "Coffin clamps close coffin lid properly?", flagOn: "No" },
+  { key: "no_coffin_cracks", label: "No cracks on coffin or abnormal damage?", flagOn: "No" },
+  { key: "coffin_gasket", label: "Coffin gasket seals properly?", flagOn: "No" }
+];
+var SERVICE_ANSWERS = ["Yes", "No", "N/A"];
+var serviceChecklistAnswerSchema = z.object({
+  key: z.string().min(1),
+  answer: z.enum(SERVICE_ANSWERS),
+  note: z.string().trim().max(2e3).nullable().optional()
+});
+var serviceReportPhotoSchema = z.object({
+  file_name: z.string().min(1).max(200),
+  file_mime: z.string().min(1).max(100),
+  file_base64: z.string().min(1),
+  caption: z.string().trim().max(200).nullable().optional()
+});
+var createServiceReportSchema = z.object({
+  asset_id: z.string().uuid("Choose an asset"),
+  report_date: z.string().min(1, "A service date is required"),
+  run_hours: z.number().int().nonnegative().nullable().optional(),
+  work_performed: z.string().trim().max(4e3).nullable().optional(),
+  notes: z.string().trim().max(4e3).nullable().optional(),
+  checklist: z.array(serviceChecklistAnswerSchema).min(1, "Answer the checklist"),
+  photos: z.array(serviceReportPhotoSchema).max(24).optional()
 });
 var uploadServiceReportSchema = z.object({
   job_id: z.string().uuid(),
@@ -633,7 +799,8 @@ var updateAssetSchema = z.object({
   area: z.enum(AREAS).optional(),
   description: z.string().nullable().optional(),
   maintenance_schedule_id: z.string().uuid().nullable().optional(),
-  day_rate: dayRateField
+  day_rate: dayRateField,
+  centrifuge_slot: centrifugeSlotField
 });
 var amountField = z.union([
   z.null(),
@@ -849,6 +1016,46 @@ var updateWorkOrderSchema = z.object({
 
 // server/routes.ts
 var INGEST_TOKEN = process.env.INGEST_TOKEN || "";
+function normJobId(v) {
+  return (v || "").toUpperCase().replace(/[\s-]+/g, " ").trim();
+}
+async function resolveJobForWell(client, wellName, jobNumber) {
+  const empty = { job_id: null, area: null, customer_id: null };
+  const jobTarget = normJobId(jobNumber);
+  if (jobTarget) {
+    const { data: jobs2 } = await client.from("jobs").select("id, area, customer_id, job_number");
+    const byNumber = (jobs2 || []).find(
+      (j) => normJobId(j.job_number) === jobTarget
+    );
+    if (byNumber) {
+      return {
+        job_id: byNumber.id,
+        area: byNumber.area,
+        customer_id: byNumber.customer_id
+      };
+    }
+  }
+  const target = (wellName || "").trim().toLowerCase();
+  if (!target) return empty;
+  const { data: jobs } = await client.from("jobs").select("id, area, customer_id, well_name").not("well_name", "is", null);
+  const jobMatch = (jobs || []).find(
+    (j) => (j.well_name || "").trim().toLowerCase() === target
+  );
+  if (jobMatch) {
+    return { job_id: jobMatch.id, area: jobMatch.area, customer_id: jobMatch.customer_id };
+  }
+  const { data: priorReports } = await client.from("daily_reports").select("well_name, job_id, created_at, received_at, report_date").not("job_id", "is", null).not("well_name", "is", null).order("created_at", { ascending: false }).limit(500);
+  const prior = (priorReports || []).find(
+    (r) => (r.well_name || "").trim().toLowerCase() === target
+  );
+  if (prior?.job_id) {
+    const { data: job } = await client.from("jobs").select("id, area, customer_id").eq("id", prior.job_id).maybeSingle();
+    if (job) {
+      return { job_id: job.id, area: job.area, customer_id: job.customer_id };
+    }
+  }
+  return empty;
+}
 async function registerRoutes(httpServer, app) {
   app.get("/api/health", (_req, res) => {
     res.json({
@@ -1058,7 +1265,7 @@ async function registerRoutes(httpServer, app) {
       }
       if (canReview) {
         let dq = client.from("daily_reports").select(
-          "id, status, area, well_name, sender_name, sender_email, report_date, received_at"
+          "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis"
         ).in("status", ["Pending Review", "Needs job match"]);
         if (scope) dq = dq.eq("area", scope);
         const { data: drData, error: dErr } = await dq;
@@ -1066,6 +1273,19 @@ async function registerRoutes(httpServer, app) {
         for (const r of drData || []) {
           const who = r.sender_name || r.sender_email || "Unknown sender";
           const well = r.well_name ? ` \xB7 ${r.well_name}` : "";
+          const missing = Array.isArray(r.analysis?.missing_fields) ? r.analysis.missing_fields : [];
+          if (missing.length) {
+            const short = missing.map((m) => m.split(" (")[0]).join(", ");
+            items.push({
+              id: `missing-${r.id}`,
+              type: "missing_data",
+              severity: "warning",
+              title: `Report missing critical data`,
+              detail: `${r.well_name || who}${r.report_day != null ? ` \xB7 Day ${r.report_day}` : ""} \xB7 ${short}`,
+              href: `/daily-reports/${r.id}`,
+              ts: r.received_at || r.report_date || null
+            });
+          }
           if (r.status === "Needs job match") {
             items.push({
               id: `newrep-${r.id}`,
@@ -1514,7 +1734,7 @@ async function registerRoutes(httpServer, app) {
   app.post(
     "/api/customers",
     requireAuth,
-    requireRole("admin", "area"),
+    requireRole("admin"),
     async (req, res) => {
       const parsed = createCustomerSchema.safeParse(req.body);
       if (!parsed.success)
@@ -1532,7 +1752,7 @@ async function registerRoutes(httpServer, app) {
   app.patch(
     "/api/customers/:id",
     requireAuth,
-    requireRole("admin", "area"),
+    requireRole("admin"),
     async (req, res) => {
       const parsed = updateCustomerSchema.safeParse(req.body);
       if (!parsed.success)
@@ -1545,6 +1765,23 @@ async function registerRoutes(httpServer, app) {
       res.json(data);
     }
   );
+  app.delete(
+    "/api/customers/:id",
+    requireAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { count, error: countErr } = await client.from("jobs").select("id", { count: "exact", head: true }).eq("customer_id", req.params.id);
+      if (countErr) return res.status(500).json({ message: countErr.message });
+      if ((count ?? 0) > 0)
+        return res.status(409).json({
+          message: `This customer has ${count} job${count === 1 ? "" : "s"}. Remove or reassign those jobs before deleting the customer.`
+        });
+      const { error } = await client.from("customers").delete().eq("id", req.params.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
+    }
+  );
   app.get("/api/jobs", requireAuth, async (req, res) => {
     const scope = areaScopeOf(req.profile);
     const jobIds = await jobScopeOf(req.profile);
@@ -1552,7 +1789,7 @@ async function registerRoutes(httpServer, app) {
     const includeArchived = onlyArchived || String(req.query.include_archived || "") === "true";
     let q = supabaseAnon.from("jobs").select("*, customer:customers(name)").order("created_at", { ascending: false });
     if (scope) q = q.eq("area", scope);
-    if (jobIds) q = q.in("id", jobIds);
+    if (jobIds) q = q.in("id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
     if (onlyArchived) q = q.not("archived_at", "is", null);
     else if (!includeArchived) q = q.is("archived_at", null);
     const { data, error } = await q;
@@ -2369,59 +2606,6 @@ async function registerRoutes(httpServer, app) {
       res.status(204).end();
     }
   );
-  app.get(
-    "/api/maintenance-reports/export.json",
-    requireAuth,
-    async (req, res) => {
-      const scope = areaScopeOf(req.profile);
-      const client = supabaseAdmin || supabaseAnon;
-      const start = String(req.query.start || "");
-      const end = String(req.query.end || "");
-      const startD = /* @__PURE__ */ new Date(start + "T00:00:00Z");
-      const endD = /* @__PURE__ */ new Date(end + "T00:00:00Z");
-      if (isNaN(startD.getTime()) || isNaN(endD.getTime()) || endD < startD)
-        return res.status(400).json({ message: "Provide a valid start and end date (start <= end)" });
-      const MS_DAY = 864e5;
-      const windowDays = Math.round((endD.getTime() - startD.getTime()) / MS_DAY) + 1;
-      const { data, error } = await client.from("maintenance_reports").select(
-        "id, work_type, status, report_date, filed_at, notes, asset:assets!maintenance_reports_asset_id_fkey(tag,category,area), supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)"
-      ).gte("report_date", start).lte("report_date", end).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
-      if (error) return res.status(500).json({ message: error.message });
-      let raw = data || [];
-      if (scope) raw = raw.filter((r) => r.asset?.area === scope);
-      const byWorkType = {};
-      const byStatus = {};
-      const assetsTouched = /* @__PURE__ */ new Set();
-      for (const r of raw) {
-        byWorkType[r.work_type] = (byWorkType[r.work_type] || 0) + 1;
-        byStatus[r.status] = (byStatus[r.status] || 0) + 1;
-        if (r.asset?.tag) assetsTouched.add(r.asset.tag);
-      }
-      res.json({
-        start,
-        end,
-        window_days: windowDays,
-        area_scope: scope || "All areas",
-        summary: {
-          report_count: raw.length,
-          asset_count: assetsTouched.size,
-          by_work_type: byWorkType,
-          by_status: byStatus
-        },
-        rows: raw.map((r) => ({
-          report_date: r.report_date,
-          filed_at: r.filed_at,
-          asset_tag: r.asset?.tag ?? null,
-          asset_category: r.asset?.category ?? null,
-          area: r.asset?.area ?? null,
-          work_type: r.work_type,
-          status: r.status,
-          supervisor_name: r.supervisor?.name ?? null,
-          notes: r.notes
-        }))
-      });
-    }
-  );
   app.get("/api/assets", requireAuth, async (req, res) => {
     const scope = areaScopeOf(req.profile);
     let fieldJobIds = null;
@@ -2498,7 +2682,7 @@ async function registerRoutes(httpServer, app) {
       const lines = [header.join(",")];
       for (const a of assets) {
         const job = a.job;
-        const location = job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.job_or_well || "Yard / unassigned";
+        const location = job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.area ? `${a.area}/unassigned` : "Unassigned";
         const daysDeployed = job ? clampOverlapDays(job.started_on, job.ended_on) : null;
         const utilPct = daysDeployed === null ? null : Math.round(daysDeployed / windowDays * 1e3) / 10;
         const estRevenue = daysDeployed === null || a.day_rate === null || a.day_rate === void 0 ? null : Math.round(Number(a.day_rate) * daysDeployed * 100) / 100;
@@ -2570,7 +2754,7 @@ async function registerRoutes(httpServer, app) {
       let utilN = 0;
       const rows = assets.map((a) => {
         const job = a.job;
-        const location = job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.job_or_well || "Yard / unassigned";
+        const location = job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.area ? `${a.area}/unassigned` : "Unassigned";
         const daysDeployed = job ? clampOverlapDays(job.started_on, job.ended_on) : null;
         const utilPct = daysDeployed === null ? null : Math.round(daysDeployed / windowDays * 1e3) / 10;
         const estRevenue = daysDeployed === null || a.day_rate === null || a.day_rate === void 0 ? null : Math.round(Number(a.day_rate) * daysDeployed * 100) / 100;
@@ -2709,6 +2893,28 @@ async function registerRoutes(httpServer, app) {
       res.json(data);
     }
   );
+  app.delete(
+    "/api/assets/:id",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client.from("assets").select("area").eq("id", req.params.id).single();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      if (req.profile.role === "area" && asset.area !== req.profile.area)
+        return res.status(403).json({ message: "Outside your area" });
+      const { error } = await client.from("assets").delete().eq("id", req.params.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
+    }
+  );
+  async function fieldAssetIdsOf(req) {
+    if (req.profile.role !== "field") return null;
+    const jobIds = await jobScopeOf(req.profile) ?? [];
+    if (jobIds.length === 0) return /* @__PURE__ */ new Set();
+    const { data } = await (supabaseAdmin || supabaseAnon).from("assets").select("id").in("job_id", jobIds);
+    return new Set((data || []).map((a) => a.id));
+  }
   app.get(
     "/api/service/dashboard",
     requireAuth,
@@ -2719,7 +2925,10 @@ async function registerRoutes(httpServer, app) {
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
-      const assets = assetsData || [];
+      const fieldJobIds = req.profile.role === "field" ? await jobScopeOf(req.profile) ?? [] : null;
+      const assets = (assetsData || []).filter(
+        (a) => !fieldJobIds || a.job_id && fieldJobIds.includes(a.job_id)
+      );
       const assetIds = assets.map((a) => a.id);
       const techByAsset = /* @__PURE__ */ new Map();
       if (assetIds.length) {
@@ -2729,16 +2938,22 @@ async function registerRoutes(httpServer, app) {
             techByAsset.set(r.asset_id, r.supervisor.name);
         }
       }
-      const { data: repRows } = await client.from("maintenance_reports").select("status, asset:assets(area)");
+      const { data: repRows } = await client.from("maintenance_reports").select("status, asset:assets(area, job_id)");
       let reports = repRows || [];
       if (scope) reports = reports.filter((r) => r.asset?.area === scope);
+      if (fieldJobIds)
+        reports = reports.filter(
+          (r) => r.asset?.job_id && fieldJobIds.includes(r.asset.job_id)
+        );
       const reportsFiled = reports.length;
       const reportsPending = reports.filter(
         (r) => r.status !== "Signed off"
       ).length;
       const rows = assets.map(
         (a) => {
-          const { hoursSince, interval, state } = serviceStatusFor(a);
+          const { hoursSince } = serviceStatusFor(a);
+          const assigned = a.job_id != null;
+          const weekly = assigned ? weeklyServiceStatusFor(a.last_maintained) : { daysSince: null, intervalDays: WEEKLY_SERVICE_DAYS, state: "Not tracked" };
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
@@ -2747,23 +2962,27 @@ async function registerRoutes(httpServer, app) {
             area: a.area,
             status: a.status,
             job_id: a.job_id,
+            assigned,
             job_number: a.job?.job_number ?? null,
             job_or_well: a.job_or_well,
             technician: techByAsset.get(a.id) ?? null,
             run_hours: a.run_hours,
             run_hours_since_service: hoursSince,
-            service_hours_interval: interval,
+            service_hours_interval: a.service_hours_interval ?? 0,
+            days_since_service: weekly.daysSince,
+            service_interval_days: weekly.intervalDays,
             last_maintained: a.last_maintained,
-            service_state: state,
+            service_state: weekly.state,
             _deployed: deployed
           };
         }
       );
+      const assignedRows = rows.filter((r) => r.assigned);
       const metrics = {
-        active_centrifuges: rows.filter((r) => r._deployed).length,
+        active_centrifuges: assignedRows.length,
         total_centrifuges: rows.length,
-        due_soon: rows.filter((r) => r.service_state === "Soon").length,
-        overdue: rows.filter((r) => r.service_state === "Overdue").length,
+        due_soon: assignedRows.filter((r) => r.service_state === "Soon").length,
+        overdue: assignedRows.filter((r) => r.service_state === "Overdue").length,
         reports_filed: reportsFiled,
         reports_pending_signoff: reportsPending
       };
@@ -2771,10 +2990,11 @@ async function registerRoutes(httpServer, app) {
         Overdue: 0,
         Soon: 1,
         "No baseline": 2,
-        OK: 3
+        OK: 3,
+        "Not tracked": 4
       };
-      const centrifuges = rows.filter((r) => r._deployed).sort(
-        (x, y) => (rank[x.service_state] ?? 9) - (rank[y.service_state] ?? 9) || x.tag.localeCompare(y.tag)
+      const centrifuges = rows.sort(
+        (x, y) => Number(y.assigned) - Number(x.assigned) || (rank[x.service_state] ?? 9) - (rank[y.service_state] ?? 9) || x.tag.localeCompare(y.tag)
       ).map(({ _deployed, ...r }) => r);
       const payload = { metrics, centrifuges };
       res.json(payload);
@@ -2795,49 +3015,6 @@ async function registerRoutes(httpServer, app) {
       rows = rows.filter((r) => r.supervisor_id === req.profile.id);
     res.json(rows);
   });
-  app.post(
-    "/api/reports",
-    requireAuth,
-    requireRole("admin", "area", "super"),
-    async (req, res) => {
-      const parsed = createReportSchema.safeParse(req.body);
-      if (!parsed.success)
-        return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client.from("assets").select("*").eq("id", parsed.data.asset_id).single();
-      if (!asset) return res.status(404).json({ message: "Asset not found" });
-      if (req.profile.role !== "admin" && asset.area !== req.profile.area)
-        return res.status(403).json({ message: "Asset is outside your area" });
-      const { data: report, error } = await client.from("maintenance_reports").insert({
-        asset_id: parsed.data.asset_id,
-        supervisor_id: req.profile.id,
-        work_type: parsed.data.work_type,
-        notes: parsed.data.notes ?? null,
-        report_date: parsed.data.report_date,
-        status: "Pending Sign-off"
-      }).select().single();
-      if (error) return res.status(400).json({ message: error.message });
-      const patch = { last_maintained: parsed.data.report_date };
-      if (tracksRunHours(asset.category)) {
-        const meterAtService = parsed.data.run_hours != null ? parsed.data.run_hours : asset.run_hours;
-        if (parsed.data.run_hours != null) patch.run_hours = parsed.data.run_hours;
-        if (meterAtService != null) patch.run_hours_at_service = meterAtService;
-      }
-      await client.from("assets").update(patch).eq("id", asset.id);
-      await client.from("audit_events").insert({
-        report_id: report.id,
-        asset_id: asset.id,
-        actor_id: req.profile.id,
-        actor_name: req.profile.name,
-        actor_role: req.profile.role,
-        action: "Filed"
-      });
-      sendNotificationEmails("needs_signoff", { report, asset }).catch(
-        (e) => console.error("[email] needs_signoff", e)
-      );
-      res.status(201).json(report);
-    }
-  );
   const SERVICE_REPORT_SELECT = "id, job_id, file_name, file_mime, file_size, notes, uploaded_by, created_at, job:jobs!service_reports_job_id_fkey(job_number,well_name,area,customer:customers(name)), uploader:profiles!service_reports_uploaded_by_fkey(name)";
   function flattenServiceReport(row) {
     const { job, uploader, ...rest } = row;
@@ -2859,6 +3036,8 @@ async function registerRoutes(httpServer, app) {
       if (error) return res.status(500).json({ message: error.message });
       let rows = (data || []).map(flattenServiceReport);
       if (scope) rows = rows.filter((r) => r.area === scope);
+      const srJobIds = await jobScopeOf(req.profile);
+      if (srJobIds) rows = rows.filter((r) => srJobIds.includes(r.job_id));
       res.json(rows);
     }
   );
@@ -2879,6 +3058,8 @@ async function registerRoutes(httpServer, app) {
       if (error) return res.status(500).json({ message: error.message });
       let rows = (data || []).map(flattenServiceReport);
       if (scope) rows = rows.filter((r) => r.area === scope);
+      const srJobIds = await jobScopeOf(req.profile);
+      if (srJobIds) rows = rows.filter((r) => srJobIds.includes(r.job_id));
       const byArea = {};
       const byCustomer = {};
       for (const r of rows) {
@@ -2947,13 +3128,16 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     async (req, res) => {
       const { data, error } = await supabaseAnon.from("service_reports").select(
-        "file_name, file_mime, file_base64, job:jobs!service_reports_job_id_fkey(area)"
+        "job_id, file_name, file_mime, file_base64, job:jobs!service_reports_job_id_fkey(area)"
       ).eq("id", req.params.id).single();
       if (error || !data || !data.file_base64)
         return res.status(404).json({ message: "File not found" });
       const scope = areaScopeOf(req.profile);
       const jobArea = data.job?.area ?? null;
       if (scope && jobArea !== scope)
+        return res.status(404).json({ message: "File not found" });
+      const srJobIds = await jobScopeOf(req.profile);
+      if (srJobIds && !srJobIds.includes(data.job_id))
         return res.status(404).json({ message: "File not found" });
       const buf = Buffer.from(data.file_base64, "base64");
       res.setHeader(
@@ -2985,162 +3169,209 @@ async function registerRoutes(httpServer, app) {
       res.status(204).end();
     }
   );
-  app.get(
-    "/api/maintenance-matrix",
-    requireAuth,
-    async (req, res) => {
-      const scope = areaScopeOf(req.profile);
-      let q = supabaseAnon.from("assets").select(
-        "id, tag, category, area, status, description, run_hours, run_hours_at_service, service_hours_interval, last_maintained"
-      ).is("job_id", null).order("tag", { ascending: true });
-      if (scope) q = q.eq("area", scope);
-      const { data: assets, error } = await q;
-      if (error) return res.status(500).json({ message: error.message });
-      const rows = assets || [];
-      const ids = rows.map((a) => a.id);
-      const entryCount = {};
-      const entryLast = {};
-      const fileCount = {};
-      const fileLast = {};
-      if (ids.length) {
-        const { data: entries } = await supabaseAnon.from("maintenance_reports").select("asset_id, filed_at").in("asset_id", ids);
-        for (const e of entries || []) {
-          entryCount[e.asset_id] = (entryCount[e.asset_id] || 0) + 1;
-          if (!entryLast[e.asset_id] || e.filed_at > entryLast[e.asset_id])
-            entryLast[e.asset_id] = e.filed_at;
-        }
-        const { data: files } = await supabaseAnon.from("maintenance_report_files").select("asset_id, created_at").in("asset_id", ids);
-        for (const f of files || []) {
-          fileCount[f.asset_id] = (fileCount[f.asset_id] || 0) + 1;
-          if (!fileLast[f.asset_id] || f.created_at > fileLast[f.asset_id])
-            fileLast[f.asset_id] = f.created_at;
-        }
-      }
-      const matrix = rows.map((a) => {
-        const eLast = entryLast[a.id] ?? null;
-        const fLast = fileLast[a.id] ?? null;
-        const last = eLast && fLast ? eLast > fLast ? eLast : fLast : eLast || fLast;
-        return {
-          id: a.id,
-          tag: a.tag,
-          category: a.category,
-          area: a.area,
-          status: a.status,
-          description: a.description ?? null,
-          run_hours: a.run_hours,
-          run_hours_at_service: a.run_hours_at_service,
-          service_hours_interval: a.service_hours_interval,
-          last_maintained: a.last_maintained ?? null,
-          entry_count: entryCount[a.id] || 0,
-          file_count: fileCount[a.id] || 0,
-          last_activity: last
-        };
-      });
-      res.json(matrix);
-    }
-  );
-  const MAINTENANCE_FILE_SELECT = "id, asset_id, file_name, file_mime, file_size, work_performed, notes, uploaded_by, created_at, asset:assets(tag, area), uploader:profiles!maintenance_report_files_uploaded_by_fkey(name)";
-  function flattenMaintenanceFile(row) {
-    const { asset, uploader, ...rest } = row;
+  const SERVICE_FORM_SELECT = "id, asset_id, supervisor_id, report_date, filed_at, status, notes, work_performed, run_hours, score_pass, score_total, flagged_count, checklist, asset:assets!maintenance_reports_asset_id_fkey(tag,category,area), supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)";
+  function flattenServiceForm(row) {
+    const { asset, supervisor, ...rest } = row;
+    const checklist = Array.isArray(rest.checklist) ? rest.checklist : [];
     return {
       ...rest,
       asset_tag: asset?.tag ?? null,
+      asset_category: asset?.category ?? null,
       area: asset?.area ?? null,
-      uploaded_by_name: uploader?.name ?? null
+      supervisor_name: supervisor?.name ?? null,
+      checklist,
+      photo_count: 0
+      // filled in by detail route
     };
   }
-  async function assetAreaOf(client, assetId) {
-    const { data } = await client.from("assets").select("id, area").eq("id", assetId).single();
-    return data ? data.area : null;
-  }
   app.get(
-    "/api/assets/:id/maintenance-files",
+    "/api/service-forms",
     requireAuth,
     async (req, res) => {
-      const scope = areaScopeOf(req.profile);
-      const area = await assetAreaOf(supabaseAnon, req.params.id);
-      if (area == null)
-        return res.status(404).json({ message: "Asset not found" });
-      if (scope && area !== scope)
-        return res.status(404).json({ message: "Asset not found" });
-      const { data, error } = await supabaseAnon.from("maintenance_report_files").select(MAINTENANCE_FILE_SELECT).eq("asset_id", req.params.id).order("created_at", { ascending: false });
-      if (error) return res.status(500).json({ message: error.message });
-      res.json((data || []).map(flattenMaintenanceFile));
-    }
-  );
-  app.post(
-    "/api/assets/:id/maintenance-files",
-    requireAuth,
-    requireRole("admin", "area", "super"),
-    async (req, res) => {
-      const parsed = uploadMaintenanceFileSchema.safeParse(req.body);
-      if (!parsed.success)
-        return res.status(400).json({ message: parsed.error.errors[0].message });
       const client = supabaseAdmin || supabaseAnon;
-      const area = await assetAreaOf(client, req.params.id);
-      if (area == null)
-        return res.status(404).json({ message: "Asset not found" });
+      const { data, error } = await client.from("maintenance_reports").select(SERVICE_FORM_SELECT).not("checklist", "is", null).order("filed_at", { ascending: false });
+      if (error) return res.status(500).json({ message: error.message });
+      let rows = (data || []).map(flattenServiceForm);
       const scope = areaScopeOf(req.profile);
-      if (scope && area !== scope)
-        return res.status(403).json({ message: "Asset is outside your area" });
-      const bytes = Buffer.from(parsed.data.file_base64, "base64");
-      if (bytes.length === 0)
-        return res.status(400).json({ message: "Uploaded file is empty" });
-      const { data: created, error } = await client.from("maintenance_report_files").insert({
-        asset_id: req.params.id,
-        file_name: parsed.data.file_name,
-        file_mime: parsed.data.file_mime ?? "application/pdf",
-        file_size: bytes.length,
-        file_base64: parsed.data.file_base64,
-        work_performed: parsed.data.work_performed,
-        notes: parsed.data.notes ?? null,
-        uploaded_by: req.profile.id
-      }).select(MAINTENANCE_FILE_SELECT).single();
-      if (error) return res.status(400).json({ message: error.message });
-      res.status(201).json(flattenMaintenanceFile(created));
+      if (scope) rows = rows.filter((r) => r.area === scope);
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets) rows = rows.filter((r) => fieldAssets.has(r.asset_id));
+      res.json(rows);
     }
   );
   app.get(
-    "/api/maintenance-files/:fileId/file",
+    "/api/service-forms/:id",
     requireAuth,
     async (req, res) => {
-      const { data, error } = await supabaseAnon.from("maintenance_report_files").select("file_name, file_mime, file_base64, asset:assets(area)").eq("id", req.params.fileId).single();
-      if (error || !data || !data.file_base64)
-        return res.status(404).json({ message: "File not found" });
+      const client = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client.from("maintenance_reports").select(SERVICE_FORM_SELECT).eq("id", req.params.id).not("checklist", "is", null).single();
+      if (error || !data)
+        return res.status(404).json({ message: "Service report not found" });
+      const row = flattenServiceForm(data);
       const scope = areaScopeOf(req.profile);
-      const area = data.asset?.area ?? null;
-      if (scope && area !== scope)
-        return res.status(404).json({ message: "File not found" });
-      const buf = Buffer.from(data.file_base64, "base64");
-      res.setHeader(
-        "Content-Type",
-        data.file_mime || "application/octet-stream"
-      );
-      res.setHeader(
-        "Content-Disposition",
-        `inline; filename="${(data.file_name || "maintenance-report").replace(/"/g, "")}"`
-      );
-      res.send(buf);
+      if (scope && row.area !== scope)
+        return res.status(404).json({ message: "Service report not found" });
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets && !fieldAssets.has(row.asset_id))
+        return res.status(404).json({ message: "Service report not found" });
+      const { data: files } = await client.from("maintenance_report_files").select("id, file_name, file_mime, file_base64, notes").eq("report_id", req.params.id).order("created_at", { ascending: true });
+      const photos = (files || []).map((f) => ({
+        id: f.id,
+        file_name: f.file_name,
+        caption: f.notes ?? null,
+        data_url: `data:${f.file_mime};base64,${f.file_base64}`
+      }));
+      res.json({ ...row, photo_count: photos.length, photos });
     }
   );
   app.delete(
-    "/api/maintenance-files/:fileId",
+    "/api/service-forms/:id",
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
       const client = supabaseAdmin || supabaseAnon;
-      const { data: existing } = await supabaseAnon.from("maintenance_report_files").select("id, asset:assets(area)").eq("id", req.params.fileId).single();
+      const { data: existing } = await supabaseAnon.from("maintenance_reports").select("id, asset:assets!maintenance_reports_asset_id_fkey(area)").eq("id", req.params.id).not("checklist", "is", null).single();
       if (!existing)
-        return res.status(404).json({ message: "File not found" });
+        return res.status(404).json({ message: "Service report not found" });
       const scope = areaScopeOf(req.profile);
       const area = existing.asset?.area ?? null;
       if (scope && area !== scope)
-        return res.status(404).json({ message: "File not found" });
-      const { error } = await client.from("maintenance_report_files").delete().eq("id", req.params.fileId);
+        return res.status(404).json({ message: "Service report not found" });
+      const { error } = await client.from("maintenance_reports").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
   );
+  app.post(
+    "/api/service-forms",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const parsed = createServiceReportSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const input = parsed.data;
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client.from("assets").select("*").eq("id", input.asset_id).single();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && asset.area !== scope)
+        return res.status(403).json({ message: "Asset is outside your area" });
+      const byKey = new Map(input.checklist.map((c) => [c.key, c]));
+      const answered = [];
+      let pass = 0;
+      let total = 0;
+      const flaggedItems = [];
+      for (const def of CENTRIFUGE_SERVICE_CHECKLIST) {
+        const a = byKey.get(def.key);
+        if (!a) continue;
+        const flagged = a.answer === def.flagOn;
+        if (a.answer !== "N/A") {
+          total += 1;
+          if (!flagged) pass += 1;
+        }
+        const note = a.note?.trim() ? a.note.trim() : null;
+        answered.push({ key: def.key, label: def.label, answer: a.answer, flagged, note });
+        if (flagged) flaggedItems.push({ key: def.key, label: def.label, note });
+      }
+      if (answered.length === 0)
+        return res.status(400).json({ message: "Answer at least one checklist item" });
+      const { data: report, error } = await client.from("maintenance_reports").insert({
+        asset_id: asset.id,
+        supervisor_id: req.profile.id,
+        work_type: "Inspection",
+        notes: input.notes ?? null,
+        work_performed: input.work_performed ?? null,
+        report_date: input.report_date,
+        status: "Pending Sign-off",
+        checklist: answered,
+        run_hours: input.run_hours ?? null,
+        score_pass: pass,
+        score_total: total,
+        flagged_count: flaggedItems.length
+      }).select().single();
+      if (error) return res.status(400).json({ message: error.message });
+      const patch = { last_maintained: input.report_date };
+      if (tracksRunHours(asset.category)) {
+        const meterAtService = input.run_hours != null ? input.run_hours : asset.run_hours;
+        if (input.run_hours != null) patch.run_hours = input.run_hours;
+        if (meterAtService != null) patch.run_hours_at_service = meterAtService;
+      }
+      await client.from("assets").update(patch).eq("id", asset.id);
+      if (input.photos && input.photos.length) {
+        const rows = input.photos.map((p) => {
+          const bytes = Buffer.from(p.file_base64, "base64");
+          return {
+            asset_id: asset.id,
+            report_id: report.id,
+            file_name: p.file_name,
+            file_mime: p.file_mime,
+            file_size: bytes.length,
+            file_base64: p.file_base64,
+            notes: p.caption ?? null,
+            uploaded_by: req.profile.id
+          };
+        });
+        await client.from("maintenance_report_files").insert(rows);
+      }
+      await client.from("audit_events").insert({
+        report_id: report.id,
+        asset_id: asset.id,
+        actor_id: req.profile.id,
+        actor_name: req.profile.name,
+        actor_role: req.profile.role,
+        action: "Filed"
+      });
+      const createdWorkOrders = [];
+      for (const f of flaggedItems) {
+        try {
+          const { data: seqData, error: seqErr } = await client.rpc("nextval", {
+            seq: "work_order_seq"
+          });
+          let woNumber;
+          if (seqErr || seqData == null) {
+            const { count } = await client.from("work_orders").select("id", { count: "exact", head: true });
+            woNumber = `WO-${5001 + (count || 0)}`;
+          } else {
+            woNumber = `WO-${seqData}`;
+          }
+          const title = `Service flag: ${f.label}`.slice(0, 200);
+          const woNote = [
+            `Auto-created from service report on ${input.report_date}.`,
+            f.note ? `Tech note: ${f.note}` : null
+          ].filter(Boolean).join(" ");
+          const { data: wo } = await client.from("work_orders").insert({
+            wo_number: woNumber,
+            asset_id: asset.id,
+            area: asset.area,
+            title,
+            wo_type: "Repair",
+            priority: "High",
+            status: "Scheduled",
+            assigned_to: null,
+            due_date: null,
+            est_hours: null,
+            notes: woNote,
+            created_by: req.profile.id
+          }).select("id").single();
+          if (wo?.id) createdWorkOrders.push(wo.id);
+        } catch (e) {
+          console.error("[service-form] work order create failed", e);
+        }
+      }
+      sendNotificationEmails("needs_signoff", { report, asset }).catch(
+        (e) => console.error("[email] needs_signoff", e)
+      );
+      res.status(201).json({
+        ...flattenServiceForm({ ...report, asset, supervisor: { name: req.profile.name } }),
+        work_orders_created: createdWorkOrders.length
+      });
+    }
+  );
+  async function assetAreaOf(client, assetId) {
+    const { data } = await client.from("assets").select("id, area").eq("id", assetId).single();
+    return data ? data.area : null;
+  }
   const WORK_ORDER_SELECT = "id, wo_number, asset_id, area, title, wo_type, priority, status, assigned_to, due_date, est_hours, notes, created_by, completed_at, created_at, asset:assets(tag, category), assigned:profiles!work_orders_assigned_to_fkey(name), creator:profiles!work_orders_created_by_fkey(name)";
   function flattenWorkOrder(row) {
     const { asset, assigned, creator, ...rest } = row;
@@ -3174,7 +3405,10 @@ async function registerRoutes(httpServer, app) {
       if (scope) query = query.eq("area", scope);
       const { data, error } = await query;
       if (error) return res.status(500).json({ message: error.message });
-      res.json((data || []).map(flattenWorkOrder));
+      let rows = (data || []).map(flattenWorkOrder);
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets) rows = rows.filter((r) => fieldAssets.has(r.asset_id));
+      res.json(rows);
     }
   );
   app.post(
@@ -3317,6 +3551,9 @@ async function registerRoutes(httpServer, app) {
     "/api/assets/:id/audit",
     requireAuth,
     async (req, res) => {
+      const fieldAssets = await fieldAssetIdsOf(req);
+      if (fieldAssets && !fieldAssets.has(String(req.params.id)))
+        return res.status(404).json({ message: "Asset not found" });
       const { data, error } = await supabaseAnon.from("audit_events").select("*").eq("asset_id", req.params.id).order("occurred_at", { ascending: false });
       if (error) return res.status(500).json({ message: error.message });
       res.json(data);
@@ -3356,22 +3593,19 @@ async function registerRoutes(httpServer, app) {
         return res.status(422).json({ message: e.message });
       return res.status(422).json({ message: `Failed to parse Excel attachment: ${e?.message ?? e}` });
     }
-    let job_id = null;
-    let area = null;
-    let customer_id = null;
-    if (excel.well_name) {
-      const { data: jobs } = await client.from("jobs").select("id, area, customer_id, well_name").not("well_name", "is", null);
-      const target = excel.well_name.trim().toLowerCase();
-      const match = (jobs || []).find(
-        (j) => (j.well_name || "").trim().toLowerCase() === target
-      );
-      if (match) {
-        job_id = match.id;
-        area = match.area;
-        customer_id = match.customer_id;
-      }
-    }
+    const resolved = await resolveJobForWell(
+      client,
+      excel.well_name,
+      excel.job_number
+    );
+    let job_id = resolved.job_id;
+    let area = resolved.area;
+    let customer_id = resolved.customer_id;
+    const matchedByJobNumber = !!job_id && !!excel.job_number && normJobId(excel.job_number).length > 0;
     const status = job_id ? "Pending Review" : "Needs job match";
+    const missingFields = (excel.missing_fields || []).map(
+      (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
+    );
     const row = {
       email_message_id: p.email_message_id,
       sender_email: p.sender_email,
@@ -3381,6 +3615,11 @@ async function registerRoutes(httpServer, app) {
       raw_body: null,
       source: "email",
       attachment_name: p.attachment_name,
+      // Keep the original workbook so the report detail page can link to the
+      // actual submitted document (viewable/downloadable).
+      attachment_base64: p.attachment_base64,
+      attachment_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      attachment_size: Buffer.from(p.attachment_base64, "base64").length,
       source_sheet: excel.source_sheet,
       report_day: excel.report_day,
       report_date: excel.report_date,
@@ -3389,7 +3628,7 @@ async function registerRoutes(httpServer, app) {
       kpis: excel.kpis,
       kpi_cell_map: excel.kpi_cell_map,
       summary: excel.summary,
-      analysis: {},
+      analysis: missingFields.length ? { missing_fields: missingFields } : {},
       area,
       customer_id,
       job_id,
@@ -3402,15 +3641,15 @@ async function registerRoutes(httpServer, app) {
       actor_name: p.sender_name || p.sender_email,
       actor_role: "field",
       action: "ingested",
-      detail: `Imported ${excel.source_sheet} from "${p.attachment_name}"` + (job_id ? ` and matched well "${excel.well_name}" to a job.` : ` \u2014 well "${excel.well_name ?? "(none)"}" did not match any job; awaiting assignment.`)
+      detail: `Imported ${excel.source_sheet} from "${p.attachment_name}"` + (job_id ? matchedByJobNumber ? ` and matched job "${excel.job_number}" (from workbook cell V8) to this report.` : ` and matched well "${excel.well_name}" to a job.` : ` \u2014 ${excel.job_number ? `job number "${excel.job_number}" (V8) and ` : ""}well "${excel.well_name ?? "(none)"}" did not match any job; awaiting assignment.`)
     });
-    if (excel.incomplete) {
+    if (missingFields.length) {
       await client.from("daily_report_events").insert({
         report_id: data.id,
         actor_name: "System",
         actor_role: "field",
         action: "needs_review",
-        detail: `No completed day sheet was found in "${p.attachment_name}" \u2014 imported ${excel.source_sheet} with the values present. A supervisor or area manager should review and sign off.`
+        detail: `${excel.source_sheet} in "${p.attachment_name}" is missing critical data: ${missingFields.join("; ")}. Imported with the values present \u2014 check with the crew before signing off.`
       });
     }
     res.status(201).json(data);
@@ -3438,21 +3677,11 @@ async function registerRoutes(httpServer, app) {
         });
       }
       const wellName = days.find((d) => d.well_name)?.well_name ?? null;
-      let job_id = null;
-      let area = null;
-      let customer_id = null;
-      if (wellName) {
-        const { data: jobs } = await client.from("jobs").select("id, area, customer_id, well_name").not("well_name", "is", null);
-        const target = wellName.trim().toLowerCase();
-        const match = (jobs || []).find(
-          (j) => (j.well_name || "").trim().toLowerCase() === target
-        );
-        if (match) {
-          job_id = match.id;
-          area = match.area;
-          customer_id = match.customer_id;
-        }
-      }
+      const jobNumber = days.find((d) => d.job_number)?.job_number ?? null;
+      const resolved = await resolveJobForWell(client, wellName, jobNumber);
+      let job_id = resolved.job_id;
+      let area = resolved.area;
+      let customer_id = resolved.customer_id;
       if (scope && job_id && area && area !== scope) {
         return res.status(403).json({
           message: `This well belongs to a job in ${area}. You can only import reports for jobs in your area (${scope}).`
@@ -3460,9 +3689,12 @@ async function registerRoutes(httpServer, app) {
       }
       let centrifuges = [];
       if (job_id) {
-        const { data: centAssets } = await client.from("assets").select("id, tag, category, run_hours").eq("job_id", job_id).in("category", RUN_HOUR_CATEGORIES);
+        const { data: centAssets } = await client.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", job_id).in("category", RUN_HOUR_CATEGORIES);
         centrifuges = centAssets || [];
       }
+      const backfillNeedsMapping = !!job_id && centrifuges.length >= 2 && centrifuges.some(
+        (c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2
+      );
       const runHourTally = /* @__PURE__ */ new Map();
       const results = [];
       const reviewer = req.profile;
@@ -3486,25 +3718,44 @@ async function registerRoutes(httpServer, app) {
             continue;
           }
           let runHourDetail = null;
-          const dailyRaw = excel.kpis?.daily_run_hours;
-          const dailyHours = dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
-          const willAccrue = !!job_id && centrifuges.length > 0 && dailyHours != null && Number.isFinite(dailyHours) && dailyHours > 0;
+          const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+          const dk = excel.kpis || {};
+          const dailyHours = numOrNull(dk.daily_run_hours);
+          const slot1Hours = numOrNull(dk.daily_run_hours_cent1) ?? dailyHours;
+          const slot2Hours = numOrNull(dk.daily_run_hours_cent2);
+          const anyHours = dailyHours != null && dailyHours > 0 || slot1Hours != null && slot1Hours > 0 || slot2Hours != null && slot2Hours > 0;
+          let dayAlloc = [];
+          if (!!job_id && centrifuges.length > 0 && anyHours && !backfillNeedsMapping) {
+            if (centrifuges.length === 1) {
+              const c = centrifuges[0];
+              const hrs = dailyHours ?? slot1Hours ?? 0;
+              if (hrs > 0) dayAlloc = [{ id: c.id, tag: c.tag, add: hrs }];
+            } else {
+              const hoursForSlot = (slot) => slot === 1 ? slot1Hours : slot === 2 ? slot2Hours : null;
+              dayAlloc = centrifuges.map((c) => {
+                const hrs = hoursForSlot(c.centrifuge_slot);
+                return {
+                  id: c.id,
+                  tag: c.tag,
+                  add: hrs != null && hrs > 0 ? hrs : 0
+                };
+              }).filter((a) => a.add > 0);
+            }
+          }
+          const willAccrue = dayAlloc.length > 0;
           if (willAccrue) {
-            const share = dailyHours / centrifuges.length;
             const applied = [];
-            for (const c of centrifuges) {
-              let base = runHourTally.get(c.id);
+            for (const a of dayAlloc) {
+              let base = runHourTally.get(a.id);
               if (base == null) {
-                const { data: cur } = await client.from("assets").select("run_hours").eq("id", c.id).single();
+                const { data: cur } = await client.from("assets").select("run_hours").eq("id", a.id).single();
                 base = Number(cur?.run_hours ?? 0) || 0;
               }
-              const next = base + share;
-              const { error: uErr } = await client.from("assets").update({ run_hours: next }).eq("id", c.id);
-              if (uErr) throw new Error(`run hours for ${c.tag}: ${uErr.message}`);
-              runHourTally.set(c.id, next);
-              applied.push(
-                centrifuges.length === 1 ? `${c.tag} +${dailyHours} hrs` : `${c.tag} +${Math.round(share * 100) / 100} hrs`
-              );
+              const next = base + a.add;
+              const { error: uErr } = await client.from("assets").update({ run_hours: next }).eq("id", a.id);
+              if (uErr) throw new Error(`run hours for ${a.tag}: ${uErr.message}`);
+              runHourTally.set(a.id, next);
+              applied.push(`${a.tag} +${Math.round(a.add * 100) / 100} hrs`);
             }
             runHourDetail = `Run hours applied: ${applied.join(", ")}`;
           }
@@ -3518,6 +3769,10 @@ async function registerRoutes(httpServer, app) {
             raw_body: null,
             source: "email",
             attachment_name: p.attachment_name,
+            // Keep the original workbook so the report links to the real file.
+            attachment_base64: p.attachment_base64,
+            attachment_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            attachment_size: Buffer.from(p.attachment_base64, "base64").length,
             source_sheet: excel.source_sheet,
             report_day: excel.report_day,
             report_date: excel.report_date,
@@ -3591,9 +3846,87 @@ async function registerRoutes(httpServer, app) {
         days_imported: results.filter((r) => r.status === "imported").length,
         days_duplicate: results.filter((r) => r.status === "duplicate").length,
         days_error: results.filter((r) => r.status === "error").length,
+        // Set when the job has 2+ centrifuges but not all are mapped to a
+        // centrifuge slot: reports imported but run hours were NOT accrued.
+        // Map each centrifuge to slot 1 or 2 on its asset, then re-run.
+        run_hours_needs_slot_mapping: backfillNeedsMapping,
+        run_hours_note: backfillNeedsMapping ? "Reports were imported, but run hours were not accrued because this job has two centrifuges and at least one is not mapped to Centrifuge 1 or 2. Map each centrifuge's slot on its asset, then re-import to accrue run hours." : null,
         results
       };
       res.status(201).json(summary);
+    }
+  );
+  app.post(
+    "/api/daily-reports/recompute-kpis",
+    requireAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const jobId = typeof req.body?.job_id === "string" && req.body.job_id.trim() ? req.body.job_id.trim() : null;
+      const rawLimit = Number(req.body?.limit);
+      const batchLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 25) : 12;
+      const rawOffset = Number(req.body?.offset);
+      const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
+      let listQ = client.from("daily_reports").select("id, report_day, kpis", { count: "exact" }).not("attachment_base64", "is", null).order("created_at", { ascending: true }).range(offset, offset + batchLimit - 1);
+      if (jobId) listQ = listQ.eq("job_id", jobId);
+      const { data: rows, error, count } = await listQ;
+      if (error) return res.status(400).json({ message: error.message });
+      let updated = 0;
+      let unchanged = 0;
+      let skipped_no_file = 0;
+      let errors = 0;
+      const problems = [];
+      for (const r of rows || []) {
+        try {
+          const { data: full, error: fErr } = await client.from("daily_reports").select("attachment_base64").eq("id", r.id).single();
+          if (fErr) {
+            errors += 1;
+            problems.push({ id: r.id, message: fErr.message });
+            continue;
+          }
+          if (!full?.attachment_base64) {
+            skipped_no_file += 1;
+            continue;
+          }
+          const buf = Buffer.from(full.attachment_base64, "base64");
+          const excel = parseDailyReportWorkbook(buf, r.report_day ?? void 0);
+          const mergedKpis = { ...r.kpis || {}, ...excel.kpis || {} };
+          const before = JSON.stringify(r.kpis || {});
+          const after = JSON.stringify(mergedKpis);
+          if (before === after) {
+            unchanged += 1;
+            continue;
+          }
+          const { error: upErr } = await client.from("daily_reports").update({ kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map }).eq("id", r.id);
+          if (upErr) {
+            errors += 1;
+            problems.push({ id: r.id, message: upErr.message });
+          } else {
+            updated += 1;
+          }
+        } catch (e) {
+          errors += 1;
+          problems.push({ id: r.id, message: e?.message ?? String(e) });
+        }
+      }
+      const total = typeof count === "number" ? count : (rows || []).length;
+      const processed = (rows || []).length;
+      const nextOffset = offset + processed;
+      const done = nextOffset >= total || processed === 0;
+      res.status(200).json({
+        // This batch
+        scanned: processed,
+        updated,
+        unchanged,
+        skipped_no_file,
+        errors,
+        problems: problems.slice(0, 25),
+        // Progress across the whole run so the client can loop.
+        total,
+        offset,
+        next_offset: nextOffset,
+        done
+      });
     }
   );
   app.post(
@@ -3635,9 +3968,51 @@ async function registerRoutes(httpServer, app) {
   app.get("/api/daily-reports", requireAuth, async (req, res) => {
     const scope = areaScopeOf(req.profile);
     const jobIds = await jobScopeOf(req.profile);
+    const LIST_COLUMNS = [
+      "id",
+      "email_message_id",
+      "sender_email",
+      "sender_name",
+      "subject",
+      "received_at",
+      "area",
+      "customer_id",
+      "job_id",
+      "report_date",
+      "summary",
+      "analysis",
+      "status",
+      "reviewed_by",
+      "reviewed_by_name",
+      "reviewed_at",
+      "change_notes",
+      "email_out_status",
+      "email_out_at",
+      "created_at",
+      "well_name",
+      "kpis",
+      "source",
+      "attachment_name",
+      "source_sheet",
+      "report_day",
+      "kpi_cell_map",
+      "well_context",
+      "report_number",
+      "work_summary",
+      "crew_hours",
+      "crew",
+      "asset_ids",
+      "comments",
+      "submitted_by",
+      "signed_by",
+      "signed_at",
+      "run_hours_applied",
+      "attachment_mime",
+      "attachment_size"
+    ].join(", ");
     let q = supabaseAnon.from("daily_reports").select(
-      "*, customer:customers(name), job:jobs(job_number), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)"
-    ).order("received_at", { ascending: false });
+      `${LIST_COLUMNS}, customer:customers(name), job:jobs(job_number), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)`
+    ).order("report_date", { ascending: false, nullsFirst: false }).order("received_at", { ascending: false });
     if (scope) q = q.eq("area", scope);
     const srcFilter = String(req.query.source || "").toLowerCase();
     if (srcFilter === "email" || srcFilter === "field") q = q.eq("source", srcFilter);
@@ -3649,6 +4024,11 @@ async function registerRoutes(httpServer, app) {
       job_number: r.job?.job_number ?? null,
       submitted_by_name: r.submitter?.name ?? null,
       signed_by_name: r.signer?.name ?? null,
+      // The workbook bytes are no longer fetched in the list query (see
+      // LIST_COLUMNS above). attachment_size is set for exactly the rows that
+      // have stored bytes, so it's the correct signal for whether to show the
+      // "View document" link — the detail/attachment routes load the bytes.
+      has_attachment: !!r.attachment_size,
       customer: void 0,
       job: void 0,
       submitter: void 0,
@@ -3675,16 +4055,43 @@ async function registerRoutes(httpServer, app) {
     if (jobIds && !jobIds.includes(data.job_id))
       return res.status(404).json({ message: "Report not found" });
     const { data: events } = await supabaseAnon.from("daily_report_events").select("*").eq("report_id", req.params.id).order("occurred_at", { ascending: false });
-    const { customer, job, submitter, signer, ...rest } = data;
+    const { customer, job, submitter, signer, attachment_base64, ...rest } = data;
     res.json({
       ...rest,
       customer_name: customer?.name ?? null,
       job_number: job?.job_number ?? null,
       submitted_by_name: submitter?.name ?? null,
       signed_by_name: signer?.name ?? null,
+      // Expose only a flag here; the bytes stream from /attachment on demand.
+      has_attachment: !!attachment_base64,
       events: events || []
     });
   });
+  app.get(
+    "/api/daily-reports/:id/attachment",
+    requireAuth,
+    async (req, res) => {
+      const { data, error } = await supabaseAnon.from("daily_reports").select("area, job_id, attachment_name, attachment_mime, attachment_base64").eq("id", req.params.id).single();
+      if (error || !data || !data.attachment_base64)
+        return res.status(404).json({ message: "No document on file for this report" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && data.area !== scope)
+        return res.status(404).json({ message: "Report not found" });
+      const jobIds = await jobScopeOf(req.profile);
+      if (jobIds && !jobIds.includes(data.job_id))
+        return res.status(404).json({ message: "Report not found" });
+      const buf = Buffer.from(data.attachment_base64, "base64");
+      res.setHeader(
+        "Content-Type",
+        data.attachment_mime || "application/octet-stream"
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${(data.attachment_name || "daily-report.xlsx").replace(/\"/g, "")}"`
+      );
+      res.send(buf);
+    }
+  );
   app.get(
     "/api/daily-reports/:id/centrifuges",
     requireAuth,
@@ -3697,22 +4104,30 @@ async function registerRoutes(httpServer, app) {
       const scope = areaScopeOf(req.profile);
       if (scope && report.area !== scope)
         return res.status(404).json({ message: "Report not found" });
-      const dailyRaw = report.kpis?.daily_run_hours;
-      const daily_run_hours = dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
+      const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+      const kp = report.kpis || {};
+      const daily_run_hours = numOrNull(kp.daily_run_hours);
+      const daily_run_hours_cent1 = numOrNull(kp.daily_run_hours_cent1) ?? daily_run_hours;
+      const daily_run_hours_cent2 = numOrNull(kp.daily_run_hours_cent2);
       let centrifuges = [];
       if (report.job_id) {
-        const { data: assets } = await client.from("assets").select("id, tag, category, run_hours").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+        const { data: assets } = await client.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
         centrifuges = (assets || []).map((a) => ({
           id: a.id,
           tag: a.tag,
           category: a.category,
-          run_hours: a.run_hours
+          run_hours: a.run_hours,
+          centrifuge_slot: a.centrifuge_slot ?? null
         }));
       }
+      const needs_slot_mapping = centrifuges.length >= 2 && centrifuges.some((c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2);
       res.json({
-        daily_run_hours: daily_run_hours != null && Number.isFinite(daily_run_hours) ? daily_run_hours : null,
+        daily_run_hours,
+        daily_run_hours_cent1,
+        daily_run_hours_cent2,
         already_applied: !!report.run_hours_applied,
-        centrifuges
+        centrifuges,
+        needs_slot_mapping
       });
     }
   );
@@ -3735,39 +4150,39 @@ async function registerRoutes(httpServer, app) {
       const reviewer = req.profile;
       if (parsed.data.action === "sign_off") {
         let runHourDetail = null;
-        const dailyRaw = report.kpis?.daily_run_hours;
-        const dailyHours = dailyRaw == null || dailyRaw === "" ? null : Number(dailyRaw);
-        if (!report.run_hours_applied && report.job_id && dailyHours != null && Number.isFinite(dailyHours) && dailyHours > 0) {
-          const { data: centAssets } = await client.from("assets").select("id, tag, category, run_hours").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+        const kp = report.kpis || {};
+        const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+        const dailyHours = numOrNull(kp.daily_run_hours);
+        const slot1Hours = numOrNull(kp.daily_run_hours_cent1) ?? dailyHours;
+        const slot2Hours = numOrNull(kp.daily_run_hours_cent2);
+        const anyHours = dailyHours != null && dailyHours > 0 || slot1Hours != null && slot1Hours > 0 || slot2Hours != null && slot2Hours > 0;
+        if (!report.run_hours_applied && report.job_id && anyHours) {
+          const { data: centAssets } = await client.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
           const centrifuges = centAssets || [];
           let allocation = [];
           if (centrifuges.length === 1) {
             const c = centrifuges[0];
-            allocation = [{ asset_id: c.id, tag: c.tag, add: dailyHours }];
+            const hrs = dailyHours ?? slot1Hours ?? 0;
+            if (hrs > 0)
+              allocation = [{ asset_id: c.id, tag: c.tag, add: hrs }];
           } else if (centrifuges.length >= 2) {
-            const provided = parsed.data.run_hour_allocations;
-            if (!provided || provided.length === 0) {
+            const unmapped = centrifuges.filter(
+              (c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2
+            );
+            if (unmapped.length > 0) {
               return res.status(400).json({
-                message: "This job has multiple centrifuges. Allocate the day's run hours to each before signing off."
+                message: "This job has two centrifuges. Map each one to Centrifuge 1 or Centrifuge 2 (on the asset) before signing off so run hours go to the right unit. Needs mapping: " + unmapped.map((c) => c.tag).join(", ")
               });
             }
-            const validIds = new Set(centrifuges.map((c) => c.id));
-            for (const a of provided) {
-              if (!validIds.has(a.asset_id))
-                return res.status(400).json({
-                  message: "Allocation references an asset that isn't a centrifuge on this job."
-                });
-            }
-            const sum = provided.reduce((s, a) => s + a.hours, 0);
-            if (Math.abs(sum - dailyHours) > 0.01) {
-              return res.status(400).json({
-                message: `Allocated hours (${sum}) must add up to the day's run hours (${dailyHours}).`
-              });
-            }
-            allocation = provided.filter((a) => a.hours > 0).map((a) => {
-              const c = centrifuges.find((x) => x.id === a.asset_id);
-              return { asset_id: a.asset_id, tag: c?.tag ?? a.asset_id, add: a.hours };
-            });
+            const hoursForSlot = (slot) => slot === 1 ? slot1Hours : slot === 2 ? slot2Hours : null;
+            allocation = centrifuges.map((c) => {
+              const hrs = hoursForSlot(c.centrifuge_slot);
+              return {
+                asset_id: c.id,
+                tag: c.tag,
+                add: hrs != null && hrs > 0 ? hrs : 0
+              };
+            }).filter((a) => a.add > 0);
           }
           const applied = [];
           for (const a of allocation) {
@@ -3865,6 +4280,20 @@ async function registerRoutes(httpServer, app) {
     const m = subject.match(/\b[A-Za-z]{1,4}[-\s]?\d{2,6}\b/);
     return m ? m[0].replace(/\s+/g, "-").toUpperCase() : null;
   };
+  const readJsaRigNameFromWorkbook = (base64, mime) => {
+    if (mime && mime.includes("pdf")) return null;
+    try {
+      const buf = Buffer.from(base64, "base64");
+      const wb = XLSX2.read(buf, { type: "buffer" });
+      const sheetName = wb.SheetNames.find((n) => n.trim().toUpperCase() === "JSA") || wb.SheetNames[0];
+      const ws2 = sheetName ? wb.Sheets[sheetName] : void 0;
+      const cell = ws2 ? ws2["K4"] : void 0;
+      const raw = cell && cell.v != null ? String(cell.v).trim() : "";
+      return raw ? raw : null;
+    } catch {
+      return null;
+    }
+  };
   app.post("/api/jsa-intake/ingest", async (req, res) => {
     if (!INGEST_TOKEN)
       return res.status(503).json({ message: "Ingest not configured (set INGEST_TOKEN)." });
@@ -3877,15 +4306,22 @@ async function registerRoutes(httpServer, app) {
     const p = parsed.data;
     const { data: existing } = await client.from("jsa_reports").select(JSA_LIST_COLS).eq("email_message_id", p.email_message_id).maybeSingle();
     if (existing) return res.status(200).json({ ...existing, deduped: true });
-    const jobNumber = p.job_number && p.job_number.trim() || parseJobNumber(p.subject);
+    const rigFromWorkbook = readJsaRigNameFromWorkbook(
+      p.attachment_base64,
+      p.attachment_mime
+    );
+    const explicit = p.job_number && p.job_number.trim();
+    const subjectNumber = parseJobNumber(p.subject);
+    const jobNumber = explicit || rigFromWorkbook || subjectNumber;
+    const matchSource = explicit ? "request" : rigFromWorkbook ? "workbook cell K4" : subjectNumber ? "email subject" : null;
     let job_id = null;
     let area = null;
     let customer_id = null;
     if (jobNumber) {
       const { data: jobs } = await client.from("jobs").select("id, area, customer_id, job_number");
-      const target = jobNumber.trim().toLowerCase();
+      const target = normJobId(jobNumber);
       const match = (jobs || []).find(
-        (j) => (j.job_number || "").trim().toLowerCase() === target
+        (j) => normJobId(j.job_number) === target
       );
       if (match) {
         job_id = match.id;
@@ -3919,7 +4355,7 @@ async function registerRoutes(httpServer, app) {
       actor_name: p.sender_name || p.sender_email,
       actor_role: "field",
       action: "received",
-      detail: `Received JSA "${p.attachment_name}"` + (job_id ? ` and matched job ${jobNumber} to this JSA.` : jobNumber ? ` \u2014 job number "${jobNumber}" did not match any job; awaiting assignment.` : ` \u2014 no job number found in the subject; awaiting assignment.`)
+      detail: `Received JSA "${p.attachment_name}"` + (job_id ? ` and matched job "${jobNumber}" (from ${matchSource}) to this JSA.` : jobNumber ? ` \u2014 "${jobNumber}" (from ${matchSource}) did not match any job; awaiting assignment.` : ` \u2014 no rig name in the workbook (K4) and no job number in the subject; awaiting assignment.`)
     });
     res.status(201).json(data);
   });
@@ -3927,6 +4363,8 @@ async function registerRoutes(httpServer, app) {
     const scope = areaScopeOf(req.profile);
     let q = supabaseAnon.from("jsa_reports").select(`${JSA_LIST_COLS}, customer:customers(name), job:jobs(job_number)`).order("received_at", { ascending: false });
     if (scope) q = q.eq("area", scope);
+    const jsaJobIds = await jobScopeOf(req.profile);
+    if (jsaJobIds) q = q.in("job_id", jsaJobIds.length ? jsaJobIds : ["00000000-0000-0000-0000-000000000000"]);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
     const rows = (data || []).map((r) => ({
@@ -3944,6 +4382,9 @@ async function registerRoutes(httpServer, app) {
     const scope = areaScopeOf(req.profile);
     if (scope && data.area !== scope)
       return res.status(404).json({ message: "JSA not found" });
+    const jsaJobIds = await jobScopeOf(req.profile);
+    if (jsaJobIds && !jsaJobIds.includes(data.job_id))
+      return res.status(404).json({ message: "JSA not found" });
     const { data: events } = await supabaseAnon.from("jsa_report_events").select("*").eq("jsa_id", req.params.id).order("occurred_at", { ascending: false });
     const { customer, job, ...rest } = data;
     res.json({
@@ -3957,10 +4398,13 @@ async function registerRoutes(httpServer, app) {
     "/api/jsa-intake/:id/attachment",
     requireAuth,
     async (req, res) => {
-      const { data, error } = await supabaseAnon.from("jsa_reports").select("area, attachment_name, attachment_mime, attachment_base64").eq("id", req.params.id).single();
+      const { data, error } = await supabaseAnon.from("jsa_reports").select("area, job_id, attachment_name, attachment_mime, attachment_base64").eq("id", req.params.id).single();
       if (error || !data) return res.status(404).json({ message: "JSA not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && data.area !== scope)
+        return res.status(404).json({ message: "JSA not found" });
+      const jsaJobIds = await jobScopeOf(req.profile);
+      if (jsaJobIds && !jsaJobIds.includes(data.job_id))
         return res.status(404).json({ message: "JSA not found" });
       const buf = Buffer.from(data.attachment_base64, "base64");
       res.setHeader("Content-Type", data.attachment_mime || "application/octet-stream");
@@ -3975,10 +4419,13 @@ async function registerRoutes(httpServer, app) {
     "/api/jsa-intake/:id/preview",
     requireAuth,
     async (req, res) => {
-      const { data, error } = await supabaseAnon.from("jsa_reports").select("area, attachment_name, attachment_mime, attachment_base64").eq("id", req.params.id).single();
+      const { data, error } = await supabaseAnon.from("jsa_reports").select("area, job_id, attachment_name, attachment_mime, attachment_base64").eq("id", req.params.id).single();
       if (error || !data) return res.status(404).json({ message: "JSA not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && data.area !== scope)
+        return res.status(404).json({ message: "JSA not found" });
+      const jsaJobIds = await jobScopeOf(req.profile);
+      if (jsaJobIds && !jsaJobIds.includes(data.job_id))
         return res.status(404).json({ message: "JSA not found" });
       const name = (data.attachment_name || "").toLowerCase();
       const mime = (data.attachment_mime || "").toLowerCase();
@@ -4464,6 +4911,11 @@ async function registerRoutes(httpServer, app) {
       res.status(404).json({ message: "Job not found" });
       return null;
     }
+    const fieldJobIds = await jobScopeOf(req.profile);
+    if (fieldJobIds && !fieldJobIds.includes(data.id)) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
     return data;
   }
   async function canManageServices(req, jobId) {
@@ -4591,31 +5043,86 @@ async function registerRoutes(httpServer, app) {
     }
   );
   const todayIso = () => (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
-  const normWellName = (s) => (s ?? "").trim().toLowerCase();
+  const normWellName = (s) => {
+    const base = (s ?? "").trim().toLowerCase().replace(/[\s-]+/g, " ");
+    const m = base.match(/(\d+\s?[a-z]?)\s*$/);
+    if (m) {
+      const tok = m[1].replace(/\s+/g, "");
+      return `#${tok}`;
+    }
+    return base;
+  };
   const reportDay = (r) => {
     const d = String(r.report_date || r.received_at || "").slice(0, 10);
     return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
   };
   async function wellReportStats(jobId) {
     const client = padClient();
-    const { data: reports } = await client.from("daily_reports").select("well_name, report_date, received_at").eq("job_id", jobId);
+    const { data: reports } = await client.from("daily_reports").select("well_name, report_date, received_at, report_day, kpis").eq("job_id", jobId);
+    const accruedOf = (r) => {
+      const raw = r?.kpis?.accrued_current_well;
+      if (raw == null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+    const dayRateOfReport = (r) => {
+      const raw = r?.kpis?.day_rate;
+      if (raw == null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
     const dated = [];
     for (const r of reports ?? []) {
       const day = reportDay(r);
       const name = r.well_name ?? "";
-      if (day && name.trim()) dated.push({ name: name.trim(), day });
+      const rd = Number(r.report_day);
+      if (day && name.trim())
+        dated.push({
+          name: name.trim(),
+          day,
+          reportDay: Number.isFinite(rd) ? rd : 0,
+          accrued: accruedOf(r),
+          dayRate: dayRateOfReport(r)
+        });
     }
     dated.sort((a, b) => a.day < b.day ? -1 : a.day > b.day ? 1 : 0);
     const byName = /* @__PURE__ */ new Map();
-    for (const { name, day } of dated) {
+    const accruedAt = /* @__PURE__ */ new Map();
+    const rateAt = /* @__PURE__ */ new Map();
+    for (const { name, day, reportDay: rd, accrued, dayRate } of dated) {
       const key = normWellName(name);
       const cur = byName.get(key);
       if (cur) {
         cur.days += 1;
         if (day < cur.first) cur.first = day;
         if (day > cur.last) cur.last = day;
+        if (dayRate != null) cur.dayRateSum += dayRate;
       } else {
-        byName.set(key, { days: 1, first: day, last: day, display: name.trim() });
+        byName.set(key, {
+          days: 1,
+          first: day,
+          last: day,
+          display: name.trim(),
+          accrued: null,
+          dayRateSum: dayRate != null ? dayRate : 0,
+          latestDayRate: null
+        });
+      }
+      if (accrued != null) {
+        const owner = accruedAt.get(key);
+        const isNewer = !owner || day > owner.day || day === owner.day && rd >= owner.reportDay;
+        if (isNewer) {
+          byName.get(key).accrued = accrued;
+          accruedAt.set(key, { day, reportDay: rd });
+        }
+      }
+      if (dayRate != null) {
+        const owner = rateAt.get(key);
+        const isNewer = !owner || day > owner.day || day === owner.day && rd >= owner.reportDay;
+        if (isNewer) {
+          byName.get(key).latestDayRate = dayRate;
+          rateAt.set(key, { day, reportDay: rd });
+        }
       }
     }
     const last = dated[dated.length - 1];
@@ -4641,6 +5148,9 @@ async function registerRoutes(httpServer, app) {
         const days = stat?.days ?? 0;
         const isCurrent = currentKey != null && key === currentKey;
         const status = isCurrent ? "Open" : days > 0 ? "Closed" : "Pending";
+        const accrued = stat?.accrued ?? null;
+        const dayRateSum = stat?.dayRateSum ?? 0;
+        const revenue = accrued != null ? accrued : dayRateSum > 0 ? dayRateSum : dayRate != null ? dayRate * days : null;
         const arr = wellsByPad.get(w.pad_id) ?? [];
         arr.push({
           id: w.id,
@@ -4651,7 +5161,7 @@ async function registerRoutes(httpServer, app) {
           report_days: days,
           first_report: stat?.first ?? null,
           last_report: stat?.last ?? null,
-          revenue: dayRate != null ? dayRate * days : null,
+          revenue,
           is_current: isCurrent
         });
         wellsByPad.set(w.pad_id, arr);
@@ -4683,6 +5193,353 @@ async function registerRoutes(httpServer, app) {
         is_current: currentKey != null && key === currentKey
       })).sort((a, b) => a.last_report < b.last_report ? 1 : -1);
       res.json(out);
+    }
+  );
+  async function jobAccruedRevenue(jobIds) {
+    const out = /* @__PURE__ */ new Map();
+    for (const id of jobIds) out.set(id, { revenue: null, hasAccrued: false });
+    if (jobIds.length === 0) return out;
+    const client = padClient();
+    const { data: reports } = await client.from("daily_reports").select("job_id, well_name, report_date, received_at, report_day, kpis").in("job_id", jobIds);
+    const accruedOf = (r) => {
+      const raw = r?.kpis?.accrued_current_well;
+      if (raw == null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : null;
+    };
+    const latest = /* @__PURE__ */ new Map();
+    for (const r of reports ?? []) {
+      const jid = r.job_id;
+      const day = reportDay(r);
+      const accrued = accruedOf(r);
+      if (!day || accrued == null) continue;
+      const wellKey = normWellName(r.well_name ?? "");
+      const rd = Number(r.report_day);
+      const key = jid + "\0" + wellKey;
+      const owner = latest.get(key);
+      const isNewer = !owner || day > owner.day || day === owner.day && (Number.isFinite(rd) ? rd : 0) >= owner.reportDay;
+      if (isNewer)
+        latest.set(key, {
+          day,
+          reportDay: Number.isFinite(rd) ? rd : 0,
+          accrued
+        });
+    }
+    for (const [key, owner] of Array.from(latest.entries())) {
+      const jid = key.split("\0")[0];
+      const cur = out.get(jid) ?? { revenue: null, hasAccrued: false };
+      cur.revenue = (cur.revenue ?? 0) + owner.accrued;
+      cur.hasAccrued = true;
+      out.set(jid, cur);
+    }
+    return out;
+  }
+  app.get(
+    "/api/revenue/summary",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const scope = areaScopeOf(req.profile);
+      const client = padClient();
+      let jq = client.from("jobs").select("id, job_number, area, day_rate, customer_id, well_name, status").is("archived_at", null);
+      if (scope) jq = jq.eq("area", scope);
+      const { data: jobs, error: jErr } = await jq;
+      if (jErr) return res.status(500).json({ message: jErr.message });
+      const jobRows = jobs ?? [];
+      const jobIds = jobRows.map((j) => j.id);
+      const custIds = Array.from(
+        new Set(jobRows.map((j) => j.customer_id).filter(Boolean))
+      );
+      const custName = /* @__PURE__ */ new Map();
+      if (custIds.length) {
+        const { data: custs } = await client.from("customers").select("id, name").in("id", custIds);
+        for (const c of custs ?? []) custName.set(c.id, c.name);
+      }
+      const accrued = await jobAccruedRevenue(jobIds);
+      const { data: reps } = await client.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
+      const jobFallbackRate = /* @__PURE__ */ new Map();
+      for (const j of jobRows) {
+        const dr = j.day_rate != null && !isNaN(Number(j.day_rate)) ? Number(j.day_rate) : null;
+        jobFallbackRate.set(j.id, dr);
+      }
+      const reportDayRate = (r) => {
+        const raw = r?.kpis?.day_rate;
+        if (raw == null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      const dailyMap = /* @__PURE__ */ new Map();
+      const monthlyMap = /* @__PURE__ */ new Map();
+      const dailyJobsMap = /* @__PURE__ */ new Map();
+      const reportDaysByJob = /* @__PURE__ */ new Map();
+      const lastReportByJob = /* @__PURE__ */ new Map();
+      const currentRateByJob = /* @__PURE__ */ new Map();
+      const currentRateDayByJob = /* @__PURE__ */ new Map();
+      const perJobDay = /* @__PURE__ */ new Map();
+      for (const r of reps ?? []) {
+        const jid = r.job_id;
+        const day = reportDay(r);
+        if (!day) continue;
+        const perReport = reportDayRate(r);
+        const prev = lastReportByJob.get(jid);
+        if (!prev || day > prev) lastReportByJob.set(jid, day);
+        if (perReport != null) {
+          const rd = currentRateDayByJob.get(jid);
+          if (!rd || day >= rd) {
+            currentRateByJob.set(jid, perReport);
+            currentRateDayByJob.set(jid, day);
+          }
+        }
+        const key = `${jid}|${day}`;
+        const cand = {
+          rate: perReport ?? jobFallbackRate.get(jid) ?? null,
+          hasOwn: perReport != null,
+          received: String(r.received_at ?? "")
+        };
+        const cur = perJobDay.get(key);
+        if (!cur || cand.hasOwn && !cur.hasOwn || cand.hasOwn === cur.hasOwn && cand.received > cur.received)
+          perJobDay.set(key, cand);
+      }
+      for (const [key, pick] of Array.from(perJobDay.entries())) {
+        const sep = key.lastIndexOf("|");
+        const jid = key.slice(0, sep);
+        const day = key.slice(sep + 1);
+        reportDaysByJob.set(jid, (reportDaysByJob.get(jid) ?? 0) + 1);
+        if (pick.rate != null) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + pick.rate);
+          if (!dailyJobsMap.has(day)) dailyJobsMap.set(day, /* @__PURE__ */ new Set());
+          dailyJobsMap.get(day).add(jid);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + pick.rate);
+        }
+      }
+      const dayRateOf = /* @__PURE__ */ new Map();
+      for (const j of jobRows)
+        dayRateOf.set(
+          j.id,
+          currentRateByJob.get(j.id) ?? jobFallbackRate.get(j.id) ?? null
+        );
+      const byJob = jobRows.map((j) => {
+        const acc = accrued.get(j.id) ?? { revenue: null, hasAccrued: false };
+        const days = reportDaysByJob.get(j.id) ?? 0;
+        return {
+          job_id: j.id,
+          job_number: j.job_number,
+          area: j.area,
+          customer_id: j.customer_id ?? null,
+          customer_name: j.customer_id ? custName.get(j.customer_id) ?? "" : "",
+          day_rate: dayRateOf.get(j.id),
+          report_days: days,
+          revenue: acc.revenue,
+          // accrued (AS57); null when no report had one
+          has_accrued: acc.hasAccrued,
+          active: days > 0,
+          // has report activity
+          last_report: lastReportByJob.get(j.id) ?? null
+        };
+      });
+      const sumRev = (rows) => {
+        const vals = rows.map((r) => r.revenue).filter((v) => v != null);
+        return vals.length ? vals.reduce((a, b) => a + b, 0) : null;
+      };
+      const areaMap = /* @__PURE__ */ new Map();
+      for (const r of byJob) {
+        const cur = areaMap.get(r.area) ?? { revenue: null, jobs: 0 };
+        if (r.revenue != null) cur.revenue = (cur.revenue ?? 0) + r.revenue;
+        cur.jobs += 1;
+        areaMap.set(r.area, cur);
+      }
+      const byArea = Array.from(areaMap.entries()).map(([area, v]) => ({ area, revenue: v.revenue, jobs: v.jobs })).sort((a, b) => (b.revenue ?? 0) - (a.revenue ?? 0));
+      const custMap = /* @__PURE__ */ new Map();
+      for (const r of byJob) {
+        const cid = r.customer_id ?? "none";
+        const cur = custMap.get(cid) ?? {
+          customer_id: r.customer_id ?? null,
+          name: r.customer_name || "(no customer)",
+          revenue: null,
+          jobs: 0
+        };
+        if (r.revenue != null) cur.revenue = (cur.revenue ?? 0) + r.revenue;
+        cur.jobs += 1;
+        custMap.set(cid, cur);
+      }
+      const byCustomer = Array.from(custMap.values()).sort(
+        (a, b) => (b.revenue ?? 0) - (a.revenue ?? 0)
+      );
+      const daily = Array.from(dailyMap.entries()).map(([date, revenue]) => ({ date, revenue })).sort((a, b) => a.date < b.date ? -1 : 1);
+      const monthly = Array.from(monthlyMap.entries()).map(([month, revenue]) => ({ month, revenue })).sort((a, b) => a.month < b.month ? -1 : 1);
+      const todayCentral = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Chicago",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(/* @__PURE__ */ new Date());
+      const curMonth = todayCentral.slice(0, 7);
+      const curYear = todayCentral.slice(0, 4);
+      let latestDay = null;
+      let mtd = null;
+      let ytd = null;
+      let mtdDays = 0;
+      let ytdDays = 0;
+      for (const [d, v] of Array.from(dailyMap.entries())) {
+        if (d > todayCentral) continue;
+        if (!latestDay || d > latestDay) latestDay = d;
+        if (d.startsWith(curMonth)) {
+          mtd = (mtd ?? 0) + v;
+          mtdDays++;
+        }
+        if (d.startsWith(curYear)) {
+          ytd = (ytd ?? 0) + v;
+          ytdDays++;
+        }
+      }
+      const newestRated = /* @__PURE__ */ new Map();
+      for (const r of reps ?? []) {
+        const d = r.report_date ? String(r.report_date).slice(0, 10) : null;
+        if (!d) continue;
+        const rate = reportDayRate(r);
+        if (rate == null) continue;
+        const rd = Number(r.report_day ?? 0) || 0;
+        const cur = newestRated.get(r.job_id);
+        if (!cur || d > cur.date || d === cur.date && rd > cur.day)
+          newestRated.set(r.job_id, { date: d, day: rd, rate });
+      }
+      const activeStatusJobs = jobRows.filter((j) => j.status === "Active");
+      const currentJobs = activeStatusJobs.map((j) => {
+        const nr = newestRated.get(j.id);
+        const rate = nr ? nr.rate : jobFallbackRate.get(j.id) ?? null;
+        return {
+          job_id: j.id,
+          job_number: j.job_number,
+          area: j.area,
+          day_rate: rate,
+          source: nr ? "report" : rate != null ? "job" : null,
+          report_date: nr?.date ?? null,
+          report_day: nr?.day ?? null
+        };
+      });
+      const ratedCurrent = currentJobs.filter((c) => c.day_rate != null);
+      const current_daily = {
+        revenue: ratedCurrent.length ? ratedCurrent.reduce((sum, c) => sum + c.day_rate, 0) : null,
+        active_jobs: currentJobs.length,
+        missing_rate: currentJobs.length - ratedCurrent.length,
+        jobs: currentJobs.sort((x, y) => (y.day_rate ?? 0) - (x.day_rate ?? 0))
+      };
+      const periods = {
+        as_of: todayCentral,
+        current_daily,
+        latest_day: latestDay ? {
+          date: latestDay,
+          revenue: dailyMap.get(latestDay) ?? null,
+          jobs: dailyJobsMap.get(latestDay)?.size ?? 0
+        } : null,
+        month_to_date: { month: curMonth, revenue: mtd, days: mtdDays },
+        year_to_date: { year: curYear, revenue: ytd, days: ytdDays }
+      };
+      const activeJobs = byJob.filter((j) => j.active);
+      const completedJobs = byJob.filter((j) => !j.active);
+      const topJobs = [...byJob].filter((j) => j.revenue != null).sort((a, b) => (b.revenue ?? 0) - (a.revenue ?? 0)).slice(0, 10);
+      res.json({
+        scope: scope ?? "all",
+        totals: {
+          revenue: sumRev(byJob),
+          jobs: byJob.length,
+          active_jobs: activeJobs.length,
+          completed_jobs: completedJobs.length,
+          active_revenue: sumRev(activeJobs),
+          completed_revenue: sumRev(completedJobs),
+          jobs_missing_accrued: byJob.filter((j) => !j.has_accrued).length
+        },
+        by_area: byArea,
+        by_customer: byCustomer,
+        by_job: byJob.sort((a, b) => (b.revenue ?? 0) - (a.revenue ?? 0)),
+        top_jobs: topJobs,
+        daily,
+        monthly,
+        periods
+      });
+    }
+  );
+  app.get(
+    "/api/revenue/export",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const scope = areaScopeOf(req.profile);
+      const client = padClient();
+      let jq = client.from("jobs").select("id, job_number, area, day_rate, customer_id").is("archived_at", null);
+      if (scope) jq = jq.eq("area", scope);
+      const { data: jobs, error } = await jq;
+      if (error) return res.status(500).json({ message: error.message });
+      const jobRows = jobs ?? [];
+      const jobIds = jobRows.map((j) => j.id);
+      const custIds = Array.from(
+        new Set(jobRows.map((j) => j.customer_id).filter(Boolean))
+      );
+      const custName = /* @__PURE__ */ new Map();
+      if (custIds.length) {
+        const { data: custs } = await client.from("customers").select("id, name").in("id", custIds);
+        for (const c of custs ?? []) custName.set(c.id, c.name);
+      }
+      const accrued = await jobAccruedRevenue(jobIds);
+      const { data: reps } = await client.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
+      const reportDaysByJob = /* @__PURE__ */ new Map();
+      const currentRateByJob = /* @__PURE__ */ new Map();
+      const currentRateDayByJob = /* @__PURE__ */ new Map();
+      const al57 = (r) => {
+        const raw = r?.kpis?.day_rate;
+        if (raw == null) return null;
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : null;
+      };
+      for (const r of reps ?? []) {
+        const day = reportDay(r);
+        if (!day) continue;
+        reportDaysByJob.set(r.job_id, (reportDaysByJob.get(r.job_id) ?? 0) + 1);
+        const rate = al57(r);
+        if (rate != null) {
+          const cur = currentRateDayByJob.get(r.job_id);
+          if (!cur || day >= cur) {
+            currentRateByJob.set(r.job_id, rate);
+            currentRateDayByJob.set(r.job_id, day);
+          }
+        }
+      }
+      const esc = (v) => {
+        const s = v == null ? "" : String(v);
+        return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+      };
+      const header = [
+        "Job Number",
+        "Area",
+        "Customer",
+        "Day Rate",
+        "Report Days",
+        "Revenue (Accrued AS57)"
+      ];
+      const lines = [header.join(",")];
+      for (const j of jobRows) {
+        const acc = accrued.get(j.id) ?? { revenue: null };
+        const fallback = j.day_rate != null && !isNaN(Number(j.day_rate)) ? Number(j.day_rate) : null;
+        const dr = currentRateByJob.get(j.id) ?? fallback;
+        lines.push(
+          [
+            esc(j.job_number),
+            esc(j.area),
+            esc(j.customer_id ? custName.get(j.customer_id) ?? "" : ""),
+            esc(dr ?? ""),
+            esc(reportDaysByJob.get(j.id) ?? 0),
+            esc(acc.revenue ?? "")
+          ].join(",")
+        );
+      }
+      const csv = lines.join("\r\n");
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="revenue-${scope ? scope.replace(/\s+/g, "-") : "all"}-${todayIso()}.csv"`
+      );
+      res.send(csv);
     }
   );
   app.post(
@@ -4762,6 +5619,18 @@ async function registerRoutes(httpServer, app) {
       const parsed = createWellSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
+      const key = normWellName(parsed.data.name);
+      const { data: jobWells } = await client.from("wells").select("id, pad_id, name").eq("job_id", pad.job_id);
+      const existingWell = (jobWells ?? []).find(
+        (w) => normWellName(w.name) === key
+      );
+      if (existingWell) {
+        if (existingWell.pad_id === pad.id)
+          return res.json({ ...existingWell, stints: [], unchanged: true });
+        const { data: moved, error: mErr } = await client.from("wells").update({ pad_id: pad.id }).eq("id", existingWell.id).select().single();
+        if (mErr) return res.status(400).json({ message: mErr.message });
+        return res.json({ ...moved, stints: [], moved: true });
+      }
       const { data: well, error } = await client.from("wells").insert({
         pad_id: pad.id,
         job_id: pad.job_id,
@@ -4772,6 +5641,41 @@ async function registerRoutes(httpServer, app) {
       }).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json({ ...well, stints: [] });
+    }
+  );
+  app.patch(
+    "/api/wells/:wellId",
+    requireAuth,
+    requireRole("admin", "area", "super", "field"),
+    async (req, res) => {
+      const padId = typeof req.body?.pad_id === "string" ? req.body.pad_id : "";
+      if (!padId) return res.status(400).json({ message: "pad_id is required" });
+      const client = padClient();
+      const { data: well } = await client.from("wells").select("id, job_id, pad_id").eq("id", req.params.wellId).single();
+      if (!well) return res.status(404).json({ message: "Well not found" });
+      const job = await loadScopedJob(req, res, well.job_id);
+      if (!job) return;
+      const { data: target } = await client.from("pads").select("id, job_id").eq("id", padId).single();
+      if (!target || target.job_id !== well.job_id)
+        return res.status(400).json({ message: "Pad must be on the same job" });
+      const { data: moved, error } = await client.from("wells").update({ pad_id: padId }).eq("id", well.id).select().single();
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(moved);
+    }
+  );
+  app.delete(
+    "/api/wells/:wellId",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const client = padClient();
+      const { data: well } = await client.from("wells").select("id, job_id").eq("id", req.params.wellId).single();
+      if (!well) return res.status(404).json({ message: "Well not found" });
+      const job = await loadScopedJob(req, res, well.job_id);
+      if (!job) return;
+      const { error } = await client.from("wells").delete().eq("id", well.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
     }
   );
   return httpServer;
