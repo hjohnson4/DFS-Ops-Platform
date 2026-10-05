@@ -7,6 +7,7 @@ import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, sendIn
 import {
   parseDailyReportWorkbook,
   parseAllCompletedDays,
+  readDayRemarks,
   ExcelParseError,
 } from "./excelDailyReport";
 import * as XLSX from "xlsx";
@@ -4605,6 +4606,30 @@ export async function registerRoutes(
       .order("occurred_at", { ascending: false });
     const { customer, job, submitter, signer, attachment_base64, ...rest } =
       data as any;
+    // Reports imported before crew notes (B57) were saved don't have
+    // well_context.remarks yet. Read it once from the stored workbook and save
+    // it back, so the detail page can show the notes for older reports too.
+    if (
+      rest.source === "email" &&
+      attachment_base64 &&
+      rest.report_day != null &&
+      !(rest.well_context && "remarks" in rest.well_context)
+    ) {
+      try {
+        const remarks = readDayRemarks(
+          Buffer.from(attachment_base64, "base64"),
+          Number(rest.report_day),
+        );
+        rest.well_context = { ...(rest.well_context || {}), remarks };
+        const writer = supabaseAdmin || supabaseAnon;
+        await writer
+          .from("daily_reports")
+          .update({ well_context: rest.well_context })
+          .eq("id", rest.id);
+      } catch (e: any) {
+        console.error("[daily-report] remarks backfill", e?.message ?? e);
+      }
+    }
     res.json({
       ...rest,
       customer_name: customer?.name ?? null,

@@ -446,6 +446,7 @@ function parseDaySheet(wb, chosen, incomplete) {
   well_context.rig_activity = toText(rawCell(ws2, "AI8"));
   well_context.meas_depth_ft = toNumber(rawCell(ws2, "AI9"));
   well_context.supervisor = toText(rawCell(ws2, "AI11"));
+  well_context.remarks = toText(rawCell(ws2, REMARKS_CELL));
   const report_date = toDateStr(rawCell(ws2, DATE_CELL));
   const v8raw = toText(rawCell(ws2, "V8"));
   const job_number = v8raw && !/^\d+(\.\d+)?$/.test(v8raw) ? v8raw : null;
@@ -518,6 +519,12 @@ function parseAllCompletedDays(buf) {
     }
   }
   return parsed;
+}
+function readDayRemarks(buf, reportDay) {
+  const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
+  const day = reportDaySheets(wb).find((d) => d.day === reportDay);
+  if (!day) return null;
+  return toText(rawCell(wb.Sheets[day.name], REMARKS_CELL));
 }
 
 // server/routes.ts
@@ -4056,6 +4063,19 @@ async function registerRoutes(httpServer, app) {
       return res.status(404).json({ message: "Report not found" });
     const { data: events } = await supabaseAnon.from("daily_report_events").select("*").eq("report_id", req.params.id).order("occurred_at", { ascending: false });
     const { customer, job, submitter, signer, attachment_base64, ...rest } = data;
+    if (rest.source === "email" && attachment_base64 && rest.report_day != null && !(rest.well_context && "remarks" in rest.well_context)) {
+      try {
+        const remarks = readDayRemarks(
+          Buffer.from(attachment_base64, "base64"),
+          Number(rest.report_day)
+        );
+        rest.well_context = { ...rest.well_context || {}, remarks };
+        const writer = supabaseAdmin || supabaseAnon;
+        await writer.from("daily_reports").update({ well_context: rest.well_context }).eq("id", rest.id);
+      } catch (e) {
+        console.error("[daily-report] remarks backfill", e?.message ?? e);
+      }
+    }
     res.json({
       ...rest,
       customer_name: customer?.name ?? null,

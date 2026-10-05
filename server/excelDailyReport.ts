@@ -354,6 +354,9 @@ function parseDaySheet(
   well_context.rig_activity = toText(rawCell(ws, "AI8"));
   well_context.meas_depth_ft = toNumber(rawCell(ws, "AI9"));
   well_context.supervisor = toText(rawCell(ws, "AI11"));
+  // Notes / comments typed by the crew in B57 (operations summary). Stored
+  // verbatim (line breaks kept) so the report detail page can show it.
+  well_context.remarks = toText(rawCell(ws, REMARKS_CELL));
 
   const report_date = toDateStr(rawCell(ws, DATE_CELL));
 
@@ -463,4 +466,14 @@ export function parseAllCompletedDays(buf: Buffer): ParsedDailyReport[] {
     }
   }
   return parsed;
+}
+
+
+// Read just the crew notes (B57) for a given report day from a stored
+// workbook. Used to fill in notes on reports imported before notes were saved.
+export function readDayRemarks(buf: Buffer, reportDay: number): string | null {
+  const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
+  const day = reportDaySheets(wb).find((d) => d.day === reportDay);
+  if (!day) return null;
+  return toText(rawCell(wb.Sheets[day.name], REMARKS_CELL));
 }

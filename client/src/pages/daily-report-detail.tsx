@@ -39,6 +39,9 @@ import {
   Wrench,
   Link2,
   FileWarning,
+  Activity,
+  Ruler,
+  StickyNote,
 } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
 
@@ -379,14 +382,68 @@ export default function DailyReportDetailPage() {
         <FieldReportBody report={report} assets={assets} />
       ) : (
         <>
+          {/* Rig activity + measured depth (cells AI8 / AI9 on the day tab) */}
+          <div
+            className="mt-4 rounded-lg border border-card-border bg-card overflow-hidden"
+            data-testid="section-rig-activity"
+          >
+            <div className="flex items-center gap-1.5 border-b border-card-border px-4 py-2.5 text-sm font-medium">
+              <Activity className="h-4 w-4 text-primary" />
+              Rig activity
+            </div>
+            <div className="grid grid-cols-2 divide-x divide-card-border">
+              <div className="px-4 py-3">
+                <div className="text-xs text-muted-foreground">Activity</div>
+                <div
+                  className="mt-0.5 text-lg font-semibold"
+                  data-testid="text-rig-activity"
+                >
+                  {ctx.rig_activity || "—"}
+                </div>
+              </div>
+              <div className="px-4 py-3">
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <Ruler className="h-3 w-3" /> Measured depth
+                </div>
+                <div
+                  className="mt-0.5 text-lg font-semibold tabular-nums"
+                  data-testid="text-meas-depth"
+                >
+                  {ctx.meas_depth_ft != null
+                    ? `${Number(ctx.meas_depth_ft).toLocaleString("en-US")} ft`
+                    : "—"}
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Locked KPI table — read straight from the emailed Excel sheet */}
-          <div className="mt-4">
+          <div className="mt-3">
             <LockedKpiTable
               kpis={report.kpis}
               cellMap={report.kpi_cell_map as any}
               sourceSheet={report.source_sheet}
               attachmentName={report.attachment_name}
             />
+          </div>
+
+          {/* Crew notes / comments (cell B57 on the day tab) */}
+          <div
+            className="mt-3 rounded-lg border border-card-border bg-card overflow-hidden"
+            data-testid="section-report-notes"
+          >
+            <div className="flex items-center gap-1.5 border-b border-card-border px-4 py-2.5 text-sm font-medium">
+              <StickyNote className="h-4 w-4 text-primary" />
+              Notes / comments
+            </div>
+            <div
+              className={`px-4 py-3 text-sm whitespace-pre-wrap ${
+                ctx.remarks ? "" : "text-muted-foreground"
+              }`}
+              data-testid="text-report-notes"
+            >
+              {ctx.remarks || "—"}
+            </div>
           </div>
 
           {/* Source document — link to the actual submitted workbook */}

@@ -711,6 +711,8 @@ export interface DailyReportWellContext {
   rig_activity?: string | null;
   meas_depth_ft?: number | null;
   supervisor?: string | null;
+  // Crew notes / comments from cell B57 on the Report Day sheet.
+  remarks?: string | null;
 }
 
 // Report origin. Emailed reports arrive as an Excel workbook and carry locked,
