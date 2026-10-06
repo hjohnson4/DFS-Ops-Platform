@@ -2,6 +2,7 @@
 import express from "express";
 
 // server/routes.ts
+import { z as z2 } from "zod";
 import crypto from "node:crypto";
 
 // server/ws-polyfill.ts
@@ -1516,6 +1517,7 @@ async function registerRoutes(httpServer, app) {
         correction_received: "Corrected workbook received",
         correction_applied: "Correction applied",
         correction_discarded: "Correction discarded",
+        workbook_replaced: "Workbook replaced by reviewer",
         reopened: "Reopened",
         submitted: "Submitted",
         received: "Received",
@@ -4389,6 +4391,11 @@ async function registerRoutes(httpServer, app) {
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const reviewer = req.profile;
       if (parsed.data.action === "sign_off") {
+        if (reviewer.role === "super" && report.analysis?.workbook_replaced_by === reviewer.id) {
+          return res.status(400).json({
+            message: "You replaced this report's workbook, so someone else needs to sign it off (another supervisor, an Area Manager or an Admin)."
+          });
+        }
         let runHourDetail = null;
         const kp = report.kpis || {};
         const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
@@ -4495,6 +4502,157 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         detail: delivered ? `Suggested changes emailed to ${report.sender_email}` : `Suggested changes recorded; email queued for ${report.sender_email}`
       });
       res.json(data);
+    }
+  );
+  const replaceWorkbookSchema = z2.object({
+    attachment_base64: z2.string().min(1, "Choose a workbook to upload"),
+    attachment_name: z2.string().min(1)
+  });
+  async function prepareReplaceWorkbook(req, res) {
+    const parsed = replaceWorkbookSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: parsed.error.errors[0].message });
+      return null;
+    }
+    const p = parsed.data;
+    if (!/\.xlsx?$/i.test(p.attachment_name)) {
+      res.status(400).json({ message: "Upload the daily report Excel workbook (.xlsx)." });
+      return null;
+    }
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: report } = await client.from("daily_reports").select("*").eq("id", req.params.id).maybeSingle();
+    const scope = areaScopeOf(req.profile);
+    if (!report || scope && report.area !== scope) {
+      res.status(404).json({ message: "Report not found" });
+      return null;
+    }
+    if (report.source !== "email") {
+      res.status(400).json({ message: "Only emailed daily reports have a workbook to replace." });
+      return null;
+    }
+    if (report.status === "Correction pending") {
+      res.status(400).json({ message: "This is a held correction. Use Apply correction or Discard instead." });
+      return null;
+    }
+    const role = req.profile.role;
+    if (report.status === "Signed off" && role !== "admin" && role !== "area") {
+      res.status(403).json({
+        message: "This report is signed off. Only an Admin or Area Manager can replace its workbook."
+      });
+      return null;
+    }
+    if (report.report_day == null) {
+      res.status(400).json({ message: "This report has no Report Day, so the matching tab can't be found." });
+      return null;
+    }
+    let excel;
+    try {
+      excel = parseDailyReportWorkbook(
+        Buffer.from(p.attachment_base64, "base64"),
+        Number(report.report_day)
+      );
+    } catch (e) {
+      res.status(422).json({
+        message: e instanceof ExcelParseError ? e.message : `Could not read the workbook: ${e?.message ?? e}`
+      });
+      return null;
+    }
+    const next = {
+      attachment_name: p.attachment_name,
+      attachment_base64: p.attachment_base64,
+      attachment_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      attachment_size: Buffer.from(p.attachment_base64, "base64").length,
+      source_sheet: excel.source_sheet,
+      report_date: excel.report_date,
+      well_name: excel.well_name,
+      well_context: excel.well_context,
+      kpis: excel.kpis,
+      kpi_cell_map: excel.kpi_cell_map,
+      summary: excel.summary
+    };
+    const changes = describeReportChanges(report, next);
+    const missingFields = (excel.missing_fields || []).map(
+      (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
+    );
+    const warnings = [];
+    const norm = (v) => String(v ?? "").trim().toUpperCase();
+    if (report.well_name && excel.well_name && norm(report.well_name) !== norm(excel.well_name))
+      warnings.push(
+        `The well name in this file (${excel.well_name}) is different from the report (${report.well_name}). Make sure it's the right workbook.`
+      );
+    if (excel.incomplete)
+      warnings.push(`${excel.source_sheet} in this file doesn't look filled in yet.`);
+    return { client, report, next, changes, missingFields, warnings, excel };
+  }
+  app.post(
+    "/api/daily-reports/:id/replace-workbook/preview",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const prep = await prepareReplaceWorkbook(req, res);
+      if (!prep) return;
+      res.json({
+        source_sheet: prep.excel.source_sheet,
+        report_date: prep.excel.report_date,
+        well_name: prep.excel.well_name,
+        changes: prep.changes,
+        missing_fields: prep.missingFields,
+        warnings: prep.warnings
+      });
+    }
+  );
+  app.post(
+    "/api/daily-reports/:id/replace-workbook",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const prep = await prepareReplaceWorkbook(req, res);
+      if (!prep) return;
+      const { client, report, next, changes, missingFields } = prep;
+      const actor = req.profile;
+      const analysis = correctedAnalysis(
+        report,
+        missingFields.length ? { missing_fields: missingFields } : {},
+        changes,
+        null
+      );
+      const pend = report.analysis?.pending_correction_id;
+      if (pend) analysis.pending_correction_id = pend;
+      analysis.workbook_replaced_by = actor.id;
+      analysis.workbook_replaced_by_name = actor.name;
+      analysis.workbook_replaced_at = (/* @__PURE__ */ new Date()).toISOString();
+      const status = report.status === "Needs job match" ? "Needs job match" : "Pending Review";
+      const { data: upd, error } = await client.from("daily_reports").update({
+        ...next,
+        status,
+        reviewed_by: null,
+        reviewed_by_name: null,
+        reviewed_at: null,
+        change_notes: null,
+        email_out_status: null,
+        email_out_at: null,
+        analysis
+      }).eq("id", report.id).select().single();
+      if (error) return res.status(400).json({ message: error.message });
+      const hoursChanged = changes.some((x) => x.startsWith("Run hours"));
+      await client.from("daily_report_events").insert({
+        report_id: report.id,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        actor_role: actor.role,
+        action: "workbook_replaced",
+        detail: `Uploaded "${next.attachment_name}" (${next.source_sheet}) to replace "${report.attachment_name ?? "the original workbook"}". ` + (changes.length ? `Changes: ${changes.join("; ")}. ` : "No values changed. ") + (report.status === "Signed off" ? "The sign-off was cleared; " : "") + `${status === "Pending Review" ? "Back to Pending Review." : "Still needs a job match."}` + (report.run_hours_applied && hoursChanged ? " Run hours from the original sign-off were already added to the centrifuges and were not changed; adjust the asset's run hours by hand if needed." : "")
+      });
+      if (missingFields.length) {
+        await client.from("daily_report_events").insert({
+          report_id: report.id,
+          actor_name: "System",
+          actor_role: "field",
+          action: "needs_review",
+          detail: `${next.source_sheet} in "${next.attachment_name}" is missing critical data: ${missingFields.join("; ")}. Check with the crew before signing off.`
+        });
+      }
+      res.json(upd);
     }
   );
   async function loadCorrection(req, res) {

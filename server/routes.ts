@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { z } from "zod";
 import type { Server } from "node:http";
 import crypto from "node:crypto";
 import { supabaseAnon, supabaseAdmin, hasAdmin } from "./supabase";
@@ -866,6 +867,7 @@ export async function registerRoutes(
         correction_received: "Corrected workbook received",
         correction_applied: "Correction applied",
         correction_discarded: "Correction discarded",
+        workbook_replaced: "Workbook replaced by reviewer",
         reopened: "Reopened",
         submitted: "Submitted",
         received: "Received",
@@ -5087,6 +5089,17 @@ export async function registerRoutes(
       const reviewer = req.profile!;
 
       if (parsed.data.action === "sign_off") {
+        // A supervisor who replaced the workbook can't also sign it off;
+        // another reviewer (or an Admin / Area Manager) has to.
+        if (
+          reviewer.role === "super" &&
+          (report.analysis as any)?.workbook_replaced_by === reviewer.id
+        ) {
+          return res.status(400).json({
+            message:
+              "You replaced this report's workbook, so someone else needs to sign it off (another supervisor, an Area Manager or an Admin).",
+          });
+        }
         // ---- Roll the day's run hours (M33) onto the job's centrifuges -------
         // Only centrifuges accumulate run hours, only at sign-off, and only
         // once per report (run_hours_applied guards against double-counting).
@@ -5246,6 +5259,188 @@ export async function registerRoutes(
           : `Suggested changes recorded; email queued for ${report.sender_email}`,
       });
       res.json(data);
+    },
+  );
+
+  // ---- Replace workbook (reviewer uploads the corrected file) -------------
+  // Supervisors (reports not yet signed off) and Admins / Area Managers (any
+  // emailed report) can upload a corrected workbook. The SAME Report Day tab
+  // is read. /preview returns what would change without saving; the plain
+  // endpoint applies it, logs every change and sends the report back to
+  // Pending Review. Run hours already added at sign-off are not re-added.
+  const replaceWorkbookSchema = z.object({
+    attachment_base64: z.string().min(1, "Choose a workbook to upload"),
+    attachment_name: z.string().min(1),
+  });
+
+  async function prepareReplaceWorkbook(req: Request, res: Response) {
+    const parsed = replaceWorkbookSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ message: parsed.error.errors[0].message });
+      return null;
+    }
+    const p = parsed.data;
+    if (!/\.xlsx?$/i.test(p.attachment_name)) {
+      res.status(400).json({ message: "Upload the daily report Excel workbook (.xlsx)." });
+      return null;
+    }
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: report } = await client
+      .from("daily_reports")
+      .select("*")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    const scope = areaScopeOf(req.profile!);
+    if (!report || (scope && report.area !== scope)) {
+      res.status(404).json({ message: "Report not found" });
+      return null;
+    }
+    if (report.source !== "email") {
+      res.status(400).json({ message: "Only emailed daily reports have a workbook to replace." });
+      return null;
+    }
+    if (report.status === "Correction pending") {
+      res.status(400).json({ message: "This is a held correction. Use Apply correction or Discard instead." });
+      return null;
+    }
+    const role = req.profile!.role;
+    if (report.status === "Signed off" && role !== "admin" && role !== "area") {
+      res.status(403).json({
+        message: "This report is signed off. Only an Admin or Area Manager can replace its workbook.",
+      });
+      return null;
+    }
+    if (report.report_day == null) {
+      res.status(400).json({ message: "This report has no Report Day, so the matching tab can't be found." });
+      return null;
+    }
+    let excel;
+    try {
+      excel = parseDailyReportWorkbook(
+        Buffer.from(p.attachment_base64, "base64"),
+        Number(report.report_day),
+      );
+    } catch (e: any) {
+      res.status(422).json({
+        message: e instanceof ExcelParseError
+          ? e.message
+          : `Could not read the workbook: ${e?.message ?? e}`,
+      });
+      return null;
+    }
+    const next: Record<string, any> = {
+      attachment_name: p.attachment_name,
+      attachment_base64: p.attachment_base64,
+      attachment_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      attachment_size: Buffer.from(p.attachment_base64, "base64").length,
+      source_sheet: excel.source_sheet,
+      report_date: excel.report_date,
+      well_name: excel.well_name,
+      well_context: excel.well_context,
+      kpis: excel.kpis,
+      kpi_cell_map: excel.kpi_cell_map,
+      summary: excel.summary,
+    };
+    const changes = describeReportChanges(report, next);
+    const missingFields = (excel.missing_fields || []).map((f) =>
+      f === "Report date (D3)" && excel.report_date
+        ? `Report date (D3) — filled in as ${excel.report_date} from the prior day`
+        : f,
+    );
+    const warnings: string[] = [];
+    const norm = (v: any) => String(v ?? "").trim().toUpperCase();
+    if (report.well_name && excel.well_name && norm(report.well_name) !== norm(excel.well_name))
+      warnings.push(
+        `The well name in this file (${excel.well_name}) is different from the report (${report.well_name}). Make sure it's the right workbook.`,
+      );
+    if (excel.incomplete)
+      warnings.push(`${excel.source_sheet} in this file doesn't look filled in yet.`);
+    return { client, report, next, changes, missingFields, warnings, excel };
+  }
+
+  app.post(
+    "/api/daily-reports/:id/replace-workbook/preview",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const prep = await prepareReplaceWorkbook(req, res);
+      if (!prep) return;
+      res.json({
+        source_sheet: prep.excel.source_sheet,
+        report_date: prep.excel.report_date,
+        well_name: prep.excel.well_name,
+        changes: prep.changes,
+        missing_fields: prep.missingFields,
+        warnings: prep.warnings,
+      });
+    },
+  );
+
+  app.post(
+    "/api/daily-reports/:id/replace-workbook",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const prep = await prepareReplaceWorkbook(req, res);
+      if (!prep) return;
+      const { client, report, next, changes, missingFields } = prep;
+      const actor = req.profile!;
+      const analysis = correctedAnalysis(
+        report,
+        missingFields.length ? { missing_fields: missingFields } : {},
+        changes,
+        null,
+      );
+      // Keep a held correction link if one is waiting on this report.
+      const pend = (report.analysis as any)?.pending_correction_id;
+      if (pend) analysis.pending_correction_id = pend;
+      analysis.workbook_replaced_by = actor.id;
+      analysis.workbook_replaced_by_name = actor.name;
+      analysis.workbook_replaced_at = new Date().toISOString();
+      const status = report.status === "Needs job match" ? "Needs job match" : "Pending Review";
+      const { data: upd, error } = await client
+        .from("daily_reports")
+        .update({
+          ...next,
+          status,
+          reviewed_by: null,
+          reviewed_by_name: null,
+          reviewed_at: null,
+          change_notes: null,
+          email_out_status: null,
+          email_out_at: null,
+          analysis,
+        })
+        .eq("id", report.id)
+        .select()
+        .single();
+      if (error) return res.status(400).json({ message: error.message });
+      const hoursChanged = changes.some((x) => x.startsWith("Run hours"));
+      await client.from("daily_report_events").insert({
+        report_id: report.id,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        actor_role: actor.role,
+        action: "workbook_replaced",
+        detail:
+          `Uploaded "${next.attachment_name}" (${next.source_sheet}) to replace "${report.attachment_name ?? "the original workbook"}". ` +
+          (changes.length ? `Changes: ${changes.join("; ")}. ` : "No values changed. ") +
+          (report.status === "Signed off" ? "The sign-off was cleared; " : "") +
+          `${status === "Pending Review" ? "Back to Pending Review." : "Still needs a job match."}` +
+          (report.run_hours_applied && hoursChanged
+            ? " Run hours from the original sign-off were already added to the centrifuges and were not changed; adjust the asset's run hours by hand if needed."
+            : ""),
+      });
+      if (missingFields.length) {
+        await client.from("daily_report_events").insert({
+          report_id: report.id,
+          actor_name: "System",
+          actor_role: "field",
+          action: "needs_review",
+          detail: `${next.source_sheet} in "${next.attachment_name}" is missing critical data: ${missingFields.join("; ")}. Check with the crew before signing off.`,
+        });
+      }
+      res.json(upd);
     },
   );
 

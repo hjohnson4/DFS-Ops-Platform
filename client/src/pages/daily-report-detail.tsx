@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import LockedKpiTable from "@/components/LockedKpiTable";
+import { ReplaceWorkbookDialog } from "@/components/ReplaceWorkbookDialog";
 import {
   ArrowLeft,
   Building2,
@@ -430,7 +431,7 @@ export default function DailyReportDetailPage() {
       {Number((report.analysis as any)?.corrections) > 0 && report.status !== "Correction pending" && (
         <div className="mt-3 text-xs text-muted-foreground" data-testid="text-corrected-count">
           Corrected {Number((report.analysis as any).corrections)}{" "}
-          {Number((report.analysis as any).corrections) === 1 ? "time" : "times"} by a re-sent
+          {Number((report.analysis as any).corrections) === 1 ? "time" : "times"} with a newer
           workbook. See Activity for what changed.
         </div>
       )}
@@ -626,6 +627,15 @@ export default function DailyReportDetailPage() {
                     Original file not stored for this report.
                   </span>
                 )}
+                {canReview &&
+                  report.status !== "Correction pending" &&
+                  (report.status !== "Signed off" || canApplyCorrection) && (
+                    <ReplaceWorkbookDialog
+                      reportId={report.id}
+                      reportDay={report.report_day ?? null}
+                      signedOff={report.status === "Signed off"}
+                    />
+                  )}
               </div>
             </div>
           )}
@@ -887,6 +897,7 @@ function describe(action: string): string {
     case "correction_received": return "sent a corrected workbook";
     case "correction_applied": return "applied the correction";
     case "correction_discarded": return "discarded the correction";
+    case "workbook_replaced": return "replaced the workbook";
     case "needs_review": return "flagged missing data";
     case "email_sent": return "sent an email";
     default: return action;
