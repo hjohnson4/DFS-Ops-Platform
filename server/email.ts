@@ -122,6 +122,7 @@ export async function sendDailyReportChanges(ctx: {
   reviewerName: string;
   changeNotes: string;
   reportDate?: string | null;
+  sheet?: string | null;
 }): Promise<boolean> {
   const who = ctx.senderName ? `${ctx.senderName}` : "there";
   const re = ctx.subject ? `Re: ${ctx.subject}` : "Re: your daily report";
@@ -130,7 +131,7 @@ export async function sendDailyReportChanges(ctx: {
     <p>Hi ${who},</p>
     <p><b>${ctx.reviewerName}</b> reviewed your daily report${dateLine} and is requesting some changes:</p>
     <blockquote style="border-left:3px solid #ccc;margin:0;padding:8px 12px;color:#333;white-space:pre-wrap;">${ctx.changeNotes}</blockquote>
-    <p>Please update the report and resend. Thanks.</p>
+    <p>Please fix ${ctx.sheet ? `the <b>${ctx.sheet}</b> tab in ` : ""}the same workbook and email it again the way you normally send it (to dfsdailyreports@gmail.com). DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix. Thanks.</p>
     <p style="color:#888;font-size:12px;">Sent by DFS Ops</p>`;
   return deliver(ctx.to, `Changes requested — ${re}`, html);
 }

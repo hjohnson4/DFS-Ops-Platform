@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useRoute, Link } from "wouter";
+import { useRoute, Link, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -57,7 +57,23 @@ const STATUS_TONE: Record<DailyReportStatus, string> = {
   "Pending Review": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   "Signed off": "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
   "Changes requested": "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+  "Correction pending": "bg-violet-500/15 text-violet-700 dark:text-violet-400",
 };
+
+// Fields a reviewer can tick when asking for changes on an emailed report.
+// The cell is shown so the crew knows exactly where to look in the workbook.
+const CHANGE_FIELD_OPTIONS = [
+  "Report date (D3)",
+  "Job number (V8)",
+  "Well name (V9)",
+  "Rig activity (AI8)",
+  "Measured depth (AI9)",
+  "Mud weight (G14)",
+  "Run hours (AA37 / AM37)",
+  "Day rate (AL57)",
+  "Notes / comments (B57)",
+  "Crew or equipment section",
+];
 
 function fmtDateTime(d: string | null) {
   if (!d) return "—";
@@ -72,6 +88,8 @@ export default function DailyReportDetailPage() {
   const { toast } = useToast();
   const canReview =
     profile?.role === "admin" || profile?.role === "area" || profile?.role === "super";
+  const canApplyCorrection = profile?.role === "admin" || profile?.role === "area";
+  const [, navigate] = useLocation();
 
   const { data: report, isLoading, error } = useQuery<DetailResponse>({
     queryKey: ["/api/daily-reports", id],
@@ -80,6 +98,9 @@ export default function DailyReportDetailPage() {
 
   const [showChanges, setShowChanges] = useState(false);
   const [changeNotes, setChangeNotes] = useState("");
+  const [changeFields, setChangeFields] = useState<string[]>([]);
+  const toggleField = (f: string) =>
+    setChangeFields((cur) => (cur.includes(f) ? cur.filter((x) => x !== f) : [...cur, f]));
   const [assignJobId, setAssignJobId] = useState("");
   const [docBusy, setDocBusy] = useState<"view" | "download" | null>(null);
 
@@ -178,6 +199,7 @@ export default function DailyReportDetailPage() {
     mutationFn: async (body: {
       action: "sign_off" | "request_changes";
       change_notes?: string;
+      change_fields?: string[];
       run_hour_allocations?: { asset_id: string; hours: number }[];
     }) => {
       const url = report?.source === "field"
@@ -201,9 +223,35 @@ export default function DailyReportDetailPage() {
       });
       setShowChanges(false);
       setChangeNotes("");
+      setChangeFields([]);
     },
     onError: (e: any) =>
       toast({ title: "Could not submit review", description: e.message, variant: "destructive" }),
+  });
+
+  // Corrections to a signed-off report (Admin / Area Manager).
+  const correction = useMutation({
+    mutationFn: async (kind: "apply" | "discard") => {
+      const res = await apiRequest(
+        "POST",
+        `/api/daily-reports/${id}/${kind === "apply" ? "apply-correction" : "discard-correction"}`,
+      );
+      return res.json();
+    },
+    onSuccess: (data: any, kind) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+      toast({
+        title: kind === "apply" ? "Correction applied" : "Correction discarded",
+        description:
+          kind === "apply"
+            ? "The original report now has the corrected values and is back in Pending Review."
+            : "The signed-off report was kept as it was.",
+      });
+      const target = kind === "apply" ? data?.id : data?.original_id;
+      if (target) navigate(`/daily-reports/${target}`);
+    },
+    onError: (e: any) =>
+      toast({ title: "Could not update the correction", description: e.message, variant: "destructive" }),
   });
 
   if (isLoading) {
@@ -301,6 +349,91 @@ export default function DailyReportDetailPage() {
             </div>
           </div>
         )}
+
+      {/* Corrected re-send waiting for approval (original was signed off) */}
+      {report.status === "Correction pending" && (
+        <div
+          className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-4 text-sm"
+          data-testid="banner-correction-pending"
+        >
+          <div className="font-medium flex items-center gap-1.5">
+            <FileWarning className="h-4 w-4" /> Corrected workbook for a signed-off report
+          </div>
+          <p className="mt-1 text-muted-foreground">
+            The crew re-sent this day after it was already signed off. Nothing
+            has changed on the original yet. Applying it copies these values
+            onto the original report and sends it back to Pending Review for a
+            new sign-off.
+          </p>
+          {Array.isArray((report.analysis as any)?.correction_changes) &&
+            (report.analysis as any).correction_changes.length > 0 && (
+              <ul className="mt-2 list-disc pl-5 space-y-0.5">
+                {(report.analysis as any).correction_changes.map((c: string) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            )}
+          {Array.isArray((report.analysis as any)?.correction_changes) &&
+            (report.analysis as any).correction_changes.length === 0 && (
+              <p className="mt-2">No values are different from the signed-off report.</p>
+            )}
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {(report.analysis as any)?.correction_of && (
+              <Link href={`/daily-reports/${(report.analysis as any).correction_of}`}>
+                <a className="text-primary hover:underline" data-testid="link-original-report">
+                  View the signed-off report
+                </a>
+              </Link>
+            )}
+            {canApplyCorrection ? (
+              <>
+                <Button
+                  size="sm"
+                  onClick={() => correction.mutate("apply")}
+                  disabled={correction.isPending}
+                  data-testid="button-apply-correction"
+                >
+                  {correction.isPending && correction.variables === "apply" && (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  )}
+                  Apply correction
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => correction.mutate("discard")}
+                  disabled={correction.isPending}
+                  data-testid="button-discard-correction"
+                >
+                  Discard
+                </Button>
+              </>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                An Admin or Area Manager can apply or discard this correction.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+      {(report.analysis as any)?.pending_correction_id && report.status === "Signed off" && (
+        <div className="mt-4 rounded-lg border border-violet-500/30 bg-violet-500/10 p-3 text-sm flex flex-wrap items-center gap-2">
+          <FileWarning className="h-4 w-4" />
+          <span>A corrected workbook for this day is waiting for approval.</span>
+          <Link href={`/daily-reports/${(report.analysis as any).pending_correction_id}`}>
+            <a className="text-primary hover:underline" data-testid="link-pending-correction">
+              Review the correction
+            </a>
+          </Link>
+        </div>
+      )}
+      {Number((report.analysis as any)?.corrections) > 0 && report.status !== "Correction pending" && (
+        <div className="mt-3 text-xs text-muted-foreground" data-testid="text-corrected-count">
+          Corrected {Number((report.analysis as any).corrections)}{" "}
+          {Number((report.analysis as any).corrections) === 1 ? "time" : "times"} by a re-sent
+          workbook. See Activity for what changed.
+        </div>
+      )}
 
       {/* Linkage chips */}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
@@ -650,6 +783,27 @@ export default function DailyReportDetailPage() {
             </>
           ) : (
             <div className="space-y-3">
+              {!isField && (
+                <div>
+                  <div className="text-xs text-muted-foreground mb-1.5">
+                    What needs fixing? Tick everything that applies.
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1.5" data-testid="list-change-fields">
+                    {CHANGE_FIELD_OPTIONS.map((f) => (
+                      <label key={f} className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-[hsl(var(--primary))]"
+                          checked={changeFields.includes(f)}
+                          onChange={() => toggleField(f)}
+                          data-testid={`check-change-${f.split(" (")[0].toLowerCase().replace(/[^a-z]+/g, "-")}`}
+                        />
+                        {f}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div>
                 <label className="text-xs text-muted-foreground mb-1 block">
                   {isField
@@ -659,21 +813,34 @@ export default function DailyReportDetailPage() {
                 <Textarea
                   value={changeNotes}
                   onChange={(e) => setChangeNotes(e.target.value)}
-                  placeholder="Describe what needs to be corrected or added…"
+                  placeholder={
+                    isField
+                      ? "Describe what needs to be corrected or added…"
+                      : "Optional: add details, e.g. depth should be 7,950 ft"
+                  }
                   rows={5}
                   data-testid="input-change-notes"
                 />
               </div>
               <div className="flex gap-2">
                 <Button
-                  onClick={() => review.mutate({ action: "request_changes", change_notes: changeNotes })}
-                  disabled={review.isPending || !changeNotes.trim()}
+                  onClick={() =>
+                    review.mutate({
+                      action: "request_changes",
+                      change_notes: changeNotes,
+                      ...(isField ? {} : { change_fields: changeFields }),
+                    })
+                  }
+                  disabled={
+                    review.isPending ||
+                    (!changeNotes.trim() && (isField || changeFields.length === 0))
+                  }
                   data-testid="button-send-changes"
                 >
                   {review.isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
                   {isField ? "Request changes" : "Send changes to sender"}
                 </Button>
-                <Button variant="ghost" onClick={() => setShowChanges(false)} disabled={review.isPending}>
+                <Button variant="ghost" onClick={() => { setShowChanges(false); setChangeFields([]); }} disabled={review.isPending}>
                   Cancel
                 </Button>
               </div>
@@ -716,6 +883,11 @@ function describe(action: string): string {
     case "assigned": return "assigned this report to a job";
     case "signed_off": return "signed off the report";
     case "changes_requested": return "requested changes";
+    case "corrected": return "re-sent a corrected workbook";
+    case "correction_received": return "sent a corrected workbook";
+    case "correction_applied": return "applied the correction";
+    case "correction_discarded": return "discarded the correction";
+    case "needs_review": return "flagged missing data";
     case "email_sent": return "sent an email";
     default: return action;
   }

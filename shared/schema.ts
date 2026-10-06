@@ -671,6 +671,9 @@ export const DAILY_REPORT_STATUS = [
   "Pending Review",
   "Signed off",
   "Changes requested",
+  // A corrected workbook for a day that was already signed off; waiting for
+  // an Admin / Area Manager to apply it onto the original report.
+  "Correction pending",
 ] as const;
 export type DailyReportStatus = (typeof DAILY_REPORT_STATUS)[number];
 
@@ -1374,6 +1377,9 @@ export const reviewDailyReportSchema = z
   .object({
     action: z.enum(["sign_off", "request_changes"]),
     change_notes: z.string().nullable().optional(),
+    // Fields/cells the reviewer ticked as needing a fix (e.g. "Measured
+    // depth (AI9)"). Listed first in the note sent back to the crew.
+    change_fields: z.array(z.string().max(120)).max(30).optional(),
     // Optional per-centrifuge split of the day's run hours, supplied only when
     // signing off a report whose job has 2+ centrifuges. When omitted, the
     // server auto-applies the full day's hours to a single centrifuge (or none).
@@ -1387,8 +1393,11 @@ export const reviewDailyReportSchema = z
       .optional(),
   })
   .refine(
-    (d) => d.action !== "request_changes" || !!(d.change_notes && d.change_notes.trim()),
-    { message: "Suggested changes are required when requesting changes.", path: ["change_notes"] },
+    (d) =>
+      d.action !== "request_changes" ||
+      !!(d.change_notes && d.change_notes.trim()) ||
+      !!(d.change_fields && d.change_fields.length),
+    { message: "Tick what needs fixing or type a note when requesting changes.", path: ["change_notes"] },
   );
 export type ReviewDailyReportInput = z.infer<typeof reviewDailyReportSchema>;
 

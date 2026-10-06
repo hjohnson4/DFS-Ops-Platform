@@ -169,6 +169,172 @@ async function resolveJobForWell(
   return empty;
 }
 
+// ---- Corrected re-send helpers (daily reports) ------------------------------
+// Data columns that come from the workbook / email. A correction replaces
+// exactly these on the original report; ids, job links and history stay.
+const CORRECTION_COLUMNS = [
+  "email_message_id",
+  "sender_email",
+  "sender_name",
+  "subject",
+  "received_at",
+  "attachment_name",
+  "attachment_base64",
+  "attachment_mime",
+  "attachment_size",
+  "source_sheet",
+  "report_day",
+  "report_date",
+  "well_name",
+  "well_context",
+  "kpis",
+  "kpi_cell_map",
+  "summary",
+] as const;
+
+function correctionFields(row: Record<string, any>): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const k of CORRECTION_COLUMNS) if (k in row) out[k] = row[k];
+  return out;
+}
+
+// The emailed report already on file for the same job + well + Report Day.
+async function findPriorSameDay(
+  client: any,
+  job_id: string | null,
+  report_day: number | null | undefined,
+  well_name: string | null | undefined,
+): Promise<any | null> {
+  if (!job_id || report_day == null || !well_name) return null;
+  const { data } = await client
+    .from("daily_reports")
+    .select(
+      "id, status, email_message_id, received_at, report_date, report_day, well_name, kpis, well_context, analysis, run_hours_applied, attachment_name, area, job_id",
+    )
+    .eq("job_id", job_id)
+    .eq("report_day", report_day)
+    .eq("source", "email")
+    .ilike("well_name", well_name.trim())
+    .order("received_at", { ascending: false })
+    .limit(1);
+  return data && data.length ? data[0] : null;
+}
+
+// Gmail message ids carry the send time in their upper bits (id >> 20 is the
+// time in ms), which is more reliable than when the intake check happened to
+// pick the email up.
+function gmailIdMs(id: string | null | undefined): number | null {
+  if (!id || !/^[0-9a-f]{15,16}$/i.test(id)) return null;
+  try {
+    const ms = Number(BigInt("0x" + id) >> BigInt(20));
+    return ms > 1.4e12 && ms < 4e12 ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
+// True only when we can tell the incoming email is OLDER than the report on
+// file. When the order can't be determined, treat it as newer (surface it).
+function isOlderEmail(
+  incomingId: string,
+  incomingAt: string | null | undefined,
+  priorId: string | null | undefined,
+  priorAt: string | null | undefined,
+): boolean {
+  const a = gmailIdMs(incomingId);
+  const b = gmailIdMs(priorId);
+  if (a != null && b != null) return a < b;
+  if (a != null && b == null) return false;
+  const ta = incomingAt ? Date.parse(incomingAt) : NaN;
+  const tb = priorAt ? Date.parse(priorAt) : NaN;
+  if (Number.isFinite(ta) && Number.isFinite(tb)) return ta < tb;
+  return false;
+}
+
+async function addSupersededEmail(client: any, report: any, emailId: string) {
+  const analysis = { ...((report.analysis as any) || {}) };
+  const list: string[] = Array.isArray(analysis.superseded_email_ids)
+    ? analysis.superseded_email_ids
+    : [];
+  if (!list.includes(emailId)) list.push(emailId);
+  analysis.superseded_email_ids = list;
+  await client.from("daily_reports").update({ analysis }).eq("id", report.id);
+}
+
+// New analysis for a report that was just replaced by a correction: current
+// missing-field alerts, plus history of replaced email ids and what changed.
+function correctedAnalysis(
+  prior: any,
+  incomingAnalysis: any,
+  changes: string[],
+  replacedEmailId: string | null,
+): Record<string, any> {
+  const old = (prior.analysis as any) || {};
+  const ids: string[] = Array.isArray(old.superseded_email_ids)
+    ? [...old.superseded_email_ids]
+    : [];
+  if (replacedEmailId && !ids.includes(replacedEmailId)) ids.push(replacedEmailId);
+  const out: Record<string, any> = {
+    ...(incomingAnalysis || {}),
+    superseded_email_ids: ids,
+    corrections: (Number(old.corrections) || 0) + 1,
+    last_correction_changes: changes,
+  };
+  delete out.correction_of;
+  delete out.correction_job_id;
+  delete out.correction_changes;
+  return out;
+}
+
+const CHANGE_LABELS: Record<string, string> = {
+  report_date: "Report date (D3)",
+  well_name: "Well name (V9)",
+  rig_activity: "Rig activity (AI8)",
+  meas_depth_ft: "Measured depth (AI9)",
+  supervisor: "Supervisor (AI11)",
+  remarks: "Notes (B57)",
+  day_rate: "Day rate (AL57)",
+  accrued_current_well: "Accrued, current well (AS57)",
+  mud_weight_ppg: "Mud weight (G14)",
+  daily_run_hours: "Run hours, centrifuge 1 (AA37)",
+  daily_run_hours_cent2: "Run hours, centrifuge 2 (AM37)",
+};
+const SKIP_CHANGE_KEYS = new Set(["daily_run_hours_cent1", "total_run_hours_cent1"]);
+
+function fmtChangeVal(v: any): string {
+  if (v == null || v === "") return "—";
+  const s = typeof v === "number" ? v.toLocaleString("en-US") : String(v);
+  return s.length > 60 ? s.slice(0, 57) + "…" : s;
+}
+
+// Plain-English list of what changed between the report on file and the
+// corrected workbook (top-level date/well, well context, and every KPI).
+function describeReportChanges(prior: any, next: any): string[] {
+  const out: string[] = [];
+  const cmp = (key: string, a: any, b: any, cellMap?: any) => {
+    if (SKIP_CHANGE_KEYS.has(key)) return;
+    const na = a == null || a === "" ? null : a;
+    const nb = b == null || b === "" ? null : b;
+    if (JSON.stringify(na) === JSON.stringify(nb)) return;
+    const cell = cellMap?.[key]?.cell;
+    const label =
+      CHANGE_LABELS[key] ||
+      `${key.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase())}${cell ? ` (${cell})` : ""}`;
+    out.push(`${label}: ${fmtChangeVal(na)} → ${fmtChangeVal(nb)}`);
+  };
+  cmp("report_date", prior.report_date, next.report_date);
+  cmp("well_name", prior.well_name, next.well_name);
+  const pc = prior.well_context || {};
+  const nc = next.well_context || {};
+  for (const k of Array.from(new Set([...Object.keys(pc), ...Object.keys(nc)])))
+    cmp(k, pc[k], nc[k]);
+  const pk = prior.kpis || {};
+  const nk = next.kpis || {};
+  for (const k of Array.from(new Set([...Object.keys(pk), ...Object.keys(nk)])))
+    cmp(k, pk[k], nk[k], next.kpi_cell_map);
+  return out;
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
@@ -513,7 +679,7 @@ export async function registerRoutes(
           .select(
             "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis",
           )
-          .in("status", ["Pending Review", "Needs job match"]);
+          .in("status", ["Pending Review", "Needs job match", "Correction pending"]);
         if (scope) dq = dq.eq("area", scope);
         const { data: drData, error: dErr } = await dq;
         if (dErr) console.error("[notifications] daily_reports", dErr.message);
@@ -538,7 +704,19 @@ export async function registerRoutes(
               ts: r.received_at || r.report_date || null,
             });
           }
-          if (r.status === "Needs job match") {
+          if (r.status === "Correction pending") {
+            // A corrected workbook arrived for a day that was already signed
+            // off. An Admin or Area Manager has to apply (or discard) it.
+            items.push({
+              id: `correction-${r.id}`,
+              type: "new_report",
+              severity: "warning",
+              title: `Corrected report waiting for approval`,
+              detail: `${r.well_name || who}${r.report_day != null ? ` · Day ${r.report_day}` : ""}${r.area ? ` · ${r.area}` : ""}`,
+              href: `/daily-reports/${r.id}`,
+              ts: r.received_at || r.report_date || null,
+            });
+          } else if (r.status === "Needs job match") {
             items.push({
               id: `newrep-${r.id}`,
               type: "new_report",
@@ -684,6 +862,10 @@ export async function registerRoutes(
         matched: "Matched to job",
         signed_off: "Signed off",
         changes_requested: "Changes requested",
+        corrected: "Replaced with corrected workbook",
+        correction_received: "Corrected workbook received",
+        correction_applied: "Correction applied",
+        correction_discarded: "Correction discarded",
         reopened: "Reopened",
         submitted: "Submitted",
         received: "Received",
@@ -3920,6 +4102,18 @@ export async function registerRoutes(
       .eq("email_message_id", p.email_message_id)
       .maybeSingle();
     if (existing) return res.status(200).json({ ...existing, deduped: true });
+    // Also dedupe emails whose workbook was already replaced by a later
+    // correction (or discarded), so re-posting an old email never brings the
+    // old values back.
+    const { data: supersededBy } = await client
+      .from("daily_reports")
+      .select("id, status, report_day, well_name")
+      .contains("analysis", { superseded_email_ids: [p.email_message_id] })
+      .limit(1);
+    if (supersededBy && supersededBy.length)
+      return res
+        .status(200)
+        .json({ ...supersededBy[0], deduped: true, superseded: true });
 
     // Parse the emailed Excel and read every value straight from the
     // "Report Day N" sheet. Nothing is interpreted from the email body.
@@ -3990,6 +4184,133 @@ export async function registerRoutes(
       job_id,
       status,
     };
+
+    // ---- Corrected re-sends ------------------------------------------------
+    // If this job already has an emailed report for the same well + Report
+    // Day, this workbook is a corrected re-send. Instead of adding a
+    // duplicate:
+    //   - older than what we have  -> ignore it (remember its email id)
+    //   - original Signed off       -> hold as "Correction pending" for an
+    //                                  Admin / Area Manager to apply
+    //   - otherwise (same date, or changes were requested) -> replace the
+    //                                  original in place, back to Pending Review
+    // A same-day match with a DIFFERENT date that nobody asked to change is
+    // imported normally (could be a mis-numbered tab; keep it visible).
+    const prior = await findPriorSameDay(client, job_id, excel.report_day, excel.well_name);
+    if (prior) {
+      const incomingAt = row.received_at as string;
+      if (isOlderEmail(p.email_message_id, incomingAt, prior.email_message_id, prior.received_at)) {
+        await addSupersededEmail(client, prior, p.email_message_id);
+        return res.status(200).json({ id: prior.id, deduped: true, superseded: true });
+      }
+      const changes = describeReportChanges(prior, row);
+      const who = p.sender_name || p.sender_email;
+      const sameDate = (prior.report_date || null) === (excel.report_date || null);
+
+      if (prior.status === "Signed off") {
+        // Only one pending correction per report: a newer re-send replaces an
+        // older one that nobody has applied yet.
+        const prevPendingId = (prior.analysis as any)?.pending_correction_id;
+        if (prevPendingId) {
+          const { data: prev } = await client
+            .from("daily_reports")
+            .select("id, email_message_id, status")
+            .eq("id", prevPendingId)
+            .maybeSingle();
+          if (prev && prev.status === "Correction pending") {
+            const ids: string[] = Array.isArray((prior.analysis as any)?.superseded_email_ids)
+              ? [...(prior.analysis as any).superseded_email_ids]
+              : [];
+            if (!ids.includes(prev.email_message_id)) ids.push(prev.email_message_id);
+            prior.analysis = { ...(prior.analysis || {}), superseded_email_ids: ids };
+            await client.from("daily_reports").delete().eq("id", prev.id);
+          }
+        }
+        const held: Record<string, any> = {
+          ...row,
+          job_id: null,
+          status: "Correction pending",
+          analysis: {
+            ...(row.analysis || {}),
+            correction_of: prior.id,
+            correction_job_id: job_id,
+            correction_changes: changes,
+          },
+        };
+        const { data: c, error: cErr } = await client
+          .from("daily_reports")
+          .insert(held)
+          .select()
+          .single();
+        if (cErr) return res.status(400).json({ message: cErr.message });
+        await client
+          .from("daily_reports")
+          .update({ analysis: { ...(prior.analysis || {}), pending_correction_id: c.id } })
+          .eq("id", prior.id);
+        const changeText = changes.length ? ` Changes: ${changes.join("; ")}.` : " No values changed.";
+        await client.from("daily_report_events").insert([
+          {
+            report_id: c.id,
+            actor_name: who,
+            actor_role: "field",
+            action: "correction_received",
+            detail: `Corrected workbook "${p.attachment_name}" for ${excel.source_sheet}, which was already signed off. Waiting for an Admin or Area Manager to apply it.${changeText}`,
+          },
+          {
+            report_id: prior.id,
+            actor_name: who,
+            actor_role: "field",
+            action: "correction_received",
+            detail: `A corrected workbook arrived for this signed-off report and is waiting for an Admin or Area Manager to apply it.${changeText}`,
+          },
+        ]);
+        return res.status(201).json({ ...c, correction_pending: true });
+      }
+
+      if (sameDate || prior.status === "Changes requested") {
+        const { data: upd, error: uErr } = await client
+          .from("daily_reports")
+          .update({
+            ...correctionFields(row),
+            status: "Pending Review",
+            reviewed_by: null,
+            reviewed_by_name: null,
+            reviewed_at: null,
+            change_notes: null,
+            email_out_status: null,
+            email_out_at: null,
+            analysis: correctedAnalysis(prior, row.analysis, changes, prior.email_message_id),
+          })
+          .eq("id", prior.id)
+          .select()
+          .single();
+        if (uErr) return res.status(400).json({ message: uErr.message });
+        await client.from("daily_report_events").insert({
+          report_id: prior.id,
+          actor_name: who,
+          actor_role: "field",
+          action: "corrected",
+          detail:
+            `Replaced with corrected workbook "${p.attachment_name}" (${excel.source_sheet})` +
+            (prior.status === "Changes requested" ? " after changes were requested" : "") +
+            `. ${changes.length ? `Changes: ${changes.join("; ")}.` : "No values changed."}` +
+            ` Back to Pending Review.`,
+        });
+        if (missingFields.length) {
+          await client.from("daily_report_events").insert({
+            report_id: prior.id,
+            actor_name: "System",
+            actor_role: "field",
+            action: "needs_review",
+            detail:
+              `${excel.source_sheet} in "${p.attachment_name}" is still missing critical ` +
+              `data: ${missingFields.join("; ")}. Check with the crew before signing off.`,
+          });
+        }
+        return res.status(201).json({ ...upd, corrected: true });
+      }
+    }
+
     const { data, error } = await client
       .from("daily_reports")
       .insert(row)
@@ -4877,14 +5198,25 @@ export async function registerRoutes(
         return res.json(data);
       }
 
-      // request_changes: record notes, queue/send email back to sender
+      // request_changes: record notes, queue/send email back to sender.
+      // The reviewer can tick the exact fields/cells to fix; those are listed
+      // first so the crew knows exactly what to change in the workbook.
+      const fields = (parsed.data.change_fields || []).map((f) => f.trim()).filter(Boolean);
+      const typed = (parsed.data.change_notes || "").trim();
+      const fullNotes = [
+        fields.length ? `Please fix:\n${fields.map((f) => `• ${f}`).join("\n")}` : "",
+        typed,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       const delivered = await sendDailyReportChanges({
         to: report.sender_email,
         senderName: report.sender_name,
         subject: report.subject,
         reviewerName: reviewer.name,
-        changeNotes: parsed.data.change_notes!.trim(),
+        changeNotes: fullNotes,
         reportDate: report.report_date,
+        sheet: report.source_sheet,
       });
       const emailStatus = delivered ? "Sent" : "Pending send";
       const { data, error } = await client
@@ -4894,7 +5226,8 @@ export async function registerRoutes(
           reviewed_by: reviewer.id,
           reviewed_by_name: reviewer.name,
           reviewed_at: now,
-          change_notes: parsed.data.change_notes!.trim(),
+          change_notes: fullNotes,
+          analysis: { ...((report.analysis as any) || {}), requested_fields: fields },
           email_out_status: emailStatus,
           email_out_at: delivered ? now : null,
         })
@@ -4913,6 +5246,145 @@ export async function registerRoutes(
           : `Suggested changes recorded; email queued for ${report.sender_email}`,
       });
       res.json(data);
+    },
+  );
+
+  // ---- Corrections to signed-off reports ----------------------------------
+  // A corrected workbook for a day that was already signed off is held as a
+  // separate "Correction pending" report (not linked to the job, so it never
+  // counts twice). An Admin or Area Manager applies it onto the original, or
+  // discards it.
+  async function loadCorrection(req: Request, res: Response) {
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: c } = await client
+      .from("daily_reports")
+      .select("*")
+      .eq("id", req.params.id)
+      .maybeSingle();
+    const scope = areaScopeOf(req.profile!);
+    if (!c || (scope && c.area !== scope)) {
+      res.status(404).json({ message: "Report not found" });
+      return null;
+    }
+    const originalId = (c.analysis as any)?.correction_of;
+    if (c.status !== "Correction pending" || !originalId) {
+      res.status(400).json({ message: "This report is not a pending correction." });
+      return null;
+    }
+    const { data: orig } = await client
+      .from("daily_reports")
+      .select("*")
+      .eq("id", originalId)
+      .maybeSingle();
+    if (!orig) {
+      res.status(404).json({
+        message: "The original report no longer exists. Discard this correction, or assign it to a job instead.",
+      });
+      return null;
+    }
+    return { client, c, orig };
+  }
+
+  app.post(
+    "/api/daily-reports/:id/apply-correction",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const loaded = await loadCorrection(req, res);
+      if (!loaded) return;
+      const { client, c, orig } = loaded;
+      const actor = req.profile!;
+      const changes: string[] = Array.isArray((c.analysis as any)?.correction_changes)
+        ? (c.analysis as any).correction_changes
+        : describeReportChanges(orig, c);
+      const origEmailId = orig.email_message_id;
+      const newEmailId = c.email_message_id;
+      // Free the correction's email id (unique) before moving it onto the original.
+      const { error: e1 } = await client
+        .from("daily_reports")
+        .update({ email_message_id: `superseded:${c.id}` })
+        .eq("id", c.id);
+      if (e1) return res.status(400).json({ message: e1.message });
+      const analysis = correctedAnalysis(
+        orig,
+        { missing_fields: (c.analysis as any)?.missing_fields },
+        changes,
+        origEmailId,
+      );
+      if (!analysis.missing_fields) delete analysis.missing_fields;
+      delete analysis.pending_correction_id;
+      const fields = correctionFields(c);
+      fields.email_message_id = newEmailId;
+      const { data: upd, error: e2 } = await client
+        .from("daily_reports")
+        .update({
+          ...fields,
+          status: "Pending Review",
+          reviewed_by: null,
+          reviewed_by_name: null,
+          reviewed_at: null,
+          change_notes: null,
+          analysis,
+        })
+        .eq("id", orig.id)
+        .select()
+        .single();
+      if (e2) {
+        // put the correction back the way it was
+        await client.from("daily_reports").update({ email_message_id: newEmailId }).eq("id", c.id);
+        return res.status(400).json({ message: e2.message });
+      }
+      await client.from("daily_reports").delete().eq("id", c.id);
+      const hoursChanged = changes.some((x) => x.startsWith("Run hours"));
+      await client.from("daily_report_events").insert({
+        report_id: orig.id,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        actor_role: actor.role,
+        action: "correction_applied",
+        detail:
+          `Applied corrected workbook "${c.attachment_name}". ` +
+          (changes.length ? `Changes: ${changes.join("; ")}. ` : "No values changed. ") +
+          `Back to Pending Review for a new sign-off.` +
+          (orig.run_hours_applied && hoursChanged
+            ? " Run hours from the original sign-off were already added to the centrifuges and were not changed; adjust the asset's run hours by hand if needed."
+            : ""),
+      });
+      res.json(upd);
+    },
+  );
+
+  app.post(
+    "/api/daily-reports/:id/discard-correction",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const loaded = await loadCorrection(req, res);
+      if (!loaded) return;
+      const { client, c, orig } = loaded;
+      const actor = req.profile!;
+      const analysis = { ...((orig.analysis as any) || {}) };
+      const ids: string[] = Array.isArray(analysis.superseded_email_ids)
+        ? analysis.superseded_email_ids
+        : [];
+      if (!ids.includes(c.email_message_id)) ids.push(c.email_message_id);
+      analysis.superseded_email_ids = ids;
+      delete analysis.pending_correction_id;
+      const { error } = await client
+        .from("daily_reports")
+        .update({ analysis })
+        .eq("id", orig.id);
+      if (error) return res.status(400).json({ message: error.message });
+      await client.from("daily_reports").delete().eq("id", c.id);
+      await client.from("daily_report_events").insert({
+        report_id: orig.id,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        actor_role: actor.role,
+        action: "correction_discarded",
+        detail: `Discarded corrected workbook "${c.attachment_name}". The signed-off report was kept as it was.`,
+      });
+      res.json({ ok: true, original_id: orig.id });
     },
   );
 

@@ -44,6 +44,7 @@ const STATUS_TONE: Record<DailyReportStatus, string> = {
   "Pending Review": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   "Signed off": "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
   "Changes requested": "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+  "Correction pending": "bg-violet-500/15 text-violet-700 dark:text-violet-400",
 };
 
 function fmt(d: string | null) {
