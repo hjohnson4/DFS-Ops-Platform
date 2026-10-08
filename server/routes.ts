@@ -55,8 +55,8 @@ import {
   tracksRunHours,
   RUN_HOUR_CATEGORIES,
   serviceStatusFor,
-  weeklyServiceStatusFor,
-  WEEKLY_SERVICE_DAYS,
+  hoursServiceStatusFor,
+  SERVICE_INTERVAL_HOURS,
   createMaintenanceScheduleSchema,
   updateMaintenanceScheduleSchema,
   uploadMaintenanceFileSchema,
@@ -66,7 +66,111 @@ import {
   createJobServiceSchema,
   updateJobServiceSchema,
 } from "@shared/schema";
-import type { ServiceAssetRow, ServiceDashboard } from "@shared/schema";
+import type {
+  ServiceAssetRow,
+  ServiceDashboard,
+  ServiceAssetDetail,
+  JobHours,
+} from "@shared/schema";
+
+// ---- Run-hours log (asset_run_hours) ---------------------------------------
+// Every time a signed-off daily report adds run hours to a centrifuge we also
+// write one row here (asset, report, job, well, date, hours). The asset's
+// run_hours meter stays as before; this log is what lets the Service module
+// count hours since the last service and total hours per job and per well.
+// Writes are best-effort: if the table hasn't been created yet (SQL not run)
+// sign-off still works exactly as before.
+async function logRunHours(
+  client: any,
+  report: { id: string; job_id: string | null; well_name: string | null; report_date: string | null },
+  alloc: { asset_id: string; add: number }[],
+): Promise<void> {
+  if (!alloc.length) return;
+  try {
+    const rows = alloc.map((a) => ({
+      asset_id: a.asset_id,
+      daily_report_id: report.id,
+      job_id: report.job_id,
+      well_name: report.well_name,
+      report_date: report.report_date,
+      hours: a.add,
+    }));
+    const { error } = await client
+      .from("asset_run_hours")
+      .upsert(rows, { onConflict: "asset_id,daily_report_id" });
+    if (error) console.warn("[run-hours log] skipped:", error.message);
+  } catch (e: any) {
+    console.warn("[run-hours log] skipped:", e?.message ?? e);
+  }
+}
+
+// Read the run-hours log for a set of assets (paged past the 1000-row cap).
+// `ready` is false when the table doesn't exist yet.
+async function loadRunHoursLog(
+  client: any,
+  assetIds: string[],
+): Promise<{ ready: boolean; rows: any[] }> {
+  if (!assetIds.length) return { ready: true, rows: [] };
+  const out: any[] = [];
+  const PAGE = 1000;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client
+      .from("asset_run_hours")
+      .select("asset_id, daily_report_id, job_id, well_name, report_date, hours, job:jobs(job_number)")
+      .in("asset_id", assetIds)
+      .order("report_date", { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) return { ready: false, rows: [] };
+    out.push(...(data || []));
+    if (!data || data.length < PAGE) break;
+  }
+  return { ready: true, rows: out };
+}
+
+// Hours logged on reports dated strictly after `afterDate` (all when null).
+function hoursAfter(rows: any[], afterDate: string | null): number {
+  let t = 0;
+  for (const r of rows) {
+    if (afterDate && r.report_date && String(r.report_date) <= afterDate) continue;
+    if (afterDate && !r.report_date) continue;
+    t += Number(r.hours) || 0;
+  }
+  return Math.round(t * 100) / 100;
+}
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+// Hours-since-service for a set of centrifuges (assets need id, run_hours,
+// run_hours_at_service). Same rule as the Service dashboard.
+async function hoursSinceServiceFor(
+  client: any,
+  assets: any[],
+): Promise<Map<string, { hoursSince: number | null; state: any; lastService: string | null }>> {
+  const ids = assets.map((a) => a.id);
+  const out = new Map<string, { hoursSince: number | null; state: any; lastService: string | null }>();
+  if (!ids.length) return out;
+  const last = new Map<string, string>();
+  const { data: reps } = await client
+    .from("maintenance_reports")
+    .select("asset_id, report_date")
+    .in("asset_id", ids)
+    .order("report_date", { ascending: false });
+  for (const r of (reps || []) as any[])
+    if (!last.has(r.asset_id) && r.report_date) last.set(r.asset_id, String(r.report_date));
+  const log = await loadRunHoursLog(client, ids);
+  for (const a of assets) {
+    const lastService = last.get(a.id) ?? null;
+    let since: number;
+    if (log.ready) since = hoursAfter(log.rows.filter((r) => r.asset_id === a.id), lastService);
+    else {
+      const meter = Number(a.run_hours ?? 0) || 0;
+      const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
+      since = round2(Math.max(0, meter - base));
+    }
+    const st = hoursServiceStatusFor(since, !!lastService);
+    out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
+  }
+  return out;
+}
 
 // Shared secret the scheduled email-analysis task uses to POST reports.
 // Set INGEST_TOKEN at deploy (M7); blank means ingest is closed.
@@ -655,8 +759,10 @@ export async function registerRoutes(
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) console.error("[notifications] assets", aErr.message);
+      const svc = await hoursSinceServiceFor(client, (assetsData || []) as any[]);
       for (const a of (assetsData || []) as any[]) {
-        const { state } = serviceStatusFor(a);
+        const state = svc.get(a.id)?.state;
+        const hrs = svc.get(a.id)?.hoursSince;
         if (state === "Overdue" || state === "Soon") {
           items.push({
             id: `maint-${a.id}`,
@@ -666,7 +772,7 @@ export async function registerRoutes(
               state === "Overdue"
                 ? `${a.tag} is overdue for service`
                 : `${a.tag} is due for service soon`,
-            detail: `${a.category}${a.area ? ` · ${a.area}` : ""}`,
+            detail: `${a.category}${a.area ? ` · ${a.area}` : ""}${hrs != null ? ` · ${hrs} of ${SERVICE_INTERVAL_HOURS} hrs since service` : ""}`,
             href: `/service`,
             ts: null,
           });
@@ -2988,7 +3094,13 @@ export async function registerRoutes(
       }));
       // Derive the run-hours-since-service view for centrifuges so the asset
       // detail can show "X hrs since last service" alongside the raw meter.
-      const { hoursSince, interval, state } = serviceStatusFor(asset as any);
+      let { hoursSince, interval, state } = serviceStatusFor(asset as any);
+      if (tracksRunHours((asset as any).category)) {
+        const svc = (await hoursSinceServiceFor(client, [asset])).get((asset as any).id);
+        hoursSince = svc?.hoursSince ?? null;
+        state = svc?.state ?? state;
+        interval = SERVICE_INTERVAL_HOURS;
+      }
       res.json({
         ...asset,
         run_hours_since_service: hoursSince,
@@ -3188,16 +3300,29 @@ export async function registerRoutes(
       // recent maintenance report. One query, reduced client-side.
       const assetIds = assets.map((a) => a.id);
       const techByAsset = new Map<string, string>();
+      // Last service report date per asset (latest report_date on file).
+      const lastServiceByAsset = new Map<string, string>();
       if (assetIds.length) {
         const { data: reps } = await client
           .from("maintenance_reports")
-          .select("asset_id, filed_at, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)")
+          .select("asset_id, report_date, filed_at, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)")
           .in("asset_id", assetIds)
+          .order("report_date", { ascending: false })
           .order("filed_at", { ascending: false });
         for (const r of (reps || []) as any[]) {
+          if (!lastServiceByAsset.has(r.asset_id) && r.report_date)
+            lastServiceByAsset.set(r.asset_id, String(r.report_date));
           if (!techByAsset.has(r.asset_id) && r.supervisor?.name)
             techByAsset.set(r.asset_id, r.supervisor.name);
         }
+      }
+      // Logged run hours per asset (falls back to the meter if the log table
+      // hasn't been created yet).
+      const log = await loadRunHoursLog(client, assetIds);
+      const logByAsset = new Map<string, any[]>();
+      for (const r of log.rows) {
+        if (!logByAsset.has(r.asset_id)) logByAsset.set(r.asset_id, []);
+        logByAsset.get(r.asset_id)!.push(r);
       }
 
       // Reports filed (scope-aware). Count total + pending sign-off.
@@ -3215,18 +3340,30 @@ export async function registerRoutes(
         (r) => r.status !== "Signed off",
       ).length;
 
-      // Build per-asset service status. Job-assigned centrifuges are serviced
-      // on a fixed weekly (7-day) cadence measured from their last service
-      // report date. Unassigned centrifuges are NOT tracked — their day fields
-      // are null and their state is "Not tracked". Run-hours fields are kept for
-      // reference but no longer drive the service state.
+      // Build per-asset service status from RUN HOURS: hours logged on daily
+      // reports dated after the asset's last service report, against a
+      // 150-hour service interval. Every centrifuge gets a status (an
+      // unassigned unit still carries the hours it came off its last job with);
+      // the due/overdue counts below only count job-assigned units.
       const rows: (ServiceAssetRow & { _deployed: boolean })[] = assets.map(
         (a) => {
-          const { hoursSince } = serviceStatusFor(a);
           const assigned = a.job_id != null;
-          const weekly = assigned
-            ? weeklyServiceStatusFor(a.last_maintained)
-            : { daysSince: null, intervalDays: WEEKLY_SERVICE_DAYS, state: "Not tracked" as const };
+          const lastService = lastServiceByAsset.get(a.id) ?? null;
+          const entries = logByAsset.get(a.id) ?? [];
+          let since: number;
+          if (log.ready) {
+            since = hoursAfter(entries, lastService);
+          } else {
+            // Log not set up yet: use the meter (hours since the meter
+            // baseline captured at the last service, or the whole meter).
+            const meter = Number(a.run_hours ?? 0) || 0;
+            const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
+            since = round2(Math.max(0, meter - base));
+          }
+          const st = hoursServiceStatusFor(since, !!lastService);
+          const currentJobHours = assigned && log.ready
+            ? round2(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0))
+            : null;
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
@@ -3240,12 +3377,15 @@ export async function registerRoutes(
             job_or_well: a.job_or_well,
             technician: techByAsset.get(a.id) ?? null,
             run_hours: a.run_hours,
-            run_hours_since_service: hoursSince,
-            service_hours_interval: a.service_hours_interval ?? 0,
-            days_since_service: weekly.daysSince,
-            service_interval_days: weekly.intervalDays,
+            run_hours_since_service: st.hoursSince,
+            service_hours_interval: SERVICE_INTERVAL_HOURS,
+            hours_since_service: st.hoursSince,
+            service_interval_hours: SERVICE_INTERVAL_HOURS,
+            never_serviced: !lastService,
+            current_job_hours: currentJobHours,
+            last_service_date: lastService,
             last_maintained: a.last_maintained,
-            service_state: weekly.state,
+            service_state: st.state,
             _deployed: deployed,
           };
         },
@@ -3284,6 +3424,125 @@ export async function registerRoutes(
         .map(({ _deployed, ...r }) => r);
 
       const payload: ServiceDashboard = { metrics, centrifuges };
+      res.json(payload);
+    },
+  );
+
+  // ---- Service module: one centrifuge's service history + run hours -------
+  // Service history (date, supervisor, open the report) plus hours since the
+  // last service and run-hour totals per job and per well, from the log.
+  app.get(
+    "/api/service/assets/:id",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client
+        .from("assets")
+        .select("id, tag, category, area, job_id, run_hours, run_hours_at_service, job:jobs(id,job_number)")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      if (!asset || !tracksRunHours((asset as any).category))
+        return res.status(404).json({ message: "Centrifuge not found" });
+      const a: any = asset;
+      const scope = areaScopeOf(req.profile!);
+      if (scope && a.area !== scope)
+        return res.status(404).json({ message: "Centrifuge not found" });
+      if (req.profile!.role === "field") {
+        const fieldJobIds = (await jobScopeOf(req.profile!)) ?? [];
+        if (!a.job_id || !fieldJobIds.includes(a.job_id))
+          return res.status(404).json({ message: "Centrifuge not found" });
+      }
+
+      const { data: reps } = await client
+        .from("maintenance_reports")
+        .select("id, report_date, filed_at, status, score_pass, score_total, flagged_count, checklist, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)")
+        .eq("asset_id", a.id)
+        .order("report_date", { ascending: false })
+        .order("filed_at", { ascending: false });
+      const history = ((reps || []) as any[]).map((r) => ({
+        id: r.id,
+        report_date: r.report_date,
+        filed_at: r.filed_at,
+        supervisor_name: r.supervisor?.name ?? null,
+        status: r.status,
+        score_pass: r.score_pass ?? null,
+        score_total: r.score_total ?? null,
+        flagged_count: r.flagged_count ?? null,
+        has_form: r.checklist != null,
+      }));
+      const lastService = history[0]?.report_date ? String(history[0].report_date) : null;
+
+      const log = await loadRunHoursLog(client, [a.id]);
+      let since: number;
+      if (log.ready) since = hoursAfter(log.rows, lastService);
+      else {
+        const meter = Number(a.run_hours ?? 0) || 0;
+        const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
+        since = round2(Math.max(0, meter - base));
+      }
+      const st = hoursServiceStatusFor(since, !!lastService);
+
+      // Group the log by job, then by well.
+      const jobsMap = new Map<string, JobHours & { _wells: Map<string, any> }>();
+      for (const r of log.rows) {
+        const key = r.job_id ?? "none";
+        if (!jobsMap.has(key))
+          jobsMap.set(key, {
+            job_id: r.job_id ?? null,
+            job_number: r.job?.job_number ?? null,
+            is_current: !!a.job_id && r.job_id === a.job_id,
+            hours: 0,
+            report_days: 0,
+            wells: [],
+            _wells: new Map(),
+          });
+        const j = jobsMap.get(key)!;
+        const h = Number(r.hours) || 0;
+        j.hours += h;
+        j.report_days += 1;
+        const wname = (r.well_name || "").trim() || "(no well name)";
+        const wkey = wname.toUpperCase();
+        if (!j._wells.has(wkey))
+          j._wells.set(wkey, { well_name: wname, hours: 0, report_days: 0, first_date: null, last_date: null });
+        const w = j._wells.get(wkey);
+        w.hours += h;
+        w.report_days += 1;
+        const d = r.report_date ? String(r.report_date) : null;
+        if (d && (!w.first_date || d < w.first_date)) w.first_date = d;
+        if (d && (!w.last_date || d > w.last_date)) w.last_date = d;
+      }
+      const jobs: JobHours[] = Array.from(jobsMap.values())
+        .map(({ _wells, ...j }) => ({
+          ...j,
+          hours: round2(j.hours),
+          wells: Array.from(_wells.values())
+            .map((w) => ({ ...w, hours: round2(w.hours) }))
+            .sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? ""))),
+        }))
+        .sort((x, y) =>
+          Number(y.is_current) - Number(x.is_current) ||
+          String(y.wells[0]?.last_date ?? "").localeCompare(String(x.wells[0]?.last_date ?? "")),
+        );
+      const current = jobs.find((j) => j.is_current);
+      const payload: ServiceAssetDetail = {
+        id: a.id,
+        tag: a.tag,
+        category: a.category,
+        area: a.area,
+        job_id: a.job_id,
+        job_number: a.job?.job_number ?? null,
+        hours_since_service: st.hoursSince,
+        service_interval_hours: SERVICE_INTERVAL_HOURS,
+        service_state: st.state,
+        never_serviced: !lastService,
+        last_service_date: lastService,
+        last_service_supervisor: history[0]?.supervisor_name ?? null,
+        current_job_hours: a.job_id ? (log.ready ? current?.hours ?? 0 : null) : null,
+        total_logged_hours: round2(log.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
+        history,
+        jobs,
+        ledger_ready: log.ready,
+      };
       res.json(payload);
     },
   );
@@ -4608,6 +4867,17 @@ export async function registerRoutes(
             .select()
             .single();
           if (error) throw new Error(error.message);
+          if (willAccrue)
+            await logRunHours(
+              client,
+              {
+                id: inserted.id,
+                job_id,
+                well_name: excel.well_name ?? null,
+                report_date: excel.report_date ?? null,
+              },
+              dayAlloc.map((x) => ({ asset_id: x.id, add: x.add })),
+            );
 
           await client.from("daily_report_events").insert({
             report_id: inserted.id,
@@ -5215,6 +5485,17 @@ export async function registerRoutes(
           }
           if (applied.length > 0)
             runHourDetail = `Run hours applied: ${applied.join(", ")}`;
+          // Log each centrifuge's hours for this report (job + well + date).
+          await logRunHours(
+            client,
+            {
+              id: report.id,
+              job_id: report.job_id,
+              well_name: (report as any).well_name ?? null,
+              report_date: (report as any).report_date ?? null,
+            },
+            allocation.map((x) => ({ asset_id: x.asset_id, add: x.add })),
+          );
         }
 
         const { data, error } = await client

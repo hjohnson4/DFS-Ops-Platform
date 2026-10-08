@@ -563,29 +563,20 @@ var CREWING = ["Manned", "Unmanned"];
 var SCHEDULE_CADENCE = ["run_hours", "calendar_days"];
 var DEFAULT_SERVICE_HOURS_INTERVAL = 250;
 var SERVICE_SOON_FRACTION = 0.1;
-var WEEKLY_SERVICE_DAYS = 7;
-var WEEKLY_SERVICE_SOON_DAYS = 1;
-function daysSince(iso) {
-  if (!iso) return null;
-  const then = new Date(iso).getTime();
-  if (Number.isNaN(then)) return null;
-  const ms = Date.now() - then;
-  return Math.max(0, Math.floor(ms / 864e5));
-}
-function weeklyServiceStatusFor(lastMaintained) {
-  const intervalDays = WEEKLY_SERVICE_DAYS;
-  const d = daysSince(lastMaintained);
-  if (d == null) return { daysSince: null, intervalDays, state: "No baseline" };
-  let state = "OK";
-  if (d >= intervalDays) state = "Overdue";
-  else if (d >= intervalDays - WEEKLY_SERVICE_SOON_DAYS) state = "Soon";
-  return { daysSince: d, intervalDays, state };
-}
 function serviceStatusFor(a) {
   const interval = a.service_hours_interval ?? DEFAULT_SERVICE_HOURS_INTERVAL;
   if (a.run_hours == null || a.run_hours_at_service == null)
     return { hoursSince: null, interval, state: "No baseline" };
   const hoursSince = Math.max(0, a.run_hours - a.run_hours_at_service);
+  let state = "OK";
+  if (hoursSince >= interval) state = "Overdue";
+  else if (hoursSince >= interval * (1 - SERVICE_SOON_FRACTION)) state = "Soon";
+  return { hoursSince, interval, state };
+}
+var SERVICE_INTERVAL_HOURS = 150;
+function hoursServiceStatusFor(hoursSince, hasService, interval = SERVICE_INTERVAL_HOURS) {
+  if (!hasService && hoursSince <= 0)
+    return { hoursSince: null, interval, state: "No baseline" };
   let state = "OK";
   if (hoursSince >= interval) state = "Overdue";
   else if (hoursSince >= interval * (1 - SERVICE_SOON_FRACTION)) state = "Soon";
@@ -1029,6 +1020,68 @@ var updateWorkOrderSchema = z.object({
 });
 
 // server/routes.ts
+async function logRunHours(client, report, alloc) {
+  if (!alloc.length) return;
+  try {
+    const rows = alloc.map((a) => ({
+      asset_id: a.asset_id,
+      daily_report_id: report.id,
+      job_id: report.job_id,
+      well_name: report.well_name,
+      report_date: report.report_date,
+      hours: a.add
+    }));
+    const { error } = await client.from("asset_run_hours").upsert(rows, { onConflict: "asset_id,daily_report_id" });
+    if (error) console.warn("[run-hours log] skipped:", error.message);
+  } catch (e) {
+    console.warn("[run-hours log] skipped:", e?.message ?? e);
+  }
+}
+async function loadRunHoursLog(client, assetIds) {
+  if (!assetIds.length) return { ready: true, rows: [] };
+  const out = [];
+  const PAGE = 1e3;
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await client.from("asset_run_hours").select("asset_id, daily_report_id, job_id, well_name, report_date, hours, job:jobs(job_number)").in("asset_id", assetIds).order("report_date", { ascending: true }).range(from, from + PAGE - 1);
+    if (error) return { ready: false, rows: [] };
+    out.push(...data || []);
+    if (!data || data.length < PAGE) break;
+  }
+  return { ready: true, rows: out };
+}
+function hoursAfter(rows, afterDate) {
+  let t = 0;
+  for (const r of rows) {
+    if (afterDate && r.report_date && String(r.report_date) <= afterDate) continue;
+    if (afterDate && !r.report_date) continue;
+    t += Number(r.hours) || 0;
+  }
+  return Math.round(t * 100) / 100;
+}
+var round2 = (n) => Math.round(n * 100) / 100;
+async function hoursSinceServiceFor(client, assets) {
+  const ids = assets.map((a) => a.id);
+  const out = /* @__PURE__ */ new Map();
+  if (!ids.length) return out;
+  const last = /* @__PURE__ */ new Map();
+  const { data: reps } = await client.from("maintenance_reports").select("asset_id, report_date").in("asset_id", ids).order("report_date", { ascending: false });
+  for (const r of reps || [])
+    if (!last.has(r.asset_id) && r.report_date) last.set(r.asset_id, String(r.report_date));
+  const log2 = await loadRunHoursLog(client, ids);
+  for (const a of assets) {
+    const lastService = last.get(a.id) ?? null;
+    let since;
+    if (log2.ready) since = hoursAfter(log2.rows.filter((r) => r.asset_id === a.id), lastService);
+    else {
+      const meter = Number(a.run_hours ?? 0) || 0;
+      const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
+      since = round2(Math.max(0, meter - base));
+    }
+    const st = hoursServiceStatusFor(since, !!lastService);
+    out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
+  }
+  return out;
+}
 var INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 function normJobId(v) {
   return (v || "").toUpperCase().replace(/[\s-]+/g, " ").trim();
@@ -1377,15 +1430,17 @@ async function registerRoutes(httpServer, app) {
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) console.error("[notifications] assets", aErr.message);
+      const svc = await hoursSinceServiceFor(client, assetsData || []);
       for (const a of assetsData || []) {
-        const { state } = serviceStatusFor(a);
+        const state = svc.get(a.id)?.state;
+        const hrs = svc.get(a.id)?.hoursSince;
         if (state === "Overdue" || state === "Soon") {
           items.push({
             id: `maint-${a.id}`,
             type: "maintenance_due",
             severity: state === "Overdue" ? "warning" : "info",
             title: state === "Overdue" ? `${a.tag} is overdue for service` : `${a.tag} is due for service soon`,
-            detail: `${a.category}${a.area ? ` \xB7 ${a.area}` : ""}`,
+            detail: `${a.category}${a.area ? ` \xB7 ${a.area}` : ""}${hrs != null ? ` \xB7 ${hrs} of ${SERVICE_INTERVAL_HOURS} hrs since service` : ""}`,
             href: `/service`,
             ts: null
           });
@@ -2983,7 +3038,13 @@ async function registerRoutes(httpServer, app) {
         notes: r.notes,
         supervisor_name: r.supervisor?.name ?? null
       }));
-      const { hoursSince, interval, state } = serviceStatusFor(asset);
+      let { hoursSince, interval, state } = serviceStatusFor(asset);
+      if (tracksRunHours(asset.category)) {
+        const svc = (await hoursSinceServiceFor(client, [asset])).get(asset.id);
+        hoursSince = svc?.hoursSince ?? null;
+        state = svc?.state ?? state;
+        interval = SERVICE_INTERVAL_HOURS;
+      }
       res.json({
         ...asset,
         run_hours_since_service: hoursSince,
@@ -3090,12 +3151,21 @@ async function registerRoutes(httpServer, app) {
       );
       const assetIds = assets.map((a) => a.id);
       const techByAsset = /* @__PURE__ */ new Map();
+      const lastServiceByAsset = /* @__PURE__ */ new Map();
       if (assetIds.length) {
-        const { data: reps } = await client.from("maintenance_reports").select("asset_id, filed_at, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").in("asset_id", assetIds).order("filed_at", { ascending: false });
+        const { data: reps } = await client.from("maintenance_reports").select("asset_id, report_date, filed_at, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").in("asset_id", assetIds).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
         for (const r of reps || []) {
+          if (!lastServiceByAsset.has(r.asset_id) && r.report_date)
+            lastServiceByAsset.set(r.asset_id, String(r.report_date));
           if (!techByAsset.has(r.asset_id) && r.supervisor?.name)
             techByAsset.set(r.asset_id, r.supervisor.name);
         }
+      }
+      const log2 = await loadRunHoursLog(client, assetIds);
+      const logByAsset = /* @__PURE__ */ new Map();
+      for (const r of log2.rows) {
+        if (!logByAsset.has(r.asset_id)) logByAsset.set(r.asset_id, []);
+        logByAsset.get(r.asset_id).push(r);
       }
       const { data: repRows } = await client.from("maintenance_reports").select("status, asset:assets(area, job_id)");
       let reports = repRows || [];
@@ -3110,9 +3180,19 @@ async function registerRoutes(httpServer, app) {
       ).length;
       const rows = assets.map(
         (a) => {
-          const { hoursSince } = serviceStatusFor(a);
           const assigned = a.job_id != null;
-          const weekly = assigned ? weeklyServiceStatusFor(a.last_maintained) : { daysSince: null, intervalDays: WEEKLY_SERVICE_DAYS, state: "Not tracked" };
+          const lastService = lastServiceByAsset.get(a.id) ?? null;
+          const entries = logByAsset.get(a.id) ?? [];
+          let since;
+          if (log2.ready) {
+            since = hoursAfter(entries, lastService);
+          } else {
+            const meter = Number(a.run_hours ?? 0) || 0;
+            const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
+            since = round2(Math.max(0, meter - base));
+          }
+          const st = hoursServiceStatusFor(since, !!lastService);
+          const currentJobHours = assigned && log2.ready ? round2(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
@@ -3126,12 +3206,15 @@ async function registerRoutes(httpServer, app) {
             job_or_well: a.job_or_well,
             technician: techByAsset.get(a.id) ?? null,
             run_hours: a.run_hours,
-            run_hours_since_service: hoursSince,
-            service_hours_interval: a.service_hours_interval ?? 0,
-            days_since_service: weekly.daysSince,
-            service_interval_days: weekly.intervalDays,
+            run_hours_since_service: st.hoursSince,
+            service_hours_interval: SERVICE_INTERVAL_HOURS,
+            hours_since_service: st.hoursSince,
+            service_interval_hours: SERVICE_INTERVAL_HOURS,
+            never_serviced: !lastService,
+            current_job_hours: currentJobHours,
+            last_service_date: lastService,
             last_maintained: a.last_maintained,
-            service_state: weekly.state,
+            service_state: st.state,
             _deployed: deployed
           };
         }
@@ -3156,6 +3239,103 @@ async function registerRoutes(httpServer, app) {
         (x, y) => Number(y.assigned) - Number(x.assigned) || (rank[x.service_state] ?? 9) - (rank[y.service_state] ?? 9) || x.tag.localeCompare(y.tag)
       ).map(({ _deployed, ...r }) => r);
       const payload = { metrics, centrifuges };
+      res.json(payload);
+    }
+  );
+  app.get(
+    "/api/service/assets/:id",
+    requireAuth,
+    async (req, res) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client.from("assets").select("id, tag, category, area, job_id, run_hours, run_hours_at_service, job:jobs(id,job_number)").eq("id", req.params.id).maybeSingle();
+      if (!asset || !tracksRunHours(asset.category))
+        return res.status(404).json({ message: "Centrifuge not found" });
+      const a = asset;
+      const scope = areaScopeOf(req.profile);
+      if (scope && a.area !== scope)
+        return res.status(404).json({ message: "Centrifuge not found" });
+      if (req.profile.role === "field") {
+        const fieldJobIds = await jobScopeOf(req.profile) ?? [];
+        if (!a.job_id || !fieldJobIds.includes(a.job_id))
+          return res.status(404).json({ message: "Centrifuge not found" });
+      }
+      const { data: reps } = await client.from("maintenance_reports").select("id, report_date, filed_at, status, score_pass, score_total, flagged_count, checklist, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").eq("asset_id", a.id).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
+      const history = (reps || []).map((r) => ({
+        id: r.id,
+        report_date: r.report_date,
+        filed_at: r.filed_at,
+        supervisor_name: r.supervisor?.name ?? null,
+        status: r.status,
+        score_pass: r.score_pass ?? null,
+        score_total: r.score_total ?? null,
+        flagged_count: r.flagged_count ?? null,
+        has_form: r.checklist != null
+      }));
+      const lastService = history[0]?.report_date ? String(history[0].report_date) : null;
+      const log2 = await loadRunHoursLog(client, [a.id]);
+      let since;
+      if (log2.ready) since = hoursAfter(log2.rows, lastService);
+      else {
+        const meter = Number(a.run_hours ?? 0) || 0;
+        const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
+        since = round2(Math.max(0, meter - base));
+      }
+      const st = hoursServiceStatusFor(since, !!lastService);
+      const jobsMap = /* @__PURE__ */ new Map();
+      for (const r of log2.rows) {
+        const key = r.job_id ?? "none";
+        if (!jobsMap.has(key))
+          jobsMap.set(key, {
+            job_id: r.job_id ?? null,
+            job_number: r.job?.job_number ?? null,
+            is_current: !!a.job_id && r.job_id === a.job_id,
+            hours: 0,
+            report_days: 0,
+            wells: [],
+            _wells: /* @__PURE__ */ new Map()
+          });
+        const j = jobsMap.get(key);
+        const h = Number(r.hours) || 0;
+        j.hours += h;
+        j.report_days += 1;
+        const wname = (r.well_name || "").trim() || "(no well name)";
+        const wkey = wname.toUpperCase();
+        if (!j._wells.has(wkey))
+          j._wells.set(wkey, { well_name: wname, hours: 0, report_days: 0, first_date: null, last_date: null });
+        const w = j._wells.get(wkey);
+        w.hours += h;
+        w.report_days += 1;
+        const d = r.report_date ? String(r.report_date) : null;
+        if (d && (!w.first_date || d < w.first_date)) w.first_date = d;
+        if (d && (!w.last_date || d > w.last_date)) w.last_date = d;
+      }
+      const jobs = Array.from(jobsMap.values()).map(({ _wells, ...j }) => ({
+        ...j,
+        hours: round2(j.hours),
+        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round2(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
+      })).sort(
+        (x, y) => Number(y.is_current) - Number(x.is_current) || String(y.wells[0]?.last_date ?? "").localeCompare(String(x.wells[0]?.last_date ?? ""))
+      );
+      const current = jobs.find((j) => j.is_current);
+      const payload = {
+        id: a.id,
+        tag: a.tag,
+        category: a.category,
+        area: a.area,
+        job_id: a.job_id,
+        job_number: a.job?.job_number ?? null,
+        hours_since_service: st.hoursSince,
+        service_interval_hours: SERVICE_INTERVAL_HOURS,
+        service_state: st.state,
+        never_serviced: !lastService,
+        last_service_date: lastService,
+        last_service_supervisor: history[0]?.supervisor_name ?? null,
+        current_job_hours: a.job_id ? log2.ready ? current?.hours ?? 0 : null : null,
+        total_logged_hours: round2(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
+        history,
+        jobs,
+        ledger_ready: log2.ready
+      };
       res.json(payload);
     }
   );
@@ -4044,6 +4224,17 @@ async function registerRoutes(httpServer, app) {
           };
           const { data: inserted, error } = await client.from("daily_reports").insert(row).select().single();
           if (error) throw new Error(error.message);
+          if (willAccrue)
+            await logRunHours(
+              client,
+              {
+                id: inserted.id,
+                job_id,
+                well_name: excel.well_name ?? null,
+                report_date: excel.report_date ?? null
+              },
+              dayAlloc.map((x) => ({ asset_id: x.id, add: x.add }))
+            );
           await client.from("daily_report_events").insert({
             report_id: inserted.id,
             actor_id: reviewer.id,
@@ -4464,6 +4655,16 @@ async function registerRoutes(httpServer, app) {
           }
           if (applied.length > 0)
             runHourDetail = `Run hours applied: ${applied.join(", ")}`;
+          await logRunHours(
+            client,
+            {
+              id: report.id,
+              job_id: report.job_id,
+              well_name: report.well_name ?? null,
+              report_date: report.report_date ?? null
+            },
+            allocation.map((x) => ({ asset_id: x.asset_id, add: x.add }))
+          );
         }
         const { data: data2, error: error2 } = await client.from("daily_reports").update({
           status: "Signed off",

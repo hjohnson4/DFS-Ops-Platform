@@ -299,7 +299,7 @@ export function NewServiceReportDialog({
                 data-testid="input-service-runhours"
               />
               <p className="text-xs text-muted-foreground">
-                Optional. Sets the “run hrs since service” baseline.
+                Optional. Updates the unit’s total meter. Hours since service restart automatically from this report’s date.
               </p>
             </div>
           </div>

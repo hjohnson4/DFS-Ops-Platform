@@ -17,6 +17,8 @@ import { Label } from "@/components/ui/label";
 import { UploadServiceReportDialog } from "@/components/UploadServiceReportDialog";
 import { NewServiceReportDialog } from "@/components/NewServiceReportDialog";
 import { ServiceReportDetailDialog } from "@/components/ServiceReportDetailDialog";
+import { ServiceAssetDialog } from "@/components/ServiceAssetDialog";
+import { SERVICE_INTERVAL_HOURS } from "@shared/schema";
 import { ExportReportsDialog } from "@/components/ExportReportsDialog";
 import { WorkOrdersSection } from "@/components/WorkOrdersSection";
 import {
@@ -139,6 +141,9 @@ export default function Service() {
     queryKey: ["/api/service-forms"],
   });
   const [detailId, setDetailId] = useState<string | null>(null);
+  // Centrifuge picked in the live list -> service history + run-hours pop-up.
+  const [assetId, setAssetId] = useState<string | null>(null);
+  const [returnAssetId, setReturnAssetId] = useState<string | null>(null);
   // The live list shows only job-assigned centrifuges by default; this toggle
   // adds the unassigned ones.
   const [showUnassigned, setShowUnassigned] = useState(false);
@@ -160,6 +165,10 @@ export default function Service() {
       month: "short",
       day: "numeric",
     });
+  }
+
+  function fmtHrs(n: number): string {
+    return n.toLocaleString("en-US", { maximumFractionDigits: 1 });
   }
 
   function fmtSize(bytes: number): string {
@@ -268,10 +277,11 @@ export default function Service() {
       </div>
       <p className="text-sm text-muted-foreground mb-6">
         Centrifuge fleet health across{" "}
-        {profile?.area ? profile.area : "all areas"}. Job-assigned centrifuges
-        are on a weekly (7-day) service schedule, counted from the last filed
-        service report; machines are flagged as they approach and then pass
-        that weekly interval. Unassigned centrifuges are not tracked.
+        {profile?.area ? profile.area : "all areas"}. Each centrifuge must be
+        serviced within {SERVICE_INTERVAL_HOURS} run hours of its last service
+        report. Run hours come from signed-off daily reports and add up until
+        the next service report is filed. Click a centrifuge to see its service
+        history and hours by job and well.
       </p>
 
       {/* Headline metrics */}
@@ -295,14 +305,14 @@ export default function Service() {
           label="Needs service soon"
           value={isLoading ? "—" : m!.due_soon}
           tone={!isLoading && m!.due_soon > 0 ? "warn" : "default"}
-          sub="Within 10% of interval"
+          sub={`${Math.round(SERVICE_INTERVAL_HOURS * 0.9)}–${SERVICE_INTERVAL_HOURS - 1} hrs since service`}
         />
         <Stat
           icon={AlertTriangle}
           label="Service overdue"
           value={isLoading ? "—" : m!.overdue}
           tone={!isLoading && m!.overdue > 0 ? "danger" : "default"}
-          sub="At or past interval"
+          sub={`${SERVICE_INTERVAL_HOURS}+ hrs since service`}
         />
         <Stat
           icon={ClipboardCheck}
@@ -379,9 +389,11 @@ export default function Service() {
                 <th className="px-3 py-2 font-medium">Job / Area</th>
                 <th className="px-3 py-2 font-medium">Technician</th>
                 <th className="px-3 py-2 font-medium text-right">
-                  Days since service
+                  Hours since service
                 </th>
-                <th className="px-3 py-2 font-medium text-right">Interval</th>
+                <th className="px-3 py-2 font-medium text-right">
+                  Hours on this job
+                </th>
                 <th className="px-3 py-2 font-medium">Status</th>
               </tr>
             </thead>
@@ -389,7 +401,8 @@ export default function Service() {
               {visibleRows.map((r) => (
                 <tr
                   key={r.id}
-                  className="border-b border-card-border last:border-0 hover:bg-muted/30"
+                  className="border-b border-card-border last:border-0 hover:bg-muted/30 cursor-pointer"
+                  onClick={() => setAssetId(r.id)}
                   data-testid={`row-centrifuge-${r.tag}`}
                 >
                   <td className="px-3 py-2.5">
@@ -414,26 +427,41 @@ export default function Service() {
                     )}
                   </td>
                   <td className="px-3 py-2.5 text-right tabular-nums">
-                    {!r.assigned ? (
-                      <span className="text-muted-foreground">—</span>
-                    ) : r.days_since_service == null ? (
+                    {r.hours_since_service == null ? (
                       <span
                         className="text-muted-foreground"
-                        title="No service report on record yet — file one to start the weekly clock."
+                        title="No run hours and no service report on record yet."
                       >
                         —
                       </span>
                     ) : (
-                      `${r.days_since_service} ${
-                        r.days_since_service === 1 ? "day" : "days"
-                      }`
+                      <div
+                        title={
+                          r.never_serviced
+                            ? "No service report on file — counting all logged run hours."
+                            : `Since the service report dated ${fmtDate(r.last_service_date)}`
+                        }
+                      >
+                        <span className="font-medium">
+                          {fmtHrs(r.hours_since_service)}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {" "}
+                          / {r.service_interval_hours} hrs
+                        </span>
+                        {r.never_serviced && (
+                          <div className="text-[11px] text-muted-foreground">
+                            no service on file
+                          </div>
+                        )}
+                      </div>
                     )}
                   </td>
                   <td className="px-3 py-2.5 text-right tabular-nums">
-                    {r.assigned ? (
-                      "Weekly"
-                    ) : (
+                    {r.current_job_hours == null ? (
                       <span className="text-muted-foreground">—</span>
+                    ) : (
+                      `${fmtHrs(r.current_job_hours)} hrs`
                     )}
                   </td>
                   <td className="px-3 py-2.5">
@@ -447,12 +475,13 @@ export default function Service() {
       )}
 
       <p className="text-xs text-muted-foreground mt-4">
-        Job-assigned centrifuges are serviced on a weekly (7-day) schedule,
-        counted from the last filed service report. “Service soon” shows the day
-        before it comes due; “Overdue” once 7 days have passed. Rows with “No
-        baseline” have no service report on record yet — file one to start the
-        weekly clock. Unassigned centrifuges are not tracked until they’re put
-        on a job.
+        Hours since service = run hours from signed-off daily reports dated
+        after the centrifuge’s last service report (a report on the same date
+        as the service counts toward the earlier period). “Service soon” shows
+        from {Math.round(SERVICE_INTERVAL_HOURS * 0.9)} hrs; “Overdue” at{" "}
+        {SERVICE_INTERVAL_HOURS} hrs or more. A centrifuge with no service
+        report on file counts every logged hour. The due and overdue counts
+        above include only centrifuges on a job.
       </p>
 
       {/* Filed in-app service reports (structured form) ------------------- */}
@@ -577,7 +606,23 @@ export default function Service() {
 
       <ServiceReportDetailDialog
         reportId={detailId}
-        onClose={() => setDetailId(null)}
+        onClose={() => {
+          setDetailId(null);
+          // Opened from a centrifuge's history: go back to that centrifuge.
+          if (returnAssetId) {
+            setAssetId(returnAssetId);
+            setReturnAssetId(null);
+          }
+        }}
+      />
+      <ServiceAssetDialog
+        assetId={assetId}
+        onClose={() => setAssetId(null)}
+        onOpenReport={(id) => {
+          setReturnAssetId(assetId);
+          setAssetId(null);
+          setDetailId(id);
+        }}
       />
 
       {/* Uploaded service reports ---------------------------------------- */}

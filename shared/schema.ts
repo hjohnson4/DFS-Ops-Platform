@@ -413,6 +413,90 @@ export function serviceStatusFor(a: {
   return { hoursSince, interval, state };
 }
 
+// ---- Run-hours service interval (centrifuges) ------------------------------
+// A centrifuge must be serviced within this many run hours of its last
+// service report. "Service soon" turns on at SERVICE_SOON_FRACTION of the
+// interval (135 hrs); "Overdue" at 150 hrs or more.
+export const SERVICE_INTERVAL_HOURS = 150;
+
+// One row of the per-report run-hours log (table asset_run_hours): the hours a
+// signed-off daily report added to one centrifuge, with the job and well the
+// report was for. Drives hours-since-service and per-job / per-well totals.
+export interface AssetRunHoursEntry {
+  asset_id: string;
+  daily_report_id: string;
+  job_id: string | null;
+  well_name: string | null;
+  report_date: string | null;
+  hours: number;
+}
+
+// Hours-since-service state for a centrifuge from its logged run hours.
+// `hoursSince` = hours logged on daily reports dated AFTER the last service
+// report's date. With no service report on file, every logged hour counts and
+// `neverServiced` is true; with no hours and no service the state is
+// "No baseline".
+export function hoursServiceStatusFor(
+  hoursSince: number,
+  hasService: boolean,
+  interval: number = SERVICE_INTERVAL_HOURS,
+): { hoursSince: number | null; interval: number; state: ServiceState } {
+  if (!hasService && hoursSince <= 0)
+    return { hoursSince: null, interval, state: "No baseline" };
+  let state: ServiceState = "OK";
+  if (hoursSince >= interval) state = "Overdue";
+  else if (hoursSince >= interval * (1 - SERVICE_SOON_FRACTION)) state = "Soon";
+  return { hoursSince, interval, state };
+}
+
+// Service history + run-hours breakdown for one centrifuge (Service module
+// asset pop-up).
+export interface ServiceHistoryItem {
+  id: string;
+  report_date: string;
+  filed_at: string;
+  supervisor_name: string | null;
+  status: string;
+  score_pass: number | null;
+  score_total: number | null;
+  flagged_count: number | null;
+  has_form: boolean; // true when it's an in-app form that can be opened
+}
+export interface WellHours {
+  well_name: string;
+  hours: number;
+  report_days: number;
+  first_date: string | null;
+  last_date: string | null;
+}
+export interface JobHours {
+  job_id: string | null;
+  job_number: string | null;
+  is_current: boolean;
+  hours: number;
+  report_days: number;
+  wells: WellHours[];
+}
+export interface ServiceAssetDetail {
+  id: string;
+  tag: string;
+  category: Category;
+  area: Area;
+  job_id: string | null;
+  job_number: string | null;
+  hours_since_service: number | null;
+  service_interval_hours: number;
+  service_state: ServiceState;
+  never_serviced: boolean;
+  last_service_date: string | null;
+  last_service_supervisor: string | null;
+  current_job_hours: number | null; // null when not on a job
+  total_logged_hours: number;
+  history: ServiceHistoryItem[];
+  jobs: JobHours[];
+  ledger_ready: boolean; // false until db/hours-since-service.sql is run
+}
+
 // One centrifuge row on the Service dashboard's active-asset list.
 export interface ServiceAssetRow {
   id: string;
@@ -428,10 +512,13 @@ export interface ServiceAssetRow {
   run_hours: number | null;
   run_hours_since_service: number | null;
   service_hours_interval: number;
-  // Weekly (time-based) service tracking. Populated only for job-assigned
-  // centrifuges; null on unassigned units, whose service_state is "Not tracked".
-  days_since_service: number | null;
-  service_interval_days: number;
+  // Run hours logged on daily reports dated after the last service report
+  // (all logged hours when never serviced). Interval is SERVICE_INTERVAL_HOURS.
+  hours_since_service: number | null;
+  service_interval_hours: number;
+  never_serviced: boolean;
+  current_job_hours: number | null; // hours logged on its current job
+  last_service_date: string | null;
   last_maintained: string | null;
   service_state: ServiceState;
 }
