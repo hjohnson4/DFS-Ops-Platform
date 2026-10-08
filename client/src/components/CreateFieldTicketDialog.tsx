@@ -5,6 +5,7 @@ import {
   type Customer,
   type JobWithCustomer,
   type LineItem,
+  workDatesLabel,
 } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -87,6 +88,7 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
   const [customerId, setCustomerId] = useState("");
   const [jobId, setJobId] = useState("");
   const [ticketDate, setTicketDate] = useState(today());
+  const [endDate, setEndDate] = useState(today()); // same as start = one day
   const [county, setCounty] = useState("");
   const [wellName, setWellName] = useState("");
   const [poAfe, setPoAfe] = useState("");
@@ -99,6 +101,7 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
     setCustomerId("");
     setJobId("");
     setTicketDate(today());
+    setEndDate(today());
     setCounty("");
     setWellName("");
     setPoAfe("");
@@ -144,6 +147,13 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
     setWellName("");
   };
 
+  // Moving the start past the end pulls the end along (keeps a valid range).
+  const onStartChange = (v: string) => {
+    setTicketDate(v);
+    if (!endDate || (v && endDate < v)) setEndDate(v);
+  };
+  const endBeforeStart = !!endDate && !!ticketDate && endDate < ticketDate;
+
   const updateLine = (i: number, patch: Partial<DraftLine>) =>
     setLines((prev) => prev.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
   const addLine = () => setLines((prev) => [...prev, emptyLine()]);
@@ -172,6 +182,7 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
       }));
       const body = {
         ticket_date: ticketDate,
+        ticket_end_date: endDate && endDate !== ticketDate ? endDate : null,
         county: county.trim() || null,
         well_name: wellName.trim() || null,
         po_afe: poAfe.trim() || null,
@@ -203,7 +214,8 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
       }),
   });
 
-  const canSave = !!customerId && !!jobId && !!ticketDate && !save.isPending;
+  const canSave =
+    !!customerId && !!jobId && !!ticketDate && !endBeforeStart && !save.isPending;
 
   // Build a draft ticket from the current form state and open the in-page PDF
   // preview — no save required. Lets the user review the printable ticket (with
@@ -212,6 +224,7 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
     const draft = {
       ticket_number: "DRAFT",
       ticket_date: ticketDate,
+      ticket_end_date: endDate && endDate !== ticketDate ? endDate : null,
       county: county.trim() || null,
       well_name: wellName.trim() || null,
       po_afe: poAfe.trim() || null,
@@ -234,7 +247,7 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
     printFieldTicket(html, "Field Ticket · Draft preview");
   };
 
-  const canPreview = !!customerId && !!jobId && !!ticketDate;
+  const canPreview = !!customerId && !!jobId && !!ticketDate && !endBeforeStart;
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -306,17 +319,32 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
             </div>
           )}
 
-          {/* Work date / county / well / PO-AFE */}
+          {/* Work dates (start – end) / county / well / PO-AFE */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Work date</Label>
+              <Label>Start date</Label>
               <Input
                 type="date"
                 value={ticketDate}
-                onChange={(e) => setTicketDate(e.target.value)}
+                onChange={(e) => onStartChange(e.target.value)}
                 data-testid="input-ticket-date"
               />
             </div>
+            <div className="space-y-1.5">
+              <Label>End date</Label>
+              <Input
+                type="date"
+                value={endDate}
+                min={ticketDate || undefined}
+                onChange={(e) => setEndDate(e.target.value)}
+                data-testid="input-ticket-end-date"
+              />
+            </div>
+            <p className="col-span-2 -mt-1 text-xs text-muted-foreground" data-testid="text-ticket-days">
+              {endBeforeStart
+                ? "End date can't be before the start date."
+                : `Work dates: ${workDatesLabel(ticketDate, endDate)}`}
+            </p>
             <div className="space-y-1.5">
               <Label>County</Label>
               <Input

@@ -1,4 +1,4 @@
-import type { FieldTicketWithJob } from "@shared/schema";
+import { type FieldTicketWithJob, workDatesLabel } from "@shared/schema";
 import { DFS_LOGO_DATA_URI } from "./brandAssets";
 import { showPdfPreview } from "./pdfPreview";
 
@@ -181,7 +181,7 @@ export function buildFieldTicketHtml(
   <div class="grid">
     ${field("Job No.", t.job_number || "—")}
     ${field("Area", t.area || "—")}
-    ${field("Work date", fmtDate(t.ticket_date))}
+    ${field(t.ticket_end_date && t.ticket_end_date !== t.ticket_date ? "Work dates" : "Work date", workDatesLabel(t.ticket_date, t.ticket_end_date))}
     ${field("County", t.county || "—")}
     ${field("Well name", t.well_name || "—")}
     ${field("P.O. / A.F.E.", t.po_afe || "—")}

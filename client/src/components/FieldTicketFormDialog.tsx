@@ -1,7 +1,12 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { type JobWithCustomer, type Asset, type FieldTicket } from "@shared/schema";
+import {
+  type JobWithCustomer,
+  type Asset,
+  type FieldTicket,
+  workDatesLabel,
+} from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -48,6 +53,7 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
   );
 
   const [ticketDate, setTicketDate] = useState(today());
+  const [endDate, setEndDate] = useState(today()); // same as start = one day
   const [wellName, setWellName] = useState("");
   const [poAfe, setPoAfe] = useState("");
   const [amount, setAmount] = useState("");
@@ -59,6 +65,7 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
   const seed = () => {
     if (ticket) {
       setTicketDate(ticket.ticket_date);
+      setEndDate(ticket.ticket_end_date || ticket.ticket_date);
       setWellName(ticket.well_name ?? "");
       setPoAfe(ticket.po_afe ?? "");
       setAmount(ticket.amount == null ? "" : String(ticket.amount));
@@ -67,6 +74,7 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
       setAssetIds(ticket.asset_ids ?? []);
     } else {
       setTicketDate(today());
+      setEndDate(today());
       setWellName("");
       setPoAfe("");
       setAmount("");
@@ -80,6 +88,13 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Moving the start past the end pulls the end along (keeps a valid range).
+  const onStartChange = (v: string) => {
+    setTicketDate(v);
+    if (!endDate || (v && endDate < v)) setEndDate(v);
+  };
+  const endBeforeStart = !!endDate && !!ticketDate && endDate < ticketDate;
+
   const toggleAsset = (id: string) =>
     setAssetIds((prev) =>
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
@@ -89,6 +104,7 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
     mutationFn: async () => {
       const body = {
         ticket_date: ticketDate,
+        ticket_end_date: endDate && endDate !== ticketDate ? endDate : null,
         well_name: wellName.trim() || null,
         po_afe: poAfe.trim() || null,
         amount: amount.trim() === "" ? null : Number(amount),
@@ -146,14 +162,32 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Work date</Label>
+              <Label>Start date</Label>
               <Input
                 type="date"
                 value={ticketDate}
-                onChange={(e) => setTicketDate(e.target.value)}
+                onChange={(e) => onStartChange(e.target.value)}
                 data-testid="input-ticket-date"
               />
             </div>
+            <div className="space-y-1.5">
+              <Label>End date</Label>
+              <Input
+                type="date"
+                value={endDate}
+                min={ticketDate || undefined}
+                onChange={(e) => setEndDate(e.target.value)}
+                data-testid="input-ticket-end-date"
+              />
+            </div>
+            <p className="col-span-2 -mt-1 text-xs text-muted-foreground" data-testid="text-ticket-days">
+              {endBeforeStart
+                ? "End date can't be before the start date."
+                : `Work dates: ${workDatesLabel(ticketDate, endDate)}`}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>Billable amount (optional)</Label>
               <div className="relative">
@@ -254,7 +288,7 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
         <DialogFooter>
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || !ticketDate}
+            disabled={save.isPending || !ticketDate || endBeforeStart}
             data-testid="button-save-ticket"
           >
             {save.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

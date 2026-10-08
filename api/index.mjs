@@ -822,6 +822,9 @@ var lineItemSchema = z.object({
 });
 var createFieldTicketSchema = z.object({
   ticket_date: z.string().min(1),
+  // start of work
+  ticket_end_date: z.string().nullable().optional(),
+  // end of work (null = one day)
   county: z.string().nullable().optional(),
   well_name: z.string().nullable().optional(),
   po_afe: z.string().nullable().optional(),
@@ -2252,9 +2255,13 @@ async function registerRoutes(httpServer, app) {
       }));
       const lineTotal = lineItems.reduce((s, li) => s + li.total, 0);
       const amount = parsed.data.amount != null ? parsed.data.amount : lineItems.length > 0 ? Math.round(lineTotal * 100) / 100 : null;
+      const endDate = parsed.data.ticket_end_date || null;
+      if (endDate && endDate < parsed.data.ticket_date)
+        return res.status(400).json({ message: "End date can't be before the start date." });
       const { data, error } = await client.from("field_tickets").insert({
         job_id: req.params.id,
         ticket_date: parsed.data.ticket_date,
+        ...endDate && endDate !== parsed.data.ticket_date ? { ticket_end_date: endDate } : {},
         county: parsed.data.county || null,
         well_name: parsed.data.well_name || null,
         po_afe: parsed.data.po_afe || null,
@@ -2265,10 +2272,13 @@ async function registerRoutes(httpServer, app) {
         comments: parsed.data.comments || null,
         created_by: req.profile.id
       }).select().single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return res.status(400).json({ message: ticketDbError(error.message) });
       res.status(201).json(data);
     }
   );
+  function ticketDbError(msg) {
+    return /ticket_end_date/.test(msg) ? "Date ranges need a one-time database update (db/field-ticket-date-range.sql). One-day tickets still work." : msg;
+  }
   const loadTicketForWrite = async (req, res) => {
     const client = supabaseAdmin || supabaseAnon;
     const { data: ticket } = await client.from("field_tickets").select("*").eq("id", req.params.id).single();
@@ -2306,6 +2316,15 @@ async function registerRoutes(httpServer, app) {
       const p = parsed.data;
       const patch = {};
       if (p.ticket_date !== void 0) patch.ticket_date = p.ticket_date;
+      if (p.ticket_date !== void 0 || p.ticket_end_date !== void 0) {
+        const start = p.ticket_date ?? loaded.ticket.ticket_date;
+        const end = p.ticket_end_date !== void 0 ? p.ticket_end_date || null : loaded.ticket.ticket_end_date ?? null;
+        if (end && end < start)
+          return res.status(400).json({ message: "End date can't be before the start date." });
+        const newEnd = end && end !== start ? end : null;
+        if (newEnd !== (loaded.ticket.ticket_end_date ?? null))
+          patch.ticket_end_date = newEnd;
+      }
       if (p.county !== void 0) patch.county = p.county || null;
       if (p.well_name !== void 0) patch.well_name = p.well_name || null;
       if (p.po_afe !== void 0) patch.po_afe = p.po_afe || null;
@@ -2326,7 +2345,7 @@ async function registerRoutes(httpServer, app) {
       if (p.amount !== void 0) patch.amount = p.amount ?? null;
       else if (newLineTotal !== null) patch.amount = newLineTotal;
       const { data, error } = await loaded.client.from("field_tickets").update(patch).eq("id", req.params.id).select().single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return res.status(400).json({ message: ticketDbError(error.message) });
       res.json(data);
     }
   );

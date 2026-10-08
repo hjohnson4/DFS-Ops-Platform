@@ -1984,11 +1984,19 @@ export async function registerRoutes(
           : lineItems.length > 0
             ? Math.round(lineTotal * 100) / 100
             : null;
+      const endDate = parsed.data.ticket_end_date || null;
+      if (endDate && endDate < parsed.data.ticket_date)
+        return res
+          .status(400)
+          .json({ message: "End date can't be before the start date." });
       const { data, error } = await client
         .from("field_tickets")
         .insert({
           job_id: req.params.id,
           ticket_date: parsed.data.ticket_date,
+          ...(endDate && endDate !== parsed.data.ticket_date
+            ? { ticket_end_date: endDate }
+            : {}),
           county: parsed.data.county || null,
           well_name: parsed.data.well_name || null,
           po_afe: parsed.data.po_afe || null,
@@ -2001,10 +2009,17 @@ export async function registerRoutes(
         })
         .select()
         .single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return res.status(400).json({ message: ticketDbError(error.message) });
       res.status(201).json(data);
     },
   );
+
+  // Friendlier message when the date-range column hasn't been added yet.
+  function ticketDbError(msg: string): string {
+    return /ticket_end_date/.test(msg)
+      ? "Date ranges need a one-time database update (db/field-ticket-date-range.sql). One-day tickets still work."
+      : msg;
+  }
 
   // Load a ticket + its parent job, enforcing area scope and active-job rule.
   // Returns { ticket, job } on success or an Express response already sent.
@@ -2055,6 +2070,22 @@ export async function registerRoutes(
       const p = parsed.data;
       const patch: any = {};
       if (p.ticket_date !== undefined) patch.ticket_date = p.ticket_date;
+      if (p.ticket_date !== undefined || p.ticket_end_date !== undefined) {
+        const start = p.ticket_date ?? loaded.ticket.ticket_date;
+        const end =
+          p.ticket_end_date !== undefined
+            ? p.ticket_end_date || null
+            : loaded.ticket.ticket_end_date ?? null;
+        if (end && end < start)
+          return res
+            .status(400)
+            .json({ message: "End date can't be before the start date." });
+        const newEnd = end && end !== start ? end : null;
+        // Only write the column when it changes, so one-day edits still work
+        // before the end-date column exists.
+        if (newEnd !== (loaded.ticket.ticket_end_date ?? null))
+          patch.ticket_end_date = newEnd;
+      }
       if (p.county !== undefined) patch.county = p.county || null;
       if (p.well_name !== undefined) patch.well_name = p.well_name || null;
       if (p.po_afe !== undefined) patch.po_afe = p.po_afe || null;
@@ -2086,7 +2117,7 @@ export async function registerRoutes(
         .eq("id", req.params.id)
         .select()
         .single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return res.status(400).json({ message: ticketDbError(error.message) });
       res.json(data);
     },
   );

@@ -1,7 +1,7 @@
 import { Fragment, useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { type FieldTicketWithJob } from "@shared/schema";
+import { type FieldTicketWithJob, workDatesLabel } from "@shared/schema";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Button } from "@/components/ui/button";
 import { Ticket, FileText, Plus, Download } from "lucide-react";
@@ -123,7 +123,7 @@ export default function FieldTicketsPage() {
             <thead className="bg-muted/50 text-muted-foreground">
               <tr className="text-left">
                 <th className="px-4 py-2.5 font-medium">Ticket</th>
-                <th className="px-4 py-2.5 font-medium">Date</th>
+                <th className="px-4 py-2.5 font-medium">Work dates</th>
                 <th className="px-4 py-2.5 font-medium">Job</th>
                 <th className="px-4 py-2.5 font-medium">Customer</th>
                 <th className="px-4 py-2.5 font-medium">Well</th>
@@ -169,7 +169,7 @@ export default function FieldTicketsPage() {
                           #{t.ticket_number}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{t.ticket_date}</td>
+                      <td className="px-4 py-2.5 text-muted-foreground">{workDatesLabel(t.ticket_date, t.ticket_end_date)}</td>
                       <td className="px-4 py-2.5">
                         {t.job_number}
                         <span className="text-muted-foreground"> · {t.area}</span>

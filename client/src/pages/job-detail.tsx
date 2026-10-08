@@ -18,6 +18,7 @@ import {
   type JsaWithJob,
   type PadWithDerivedWells,
   type UnassignedWell,
+  workDatesLabel,
 } from "@shared/schema";
 import { FieldTicketFormDialog } from "@/components/FieldTicketFormDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
@@ -761,7 +762,7 @@ export default function JobDetailPage() {
               <div className="flex items-center gap-2 text-sm">
                 <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
                 <span className="font-medium">Ticket #{t.ticket_number}</span>
-                <span className="text-muted-foreground">{t.ticket_date}</span>
+                <span className="text-muted-foreground">{workDatesLabel(t.ticket_date, t.ticket_end_date)}</span>
                 <span className="ml-auto font-medium tabular-nums">{money(t.amount)}</span>
                 {canEdit && job.status === "Active" && (
                   <div className="flex items-center gap-0.5">

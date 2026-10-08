@@ -463,7 +463,8 @@ export interface FieldTicket {
   id: string;
   job_id: string;
   ticket_number: number; // human-friendly sequential number
-  ticket_date: string; // date work was performed (yyyy-mm-dd)
+  ticket_date: string; // first day of work (yyyy-mm-dd)
+  ticket_end_date: string | null; // last day of work (yyyy-mm-dd); null = one day
   county: string | null; // county where the work was performed
   well_name: string | null;
   po_afe: string | null; // customer PO or AFE reference
@@ -474,6 +475,30 @@ export interface FieldTicket {
   comments: string | null;
   created_by: string | null;
   created_at: string;
+}
+
+// Human label for a ticket's work dates: "Oct 1, 2026" for one day, or
+// "Sep 28 – Oct 2, 2026 (5 days)" for a range. Dates are plain calendar days.
+export function workDatesLabel(
+  start: string | null | undefined,
+  end?: string | null,
+): string {
+  const parse = (d: string | null | undefined): Date | null => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d ?? ""));
+    return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  };
+  const a = parse(start);
+  if (!a) return "—";
+  const b = parse(end);
+  const full = (d: Date) =>
+    d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  if (!b || b.getTime() <= a.getTime()) return full(a);
+  const days = Math.round((b.getTime() - a.getTime()) / 86400000) + 1;
+  const sameYear = a.getFullYear() === b.getFullYear();
+  const left = sameYear
+    ? a.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    : full(a);
+  return `${left} – ${full(b)} (${days} days)`;
 }
 
 // Sum of a set of line-item totals (the computed ticket subtotal).
@@ -1300,7 +1325,8 @@ export const lineItemSchema = z.object({
 export type LineItemInput = z.infer<typeof lineItemSchema>;
 
 export const createFieldTicketSchema = z.object({
-  ticket_date: z.string().min(1),
+  ticket_date: z.string().min(1), // start of work
+  ticket_end_date: z.string().nullable().optional(), // end of work (null = one day)
   county: z.string().nullable().optional(),
   well_name: z.string().nullable().optional(),
   po_afe: z.string().nullable().optional(),
