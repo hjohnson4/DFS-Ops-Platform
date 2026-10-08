@@ -19,6 +19,7 @@ import {
   type PadWithDerivedWells,
   type UnassignedWell,
   workDatesLabel,
+  isLiveJobStatus,
 } from "@shared/schema";
 import { FieldTicketFormDialog } from "@/components/FieldTicketFormDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
@@ -73,6 +74,7 @@ const money = (n: number | null) =>
 
 const STATUS_TONE: Record<JobStatus, string> = {
   Active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  "Rig Move": "bg-sky-500/15 text-sky-700 dark:text-sky-400",
   "On Hold": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   Completed: "bg-muted text-muted-foreground",
 };
@@ -141,6 +143,7 @@ export default function JobDetailPage() {
   const [startedOn, setStartedOn] = useState("");
   const [endedOn, setEndedOn] = useState("");
   const [dayRate, setDayRate] = useState("");
+  const [manualRate, setManualRate] = useState(false);
 
   // seed edit fields whenever the job loads / changes
   useEffect(() => {
@@ -150,6 +153,7 @@ export default function JobDetailPage() {
       setStartedOn(toDateInput(job.started_on));
       setEndedOn(toDateInput(job.ended_on));
       setDayRate(job.day_rate === null || job.day_rate === undefined ? "" : String(job.day_rate));
+      setManualRate(!!job.manual_day_rate);
     }
   }, [job]);
 
@@ -161,12 +165,15 @@ export default function JobDetailPage() {
         started_on: startedOn || null,
         ended_on: endedOn || null,
         day_rate: dayRate.trim() === "" ? null : Number(dayRate),
+        ...(canManageAssets ? { manual_day_rate: manualRate } : {}),
       });
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/jobs", id] });
       queryClient.invalidateQueries({ queryKey: ["/api/jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/revenue/summary"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/jobs", id, "pads"] });
       toast({ title: "Job updated" });
       setEditing(false);
     },
@@ -181,6 +188,7 @@ export default function JobDetailPage() {
       setStartedOn(toDateInput(job.started_on));
       setEndedOn(toDateInput(job.ended_on));
       setDayRate(job.day_rate === null || job.day_rate === undefined ? "" : String(job.day_rate));
+      setManualRate(!!job.manual_day_rate);
     }
     setEditing(false);
   };
@@ -496,6 +504,30 @@ export default function JobDetailPage() {
                 />
               </div>
             </div>
+            {(canManageAssets || job.manual_day_rate) && (
+              <div className="sm:col-span-3 rounded-md border border-card-border bg-muted/30 p-3">
+                <label className="flex items-start gap-2 text-sm">
+                  <Checkbox
+                    checked={manualRate}
+                    disabled={!canManageAssets}
+                    onCheckedChange={(v) => setManualRate(v === true)}
+                    data-testid="checkbox-manual-day-rate"
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="font-medium">Bill this day rate every day</span>
+                    <span className="block text-xs text-muted-foreground">
+                      For customers whose daily reports don't carry costs. The day rate above adds up every
+                      Active day starting from the oldest daily report. Rig Move, On Hold and Completed days
+                      bill $0. Changes to the rate or status apply from today.
+                    </span>
+                  </span>
+                </label>
+                {manualRate && dayRate.trim() === "" && (
+                  <div className="mt-2 text-xs text-destructive">Enter a day rate so this job can bill.</div>
+                )}
+              </div>
+            )}
             {dateError && (
               <div className="sm:col-span-3 text-xs text-destructive">
                 End date can't be before the start date.
@@ -506,12 +538,18 @@ export default function JobDetailPage() {
           <>
             <Field icon={MapPin} label="Operating area" value={job.area} />
             <Field icon={User} label="Crewing" value={job.crewing ?? "Manned"} />
-            <Field icon={DollarSign} label="Day rate" value={fmtMoney(job.day_rate)} />
+            <Field
+              icon={DollarSign}
+              label={job.manual_day_rate ? "Day rate (set, billed daily)" : "Day rate"}
+              value={fmtMoney(job.day_rate)}
+            />
             <Field icon={Calendar} label="Started" value={fmtDate(job.started_on)} />
             <Field icon={Calendar} label="Ended" value={fmtDate(job.ended_on)} />
           </>
         )}
       </div>
+
+      {job.manual_day_rate && <SetRateBilling job={job} />}
 
       {job.description && (
         <div className="mt-3 rounded-lg border border-card-border bg-card p-4 text-sm">
@@ -532,7 +570,7 @@ export default function JobDetailPage() {
           </span>
         </h2>
         {canManageAssets &&
-          (job.status === "Active" ? (
+          (isLiveJobStatus(job.status) ? (
             <Button
               size="sm"
               onClick={() => {
@@ -554,7 +592,7 @@ export default function JobDetailPage() {
           <div className="text-sm text-muted-foreground">
             No assets are assigned to this job yet.
           </div>
-          {canManageAssets && job.status === "Active" && (
+          {canManageAssets && isLiveJobStatus(job.status) && (
             <div className="text-xs text-muted-foreground mt-1">
               Use “Add asset” to attach available equipment in this area.
             </div>
@@ -577,7 +615,7 @@ export default function JobDetailPage() {
               <span className="ml-auto inline-flex rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                 {a.status}
               </span>
-              {canManageAssets && job.status === "Active" && (
+              {canManageAssets && isLiveJobStatus(job.status) && (
                 <div className="flex items-center gap-0.5">
                   <Button
                     variant="ghost"
@@ -728,7 +766,7 @@ export default function JobDetailPage() {
           )}
         </h2>
         {canEdit &&
-          (job.status === "Active" ? (
+          (isLiveJobStatus(job.status) ? (
             <FieldTicketFormDialog
               job={job}
               trigger={
@@ -749,7 +787,7 @@ export default function JobDetailPage() {
           <div className="text-sm text-muted-foreground">
             No field tickets yet.
           </div>
-          {canEdit && job.status === "Active" && (
+          {canEdit && isLiveJobStatus(job.status) && (
             <div className="text-xs text-muted-foreground mt-1">
               Create one to log billable field work on this job.
             </div>
@@ -764,7 +802,7 @@ export default function JobDetailPage() {
                 <span className="font-medium">Ticket #{t.ticket_number}</span>
                 <span className="text-muted-foreground">{workDatesLabel(t.ticket_date, t.ticket_end_date)}</span>
                 <span className="ml-auto font-medium tabular-nums">{money(t.amount)}</span>
-                {canEdit && job.status === "Active" && (
+                {canEdit && isLiveJobStatus(job.status) && (
                   <div className="flex items-center gap-0.5">
                     <FieldTicketFormDialog
                       job={job}
@@ -1134,7 +1172,7 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
           )}
         </h2>
         {canManage &&
-          (job.status === "Active" ? (
+          (isLiveJobStatus(job.status) ? (
             <ServiceFormDialog
               job={job}
               trigger={
@@ -1160,7 +1198,7 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
           <div className="text-sm text-muted-foreground">
             No services logged yet.
           </div>
-          {canManage && job.status === "Active" && (
+          {canManage && isLiveJobStatus(job.status) && (
             <div className="text-xs text-muted-foreground mt-1">
               Log a drive-by or call-out visit to this unmanned job.
             </div>
@@ -1192,7 +1230,7 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
                 <span className="ml-auto font-medium tabular-nums">
                   {money(s.cost)}
                 </span>
-                {canManage && job.status === "Active" && (
+                {canManage && isLiveJobStatus(job.status) && (
                   <div className="flex items-center gap-0.5">
                     <ServiceFormDialog
                       job={job}
@@ -2286,10 +2324,75 @@ function FieldDailyReportsSection({ job }: { job: JobWithCustomer }) {
   );
 }
 
+// ---- Set day rate billing (e.g. Verdun Oil & Gas) --------------------------
+function SetRateBilling({ job }: { job: JobWithCustomer }) {
+  const b = job.manual_billing;
+  const money = (n: number | null | undefined) =>
+    n == null ? "—" : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  const day = (d: string | null | undefined) =>
+    !d ? "—" : d <= "2000-01-01" ? "First report" : fmtDate(d);
+  const history = (b?.events ?? []).slice().reverse();
+  return (
+    <div className="mt-3 rounded-lg border border-card-border bg-card p-4 text-sm" data-testid="set-rate-billing">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <div className="font-medium">Set day rate billing</div>
+        <div className="text-xs text-muted-foreground">
+          Billed every Active day from the oldest daily report · $0 on Rig Move, On Hold and Completed
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div>
+          <div className="text-xs text-muted-foreground">Billed to date</div>
+          <div className="text-base font-semibold tabular-nums" data-testid="set-rate-total">{money(b?.total)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Billable days</div>
+          <div className="text-base font-semibold tabular-nums" data-testid="set-rate-days">
+            {b?.start_date ? b.billable_days : "—"}
+          </div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Billing since</div>
+          <div className="text-base font-semibold">{b?.start_date ? fmtDate(b.start_date) : "—"}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">Today</div>
+          <div className="text-base font-semibold tabular-nums" data-testid="set-rate-today">
+            {b ? (b.today_status === "Active" ? money(b.today_rate) : `$0 · ${b.today_status}`) : "—"}
+          </div>
+        </div>
+      </div>
+      {!b?.start_date && (
+        <div className="mt-2 text-xs text-muted-foreground">
+          Billing starts on the oldest daily report — none on file for this job yet.
+        </div>
+      )}
+      {b && b.missing_rate_days > 0 && (
+        <div className="mt-2 text-xs text-destructive">
+          {b.missing_rate_days} Active day{b.missing_rate_days === 1 ? "" : "s"} had no day rate set and billed nothing.
+        </div>
+      )}
+      {history.length > 0 && (
+        <div className="mt-3">
+          <div className="text-xs text-muted-foreground mb-1">Rate and status history</div>
+          <ul className="space-y-0.5 text-xs" data-testid="set-rate-history">
+            {history.map((e, i) => (
+              <li key={i} className="tabular-nums">
+                From {day(e.effective_date)}: {money(e.day_rate)}/day · {e.status}
+                {e.created_by_name ? ` · ${e.created_by_name}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---- Job Safety Analyses (per-job) ---------------------------------------
 function JsasSection({ job }: { job: JobWithCustomer }) {
   const { toast } = useToast();
-  const active = job.status === "Active";
+  const active = isLiveJobStatus(job.status);
   const { data: jsas } = useQuery<JsaWithJob[]>({
     queryKey: ["/api/jobs", job.id, "jsas"],
     enabled: !!job.id,

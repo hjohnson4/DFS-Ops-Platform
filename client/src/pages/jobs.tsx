@@ -24,6 +24,7 @@ import { Plus, Briefcase, MapPin, Activity, Archive } from "lucide-react";
 
 const STATUS_TONE: Record<JobStatus, string> = {
   Active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  "Rig Move": "bg-sky-500/15 text-sky-700 dark:text-sky-400",
   "On Hold": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   Completed: "bg-muted text-muted-foreground",
 };
@@ -133,7 +134,17 @@ function JobRow({
   reports?: DailyReportWithLinks[];
   onClick: () => void;
 }) {
-  const r = useJobRollup(job.id, job.day_rate ?? null, reports);
+  const rollup = useJobRollup(job.id, job.day_rate ?? null, reports);
+  // Set day rate jobs (e.g. Verdun): the job's own rate, billed every Active
+  // day — not read from the daily report.
+  const mb = job.manual_day_rate ? job.manual_billing : null;
+  const r = job.manual_day_rate
+    ? {
+        ...rollup,
+        currentDayRate: job.day_rate == null ? null : Number(job.day_rate),
+        accruedCurrent: mb ? mb.current_well_revenue : null,
+      }
+    : rollup;
 
   return (
     <tr
@@ -168,7 +179,14 @@ function JobRow({
         {r.currentDayRate == null ? (
           <span className="text-muted-foreground">—</span>
         ) : (
-          dayRateFmt(r.currentDayRate)
+          <span className="inline-flex flex-col leading-tight">
+            {dayRateFmt(r.currentDayRate)}
+            {job.manual_day_rate && (
+              <span className="text-xs text-muted-foreground" data-testid={`job-set-rate-${job.id}`}>
+                {job.status === "Active" ? "Set rate" : `Set rate · $0 on ${job.status}`}
+              </span>
+            )}
+          </span>
         )}
       </td>
 

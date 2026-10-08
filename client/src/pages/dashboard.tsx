@@ -1,5 +1,5 @@
 import { useAuth } from "@/lib/auth";
-import { ROLE_LABELS, AREAS, tracksRunHours } from "@shared/schema";
+import { ROLE_LABELS, AREAS, tracksRunHours, isLiveJobStatus } from "@shared/schema";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import type {
@@ -127,7 +127,7 @@ function FieldTechDashboard({ profile }: { profile: Profile }) {
   // job (or first job) as the "current" job for the header.
   const jobList = jobs || [];
   const currentJob =
-    jobList.find((j) => j.status === "Active") || jobList[0] || null;
+    jobList.find((j) => isLiveJobStatus(j.status)) || jobList[0] || null;
 
   // Daily reports for the current job, newest first (server already scopes
   // these to the tech's assigned job).
@@ -470,12 +470,19 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
   };
 
   // ---- Headline rollups ---------------------------------------------------
-  const activeList = jobsScoped.filter((j) => j.status === "Active");
+  const activeList = jobsScoped.filter((j) => isLiveJobStatus(j.status));
   const activeJobs = activeList.length;
 
   const activeRates = activeList.map((j) => ({
     job: j,
-    rate: effectiveDayRate(j.id, j.day_rate),
+    // Set day rate jobs: the job rate on Active days, $0 on Rig Move.
+    rate: j.manual_day_rate
+      ? j.manual_billing
+        ? j.manual_billing.today_rate
+        : j.status === "Active"
+          ? (j.day_rate == null ? null : Number(j.day_rate))
+          : 0
+      : effectiveDayRate(j.id, j.day_rate),
   }));
   const ratedActive = activeRates.filter((x) => x.rate !== null);
   const dailyRevenue = ratedActive.reduce(

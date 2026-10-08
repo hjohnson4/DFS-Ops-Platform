@@ -1,5 +1,5 @@
 import type { Customer, JobWithCustomer, Area } from "@shared/schema";
-import { AREAS } from "@shared/schema";
+import { AREAS, isLiveJobStatus } from "@shared/schema";
 import { DFS_LOGO_DATA_URI } from "./brandAssets";
 import { showPdfPreview } from "./pdfPreview";
 import { parseDisplayDate } from "./utils";
@@ -32,25 +32,26 @@ const fmtMoney = (n: number | null | undefined): string =>
     ? "—"
     : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
 
-const STATUS_ORDER = ["Active", "On Hold", "Completed"] as const;
+const STATUS_ORDER = ["Active", "Rig Move", "On Hold", "Completed"] as const;
 
 // Revenue convention mirrors the dashboard: daily revenue = sum of day_rate
 // across a customer's ACTIVE, rated jobs. The app has no billed-days data, so
 // this is a run-rate figure ($/day), not a lifetime/accrued total.
 function dailyRevenueOf(jobs: JobWithCustomer[]): number {
   return jobs
-    .filter(
-      (j) =>
-        j.status === "Active" &&
-        j.day_rate != null &&
-        !isNaN(Number(j.day_rate)),
-    )
-    .reduce((sum, j) => sum + Number(j.day_rate), 0);
+    .filter((j) => isLiveJobStatus(j.status))
+    .reduce((sum, j) => {
+      // Set day rate jobs bill $0 on Rig Move / On Hold.
+      if (j.manual_day_rate) return sum + (j.manual_billing?.today_rate ?? 0);
+      return j.day_rate != null && !isNaN(Number(j.day_rate))
+        ? sum + Number(j.day_rate)
+        : sum;
+    }, 0);
 }
 
 function summaryStrip(customers: Customer[], jobs: JobWithCustomer[]): string {
   const activeCustomers = customers.filter((c) => c.active).length;
-  const activeJobs = jobs.filter((j) => j.status === "Active").length;
+  const activeJobs = jobs.filter((j) => isLiveJobStatus(j.status)).length;
   const items: Array<[string, string]> = [
     ["Customers", String(customers.length)],
     ["Active customers", String(activeCustomers)],
@@ -73,7 +74,7 @@ function areaBreakdown(jobs: JobWithCustomer[]): string {
     .map((area) => {
       const inArea = jobs.filter((j) => j.area === area);
       if (inArea.length === 0) return null;
-      const active = inArea.filter((j) => j.status === "Active").length;
+      const active = inArea.filter((j) => isLiveJobStatus(j.status)).length;
       const customers = new Set(inArea.map((j) => j.customer_id)).size;
       return `<tr><td>${esc(area)}</td><td class="num">${customers}</td><td class="num">${
         inArea.length
@@ -126,7 +127,7 @@ function jobsTable(jobs: JobWithCustomer[]): string {
 
 function customerCard(c: Customer, jobs: JobWithCustomer[]): string {
   const areas = Array.from(new Set(jobs.map((j) => j.area)));
-  const activeJobs = jobs.filter((j) => j.status === "Active").length;
+  const activeJobs = jobs.filter((j) => isLiveJobStatus(j.status)).length;
   const dailyRev = dailyRevenueOf(jobs);
   return `
     <section class="customer">

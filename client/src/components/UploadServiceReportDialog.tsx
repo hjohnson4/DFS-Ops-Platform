@@ -4,6 +4,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import type { JobWithCustomer } from "@shared/schema";
+import { isLiveJobStatus } from "@shared/schema";
 import {
   Dialog,
   DialogContent,
@@ -64,7 +65,7 @@ export function UploadServiceReportDialog({
   // Only active jobs are valid targets for a service report. The list is
   // already area-scoped server-side, so no extra area filter is needed here.
   const activeJobs = useMemo(
-    () => (jobs ?? []).filter((j) => j.status === "Active"),
+    () => (jobs ?? []).filter((j) => isLiveJobStatus(j.status)),
     [jobs],
   );
 

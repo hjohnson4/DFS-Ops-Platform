@@ -12,7 +12,8 @@ import {
   ExcelParseError,
 } from "./excelDailyReport";
 import * as XLSX from "xlsx";
-import { AREAS } from "@shared/schema";
+import { AREAS, isLiveJobStatus } from "@shared/schema";
+import { computeManualBilling, publicBilling, recordRateChange } from "./manualBilling";
 import {
   createUserSchema,
   updateUserSchema,
@@ -1566,10 +1567,12 @@ export async function registerRoutes(
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
     // flatten the joined customer name
+    const billing = await computeManualBilling(data || []);
     const rows = (data || []).map((j: any) => ({
       ...j,
       customer_name: j.customer?.name ?? "",
       customer: undefined,
+      manual_billing: j.manual_day_rate ? publicBilling(billing.get(j.id)) : null,
     }));
     res.json(rows);
   });
@@ -1602,11 +1605,15 @@ export async function registerRoutes(
       profile_name: a.profile?.name ?? null,
       profile_role: a.profile?.role ?? null,
     }));
+    const billing = rest.manual_day_rate
+      ? publicBilling((await computeManualBilling([rest as any])).get(rest.id))
+      : null;
     res.json({
       ...rest,
       customer_name: customer?.name ?? "",
       field_tech_ids: assignments.map((a: any) => a.profile_id),
       assignments,
+      manual_billing: billing,
     });
   });
 
@@ -1840,13 +1847,23 @@ export async function registerRoutes(
       // area scope check
       const { data: job } = await client
         .from("jobs")
-        .select("area")
+        .select("*")
         .eq("id", req.params.id)
         .single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile!.role !== "admin" && job.area !== req.profile!.area)
         return res.status(403).json({ message: "Outside your area" });
       const patch: any = { ...parsed.data };
+      // Only Admins and Area Managers can switch set day rate billing.
+      if (
+        patch.manual_day_rate !== undefined &&
+        patch.manual_day_rate !== !!job.manual_day_rate &&
+        !["admin", "area"].includes(req.profile!.role)
+      )
+        return res.status(403).json({
+          message: "Only an Admin or Area Manager can change set day rate billing",
+        });
+      if (patch.manual_day_rate === !!job.manual_day_rate) delete patch.manual_day_rate;
       if (patch.started_on === "") patch.started_on = null;
       if (patch.ended_on === "") patch.ended_on = null;
       // field_tech_ids / supervisor_ids are not columns on jobs — handle them
@@ -1877,6 +1894,11 @@ export async function registerRoutes(
           .single();
         if (error) return res.status(400).json({ message: error.message });
         data = updated;
+        // Set day rate jobs: log the rate/status change (applies from today).
+        await recordRateChange(job as any, data as any, {
+          id: req.profile!.id,
+          name: (req.profile as any)?.name ?? null,
+        });
       }
       // When field_tech_ids is provided, replace the job's assignment set.
       if (fieldTechIds !== undefined) {
@@ -2018,8 +2040,8 @@ export async function registerRoutes(
     if (scope) rows = rows.filter((r: any) => r.area === scope);
     if (jobIds) rows = rows.filter((r: any) => jobIds.includes(r.job_id));
     const status = String(req.query.status || "").toLowerCase();
-    if (status === "active") rows = rows.filter((r: any) => r.job_status === "Active");
-    else if (status === "past") rows = rows.filter((r: any) => r.job_status !== "Active");
+    if (status === "active") rows = rows.filter((r: any) => isLiveJobStatus(r.job_status));
+    else if (status === "past") rows = rows.filter((r: any) => !isLiveJobStatus(r.job_status));
     res.json(rows);
   });
 
@@ -2071,7 +2093,7 @@ export async function registerRoutes(
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile!.role !== "admin" && job.area !== req.profile!.area)
         return res.status(403).json({ message: "Outside your area" });
-      if (job.status !== "Active")
+      if (!isLiveJobStatus(job.status))
         return res
           .status(400)
           .json({ message: "Field tickets can only be created for active jobs." });
@@ -2153,7 +2175,7 @@ export async function registerRoutes(
       res.status(403).json({ message: "Outside your area" });
       return null;
     }
-    if (job.status !== "Active") {
+    if (!isLiveJobStatus(job.status)) {
       res.status(400).json({
         message: "Field tickets can only be changed while the job is active.",
       });
@@ -2360,7 +2382,7 @@ export async function registerRoutes(
       res.status(403).json({ message: "Outside your area" });
       return null;
     }
-    if (opts.requireActive && job.status !== "Active") {
+    if (opts.requireActive && !isLiveJobStatus(job.status)) {
       res.status(400).json({
         message: "Daily reports can only be changed while the job is active.",
       });
@@ -2576,7 +2598,7 @@ export async function registerRoutes(
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile!.role !== "admin" && job.area !== req.profile!.area)
         return res.status(403).json({ message: "Outside your area" });
-      if (job.status !== "Active")
+      if (!isLiveJobStatus(job.status))
         return res
           .status(400)
           .json({ message: "JSAs can only be created for active jobs." });
@@ -2638,7 +2660,7 @@ export async function registerRoutes(
       res.status(403).json({ message: "Outside your area" });
       return null;
     }
-    if (opts.requireActive && job.status !== "Active") {
+    if (opts.requireActive && !isLiveJobStatus(job.status)) {
       res.status(400).json({
         message: "JSAs can only be changed while the job is active.",
       });
@@ -7275,9 +7297,13 @@ export async function registerRoutes(
       // Pull the job's day rate for revenue and the report stats for status.
       const { data: jobRow } = await client
         .from("jobs")
-        .select("day_rate")
+        .select("id, day_rate, status, manual_day_rate")
         .eq("id", job.id)
         .single();
+      // Set day rate jobs bill per calendar day, split to the well on report.
+      const manualBill = jobRow?.manual_day_rate
+        ? (await computeManualBilling([jobRow as any])).get(job.id)
+        : undefined;
       const dayRate =
         jobRow && jobRow.day_rate != null && !isNaN(Number(jobRow.day_rate))
           ? Number(jobRow.day_rate)
@@ -7298,8 +7324,9 @@ export async function registerRoutes(
         // job's single fallback rate x days.
         const accrued = stat?.accrued ?? null;
         const dayRateSum = stat?.dayRateSum ?? 0;
-        const revenue =
-          accrued != null
+        const revenue = manualBill
+          ? manualBill.by_well_key.get(key) ?? (days > 0 ? 0 : null)
+          : accrued != null
             ? accrued
             : dayRateSum > 0
               ? dayRateSum
@@ -7431,7 +7458,7 @@ export async function registerRoutes(
       // In-scope, non-archived jobs.
       let jq = client
         .from("jobs")
-        .select("id, job_number, area, day_rate, customer_id, well_name, status")
+        .select("id, job_number, area, day_rate, customer_id, well_name, status, manual_day_rate")
         .is("archived_at", null);
       if (scope) jq = jq.eq("area", scope);
       const { data: jobs, error: jErr } = await jq;
@@ -7455,6 +7482,10 @@ export async function registerRoutes(
       // Accrued revenue per job, plus which wells are "current" (for active
       // vs completed) via wellReportStats per job.
       const accrued = await jobAccruedRevenue(jobIds);
+      // Set day rate jobs: revenue is the job rate x Active calendar days.
+      const manualBill = await computeManualBilling(jobRows as any);
+      for (const [jid, b] of Array.from(manualBill.entries()))
+        accrued.set(jid, { revenue: b.total, hasAccrued: b.total != null });
 
       // All in-scope reports once, for daily/monthly day-rate revenue and
       // active detection (a job is active if it has a most-recent-dated well).
@@ -7531,6 +7562,7 @@ export async function registerRoutes(
         const jid = key.slice(0, sep);
         const day = key.slice(sep + 1);
         reportDaysByJob.set(jid, (reportDaysByJob.get(jid) ?? 0) + 1);
+        if (manualBill.has(jid)) continue; // billed by calendar day below
         if (pick.rate != null) {
           dailyMap.set(day, (dailyMap.get(day) ?? 0) + pick.rate);
           if (!dailyJobsMap.has(day)) dailyJobsMap.set(day, new Set());
@@ -7539,12 +7571,22 @@ export async function registerRoutes(
           monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + pick.rate);
         }
       }
+      for (const [jid, b] of Array.from(manualBill.entries()))
+        for (const [day, amt] of Array.from(b.daily.entries())) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + amt);
+          if (!dailyJobsMap.has(day)) dailyJobsMap.set(day, new Set());
+          dailyJobsMap.get(day)!.add(jid);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
+        }
       // The rate shown on a job row: latest report's AL57 rate, else fallback.
       const dayRateOf = new Map<string, number | null>();
       for (const j of jobRows)
         dayRateOf.set(
           j.id,
-          currentRateByJob.get(j.id) ?? jobFallbackRate.get(j.id) ?? null,
+          manualBill.has(j.id)
+            ? jobFallbackRate.get(j.id) ?? null
+            : currentRateByJob.get(j.id) ?? jobFallbackRate.get(j.id) ?? null,
         );
 
       // Per-job rows (accrued revenue is the headline figure).
@@ -7663,8 +7705,21 @@ export async function registerRoutes(
         if (!cur || d > cur.date || (d === cur.date && rd > cur.day))
           newestRated.set(r.job_id, { date: d, day: rd, rate });
       }
-      const activeStatusJobs = jobRows.filter((j: any) => j.status === "Active");
+      const activeStatusJobs = jobRows.filter((j: any) =>
+        manualBill.has(j.id) ? j.status === "Active" : isLiveJobStatus(j.status),
+      );
       const currentJobs = activeStatusJobs.map((j: any) => {
+        const mb = manualBill.get(j.id);
+        if (mb)
+          return {
+            job_id: j.id,
+            job_number: j.job_number,
+            area: j.area,
+            day_rate: mb.today_rate,
+            source: mb.today_rate != null ? "job" : null,
+            report_date: null,
+            report_day: null,
+          };
         const nr = newestRated.get(j.id);
         const rate = nr ? nr.rate : jobFallbackRate.get(j.id) ?? null;
         return {
@@ -7740,7 +7795,7 @@ export async function registerRoutes(
       const client = padClient();
       let jq = client
         .from("jobs")
-        .select("id, job_number, area, day_rate, customer_id")
+        .select("id, job_number, area, day_rate, customer_id, status, manual_day_rate")
         .is("archived_at", null);
       if (scope) jq = jq.eq("area", scope);
       const { data: jobs, error } = await jq;
@@ -7759,6 +7814,9 @@ export async function registerRoutes(
         for (const c of custs ?? []) custName.set(c.id, c.name);
       }
       const accrued = await jobAccruedRevenue(jobIds);
+      const manualBill = await computeManualBilling(jobRows as any);
+      for (const [jid, b] of Array.from(manualBill.entries()))
+        accrued.set(jid, { revenue: b.total, hasAccrued: b.total != null });
       const { data: reps } = await client
         .from("daily_reports")
         .select("job_id, report_date, received_at, report_day, kpis")
@@ -7807,7 +7865,9 @@ export async function registerRoutes(
             ? Number(j.day_rate)
             : null;
         // Prefer the current AL57 rate from the latest report; else fallback.
-        const dr = currentRateByJob.get(j.id) ?? fallback;
+        const dr = manualBill.has(j.id)
+          ? fallback
+          : currentRateByJob.get(j.id) ?? fallback;
         lines.push(
           [
             esc(j.job_number),

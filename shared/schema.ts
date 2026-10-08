@@ -47,8 +47,12 @@ export type WorkType = (typeof WORK_TYPES)[number];
 export const REPORT_STATUS = ["Pending Sign-off", "Signed off"] as const;
 export type ReportStatus = (typeof REPORT_STATUS)[number];
 
-export const JOB_STATUS = ["Active", "On Hold", "Completed"] as const;
+export const JOB_STATUS = ["Active", "Rig Move", "On Hold", "Completed"] as const;
 export type JobStatus = (typeof JOB_STATUS)[number];
+// A job that is still running (crew on location or moving between wells).
+// "Rig Move" jobs stay open for reports, assets and tickets like Active ones.
+export const isLiveJobStatus = (s: string | null | undefined): boolean =>
+  s === "Active" || s === "Rig Move";
 
 export const CREWING = ["Manned", "Unmanned"] as const;
 export type Crewing = (typeof CREWING)[number];
@@ -94,6 +98,32 @@ export interface Job {
   well_name: string | null; // used to match emailed Excel daily reports
   archived_at: string | null; // set when the job is archived (soft-deleted)
   created_at: string;
+  // Set day rate: bill day_rate every Active day instead of reading costs from
+  // the daily report (Verdun Oil & Gas). See server/manualBilling.ts.
+  manual_day_rate?: boolean;
+  manual_billing?: ManualBilling | null;
+}
+
+export interface ManualBillingEvent {
+  effective_date: string; // yyyy-mm-dd (2000-01-01 = from the first report)
+  day_rate: number | null;
+  status: string;
+  created_by_name: string | null;
+  created_at: string;
+}
+
+export interface ManualBilling {
+  start_date: string | null; // oldest daily report date
+  through_date: string; // today (Central)
+  billable_days: number;
+  missing_rate_days: number; // Active days with no rate set
+  total: number | null; // billed to date; null = no reports or no rate
+  today_rate: number | null; // 0 on Rig Move / On Hold / Completed
+  today_status: string;
+  current_well: string | null;
+  current_well_revenue: number | null;
+  by_well: { well: string; revenue: number }[];
+  events: ManualBillingEvent[];
 }
 
 // Job with the customer name joined in (for list/detail views)
@@ -1252,6 +1282,7 @@ export const updateJobSchema = z.object({
   started_on: z.string().nullable().optional(),
   ended_on: z.string().nullable().optional(),
   day_rate: dayRateField,
+  manual_day_rate: z.boolean().optional(),
   well_name: z.string().nullable().optional(),
   // when present, replaces the full set of field-tech assignments for the job
   field_tech_ids: z.array(z.string().uuid()).optional(),

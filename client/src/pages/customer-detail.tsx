@@ -32,6 +32,7 @@ import { ArrowLeft, Briefcase, FileDown, Loader2, Mail, Pencil, Phone, Plus, Tra
 
 const STATUS_TONE: Record<JobStatus, string> = {
   Active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  "Rig Move": "bg-sky-500/15 text-sky-700 dark:text-sky-400",
   "On Hold": "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   Completed: "bg-muted text-muted-foreground",
 };

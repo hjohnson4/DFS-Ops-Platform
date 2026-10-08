@@ -6,6 +6,7 @@ import {
   type JobWithCustomer,
   type LineItem,
   workDatesLabel,
+  isLiveJobStatus,
 } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -124,7 +125,7 @@ export function CreateFieldTicketDialog({ trigger, onCreated }: Props) {
   const customerJobs = useMemo(
     () =>
       (jobs || []).filter(
-        (j) => j.customer_id === customerId && j.status === "Active",
+        (j) => j.customer_id === customerId && isLiveJobStatus(j.status),
       ),
     [jobs, customerId],
   );
