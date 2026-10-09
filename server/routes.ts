@@ -13,6 +13,7 @@ import {
 } from "./excelDailyReport";
 import * as XLSX from "xlsx";
 import { registerForecastRoutes } from "./forecast";
+import { registerRentalRoutes, stripRentalMoney } from "./rentals";
 import { AREAS, isLiveJobStatus } from "@shared/schema";
 import { computeManualBilling, publicBilling, recordRateChange } from "./manualBilling";
 import {
@@ -440,6 +441,32 @@ function describeReportChanges(prior: any, next: any): string[] {
   for (const k of Array.from(new Set([...Object.keys(pk), ...Object.keys(nk)])))
     cmp(k, pk[k], nk[k], next.kpi_cell_map);
   return out;
+}
+
+// Rental centrifuge rules shared by create + edit. Mutates the patch; returns
+// an error message or null.
+function applyRentalRules(patch: any, current: any | null): string | null {
+  const isRental = patch.is_rental ?? current?.is_rental ?? false;
+  if (patch.is_rental === false) {
+    // Turning rental off keeps the details on file but stops treating it as one.
+    return null;
+  }
+  if (!isRental) return null;
+  const start = patch.rental_start !== undefined ? patch.rental_start : current?.rental_start ?? null;
+  const end = patch.rental_end !== undefined ? patch.rental_end : current?.rental_end ?? null;
+  if (end && !start) return "Enter the date the rental was received before the return date";
+  if (start && end && end < start) return "The return date must be on or after the date received";
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  if (patch.rental_end === undefined && patch.job_id && end && end <= today)
+    return "This rental unit has been returned. Clear its return date before putting it on a job.";
+  if (patch.rental_end !== undefined && end && end <= today) {
+    // Sent back: off any job and out of the active fleet.
+    patch.job_id = null;
+    patch.status = "Returned";
+  } else if (patch.rental_end !== undefined && !end && current?.status === "Returned") {
+    patch.status = "Available";
+  }
+  return null;
 }
 
 export async function registerRoutes(
@@ -2861,7 +2888,7 @@ export async function registerRoutes(
     if (fieldJobIds) q = q.in("job_id", fieldJobIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
-    res.json(data);
+    res.json((data || []).map((a: any) => stripRentalMoney(a, req.profile!.role)));
   });
 
   // Utilization export (CSV) over a selectable [start,end] date window.
@@ -3124,13 +3151,18 @@ export async function registerRoutes(
         state = svc?.state ?? state;
         interval = SERVICE_INTERVAL_HOURS;
       }
-      res.json({
-        ...asset,
-        run_hours_since_service: hoursSince,
-        service_hours_interval: interval,
-        service_state: state,
-        history,
-      });
+      res.json(
+        stripRentalMoney(
+          {
+            ...asset,
+            run_hours_since_service: hoursSince,
+            service_hours_interval: interval,
+            service_state: state,
+            history,
+          },
+          req.profile!.role,
+        ),
+      );
     },
   );
 
@@ -3151,6 +3183,8 @@ export async function registerRoutes(
         : null;
       const client = supabaseAdmin || supabaseAnon;
       const insert: any = { ...parsed.data, run_hours: runHours };
+      const rentalErr = applyRentalRules(insert, null);
+      if (rentalErr) return res.status(400).json({ message: rentalErr });
       // Interval only applies to run-hour assets; otherwise let the DB default stand.
       if (!tracksRunHours(parsed.data.category)) delete insert.service_hours_interval;
       const { data, error } = await client
@@ -3176,7 +3210,7 @@ export async function registerRoutes(
       // load the asset for area-scope check (plus job_id/category for edit guards)
       const { data: asset } = await client
         .from("assets")
-        .select("area, job_id, category")
+        .select("*")
         .eq("id", req.params.id)
         .single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
@@ -3227,6 +3261,10 @@ export async function registerRoutes(
       // stale values don't linger.
       const effectiveCategory = patch.category ?? asset.category;
       if (!tracksRunHours(effectiveCategory)) delete patch.service_hours_interval;
+
+      // Rental rules (return date releases the unit and marks it Returned).
+      const rentalErr = applyRentalRules(patch, asset);
+      if (rentalErr) return res.status(400).json({ message: rentalErr });
 
       const { data, error } = await client
         .from("assets")
@@ -3391,6 +3429,8 @@ export async function registerRoutes(
           return {
             id: a.id,
             tag: a.tag,
+            is_rental: !!a.is_rental,
+            rental_vendor: a.rental_vendor ?? null,
             category: a.category,
             area: a.area,
             status: a.status,
@@ -3461,7 +3501,7 @@ export async function registerRoutes(
       const client = supabaseAdmin || supabaseAnon;
       const { data: asset } = await client
         .from("assets")
-        .select("id, tag, category, area, job_id, run_hours, run_hours_at_service, job:jobs(id,job_number)")
+        .select("*, job:jobs(id,job_number)")
         .eq("id", req.params.id)
         .maybeSingle();
       if (!asset || !tracksRunHours((asset as any).category))
@@ -3550,6 +3590,8 @@ export async function registerRoutes(
       const payload: ServiceAssetDetail = {
         id: a.id,
         tag: a.tag,
+        is_rental: !!a.is_rental,
+        rental_vendor: a.rental_vendor ?? null,
         category: a.category,
         area: a.area,
         job_id: a.job_id,
@@ -5357,12 +5399,14 @@ export async function registerRoutes(
       if (report.job_id) {
         const { data: assets } = await client
           .from("assets")
-          .select("id, tag, category, run_hours, centrifuge_slot")
+          .select("id, tag, category, run_hours, centrifuge_slot, is_rental, rental_vendor")
           .eq("job_id", report.job_id)
           .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
         centrifuges = (assets || []).map((a: any) => ({
           id: a.id,
           tag: a.tag,
+          is_rental: !!a.is_rental,
+          rental_vendor: a.rental_vendor ?? null,
           category: a.category,
           run_hours: a.run_hours,
           centrifuge_slot: a.centrifuge_slot ?? null,
@@ -8171,6 +8215,7 @@ export async function registerRoutes(
 
 
   // Forecast: upcoming work + centrifuge planning (server/forecast.ts)
+  registerRentalRoutes(app);
   registerForecastRoutes(app);
 
   return httpServer;

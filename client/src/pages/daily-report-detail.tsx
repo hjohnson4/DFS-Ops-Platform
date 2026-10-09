@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RentalBadge } from "@/components/Rental";
 import { useRoute, Link, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -712,6 +713,7 @@ export default function DailyReportDetailPage() {
                     <span className="font-medium text-foreground">
                       {runCtx?.centrifuges?.[0]?.tag}
                     </span>{" "}
+                    <RentalBadge asset={runCtx?.centrifuges?.[0]} />{" "}
                     ({runCtx?.centrifuges?.[0]?.category}).
                   </div>
                 ) : needsSlotMapping ? (
@@ -730,7 +732,7 @@ export default function DailyReportDetailPage() {
                     <ul className="text-xs mt-1 list-disc pl-4">
                       {(runCtx?.centrifuges ?? []).map((c) => (
                         <li key={c.id}>
-                          {c.tag} —{" "}
+                          {c.tag} <RentalBadge asset={c} /> —{" "}
                           {c.centrifuge_slot === 1
                             ? "Centrifuge 1"
                             : c.centrifuge_slot === 2
@@ -755,6 +757,7 @@ export default function DailyReportDetailPage() {
                         >
                           <div className="min-w-0">
                             <span className="font-medium">{c.tag}</span>{" "}
+                            <RentalBadge asset={c} />{" "}
                             <span className="text-xs text-muted-foreground">
                               (Centrifuge {c.centrifuge_slot} · current{" "}
                               {c.run_hours ?? 0} hrs)
@@ -978,6 +981,7 @@ function FieldReportBody({
                   data-testid={`asset-chip-${aid}`}
                 >
                   <span className="font-medium">{a?.tag || "Unknown"}</span>
+                  <RentalBadge asset={a} />
                   {a?.category && (
                     <span className="text-muted-foreground text-xs">{a.category}</span>
                   )}

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { RentalBadge } from "@/components/Rental";
 import { useRoute, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -128,7 +129,7 @@ export default function JobDetailPage() {
   // assets available to attach: unassigned AND in this job's operating area
   // (the backend enforces the same-area rule; we mirror it in the picker)
   const attachableAssets = (allAssets || []).filter(
-    (a) => !a.job_id && a.area === job?.area,
+    (a) => !a.job_id && a.area === job?.area && a.status !== "Returned",
   );
 
   // field tickets for this job
@@ -611,6 +612,7 @@ export default function JobDetailPage() {
             >
               <Wrench className="h-4 w-4 text-muted-foreground shrink-0" />
               <span className="font-medium">{a.tag}</span>
+              <RentalBadge asset={a} withVendor />
               <span className="text-muted-foreground">{a.category}</span>
               {a.job_or_well && (
                 <span className="text-muted-foreground">· {a.job_or_well}</span>
@@ -693,7 +695,9 @@ export default function JobDetailPage() {
                 <SelectContent>
                   {attachableAssets.map((a) => (
                     <SelectItem key={a.id} value={a.id} data-testid={`option-asset-${a.id}`}>
-                      {a.tag} — {a.category}
+                      <span className="inline-flex items-center gap-1.5">
+                        {a.tag} <RentalBadge asset={a} /> — {a.category}
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>

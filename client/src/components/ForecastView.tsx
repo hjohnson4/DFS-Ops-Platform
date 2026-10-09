@@ -36,6 +36,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Loader2, Plus, Pencil, Boxes, ArrowRightCircle, AlertTriangle, FileText } from "lucide-react";
 import { BidDocuments } from "@/components/BidDocuments";
+import { RentalBadge } from "@/components/Rental";
 
 const money = (n: number) =>
   n >= 1_000_000
@@ -64,9 +65,9 @@ const PIECE_CLASS: Record<string, string> = {
   conflict: "bg-rose-600 text-white",
 };
 
-function Cell({ pieces }: { pieces: Piece[] }) {
+function Cell({ pieces, rental = false }: { pieces: Piece[]; rental?: boolean }) {
   return (
-    <div className="flex h-8 gap-0.5">
+    <div className={`flex h-8 gap-0.5 ${rental ? "rounded-md outline outline-2 outline-offset-1 outline-orange-400" : ""}`}>
       {pieces.map((p, i) => (
         <div
           key={i}
@@ -196,11 +197,16 @@ export function ForecastView({ area }: { area: string }) {
                   {rows.map((r) => (
                     <div key={r.asset.id} className="contents">
                       <div className="flex flex-col justify-center text-xs font-medium leading-tight" data-testid={`row-unit-${r.asset.tag}`}>
-                        {r.asset.tag}
-                        <span className="text-[10px] font-normal text-muted-foreground">{r.asset.area}</span>
+                        <span className="flex items-center gap-1">
+                          {r.asset.tag}
+                          <RentalBadge asset={r.asset} className="px-1 text-[9px] leading-3" />
+                        </span>
+                        <span className="truncate text-[10px] font-normal text-muted-foreground">
+                          {r.asset.is_rental && r.asset.rental_vendor ? r.asset.rental_vendor : r.asset.area}
+                        </span>
                       </div>
                       {r.cells.map((c, i) => (
-                        <Cell key={i} pieces={c} />
+                        <Cell key={i} pieces={c} rental={!!r.asset.is_rental} />
                       ))}
                     </div>
                   ))}
@@ -411,6 +417,10 @@ function Legend() {
           {t}
         </span>
       ))}
+      <span className="inline-flex items-center gap-1.5">
+        <span className="inline-block h-3 w-4 rounded-sm outline outline-2 outline-orange-400" />
+        Rental unit
+      </span>
       <span>∞ = indefinite (no end date) · a split square = the unit changes jobs that month</span>
     </div>
   );
@@ -787,7 +797,7 @@ function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; boar
                       }}
                       data-testid={`check-unit-${a.tag}`}
                     />
-                    <span className="w-20 font-medium">{a.tag}</span>
+                    <span className="flex w-28 items-center gap-1 font-medium">{a.tag}<RentalBadge asset={a} /></span>
                     <span className="text-xs text-muted-foreground">{a.area}</span>
                     <span className={`ml-auto text-xs ${note ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}`}>
                       {note || "Free"}
@@ -940,7 +950,7 @@ function ConvertDialog({ forecast, board, onClose }: { forecast: ForecastJob; bo
                       }}
                       data-testid={`check-move-${a.tag}`}
                     />
-                    <span className="w-20 font-medium">{a.tag}</span>
+                    <span className="flex w-28 items-center gap-1 font-medium">{a.tag}<RentalBadge asset={a} /></span>
                     <span className="text-xs text-muted-foreground">{a.category.replace(" Centrifuge", "")}</span>
                     <span className="ml-auto text-xs text-muted-foreground">
                       {j ? `Still on ${j.job_number} — stays planned, move it when released` : "Move onto the job now"}

@@ -246,7 +246,7 @@ function WorkOrderDialog({
                 <SelectContent>
                   {assets.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      {a.tag} · {a.category} · {a.area}
+                      {a.tag}{a.is_rental ? " · RENTAL" : ""} · {a.category} · {a.area}
                       {a.job_id ? " · in field" : ""}
                     </SelectItem>
                   ))}

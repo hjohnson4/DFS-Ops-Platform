@@ -122,18 +122,21 @@ export function registerForecastRoutes(app: Express) {
       // Centrifuges in the area, plus any unit placed on a forecast here.
       let aq = client
         .from("assets")
-        .select("id, tag, category, area, status, job_id")
+        .select("id, tag, category, area, status, job_id, is_rental, rental_vendor")
         .in("category", FORECAST_CATEGORIES as unknown as string[]);
       if (area) aq = aq.eq("area", area);
       const { data: aRows, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
-      const assets: any[] = [...(aRows || [])];
+      // Returned rental units are out of the fleet (unless still planned somewhere).
+      const assets: any[] = (aRows || []).filter(
+        (a: any) => !(a.is_rental && a.status === "Returned") || plannedIds.has(a.id),
+      );
       const have = new Set(assets.map((a) => a.id));
       const extra = Array.from(plannedIds).filter((id) => !have.has(id));
       if (extra.length) {
         const { data: more } = await client
           .from("assets")
-          .select("id, tag, category, area, status, job_id")
+          .select("id, tag, category, area, status, job_id, is_rental, rental_vendor")
           .in("id", extra);
         (more || []).forEach((a: any) => assets.push(a));
       }

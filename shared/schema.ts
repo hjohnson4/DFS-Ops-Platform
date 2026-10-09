@@ -269,8 +269,51 @@ export interface Asset {
   // run-hour categories on jobs with 2+ centrifuges; drives which centrifuge's
   // actual hours accrue to this asset at sign-off.
   centrifuge_slot: number | null;
+  // Rented from a third party. Monthly rate and notes are only sent to Admins
+  // and Area Managers.
+  is_rental?: boolean;
+  rental_vendor?: string | null;
+  rental_ref?: string | null;
+  rental_monthly_rate?: number | null;
+  rental_start?: string | null;
+  rental_end?: string | null;
+  rental_notes?: string | null;
   created_at: string;
 }
+
+// Rental cost vs. earnings for one rented unit (see server/rentals.ts).
+export interface RentalSummary {
+  through: string | null;
+  days_on_rent: number;
+  days_on_job: number;
+  days_missing_rate: number; // days on a job with no day rate saved
+  rent_cost: number;
+  one_time_charges: number;
+  total_cost: number;
+  earned: number;
+  profit: number;
+  on_rent: boolean;
+  monthly_rate: number | null;
+}
+export interface RentalCharge {
+  id: string;
+  asset_id: string;
+  charge_date: string;
+  description: string;
+  amount: number;
+  created_by_name: string | null;
+  created_at: string;
+}
+export interface RentalDetail {
+  summary: RentalSummary;
+  charges: RentalCharge[];
+  jobs: { job_id: string; job_number: string | null; day_rate: number | null; start_date: string; end_date: string | null }[];
+}
+export const createRentalChargeSchema = z.object({
+  charge_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date"),
+  description: z.string().trim().min(1, "Describe the charge").max(200),
+  amount: z.coerce.number().nonnegative("Amount can't be negative"),
+});
 
 // Minimal job info joined onto an asset to show where it is deployed.
 export interface AssetJobRef {
@@ -511,6 +554,8 @@ export interface JobHours {
 export interface ServiceAssetDetail {
   id: string;
   tag: string;
+  is_rental?: boolean;
+  rental_vendor?: string | null;
   category: Category;
   area: Area;
   job_id: string | null;
@@ -532,6 +577,8 @@ export interface ServiceAssetDetail {
 export interface ServiceAssetRow {
   id: string;
   tag: string;
+  is_rental?: boolean;
+  rental_vendor?: string | null;
   category: Category;
   area: Area;
   status: string; // deployment status (e.g. On Job / Available)
@@ -931,6 +978,8 @@ export interface DailyReport {
 export interface CentrifugeOnJob {
   id: string;
   tag: string;
+  is_rental?: boolean;
+  rental_vendor?: string | null;
   category: Category;
   run_hours: number | null;
   // Which centrifuge column this asset is mapped to on the job (1 or 2), or
@@ -1051,6 +1100,23 @@ const dayRateField = z
   ])
   .optional();
 
+// Rental fields (third-party rented units). Dates are yyyy-mm-dd or null.
+const optDate = z
+  .union([z.null(), z.literal("").transform(() => null), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date")])
+  .optional();
+const optText = z
+  .union([z.null(), z.string().trim().transform((v) => (v ? v : null))])
+  .optional();
+const rentalFields = {
+  is_rental: z.boolean().optional(),
+  rental_vendor: optText,
+  rental_ref: optText,
+  rental_monthly_rate: dayRateField,
+  rental_start: optDate,
+  rental_end: optDate,
+  rental_notes: optText,
+};
+
 // Centrifuge slot: 1 ("Centrifuge 1"), 2 ("Centrifuge 2"), or null/blank to
 // clear. null/"" are checked before coercion so clearing stays null. Any value
 // other than 1 or 2 is rejected.
@@ -1076,6 +1142,7 @@ export const createAssetSchema = z.object({
   service_hours_interval: z.number().int().positive().optional(),
   day_rate: dayRateField,
   centrifuge_slot: centrifugeSlotField,
+  ...rentalFields,
 });
 export type CreateAssetInput = z.infer<typeof createAssetSchema>;
 
@@ -1421,6 +1488,7 @@ export const updateAssetSchema = z.object({
   maintenance_schedule_id: z.string().uuid().nullable().optional(),
   day_rate: dayRateField,
   centrifuge_slot: centrifugeSlotField,
+  ...rentalFields,
 });
 export type UpdateAssetInput = z.infer<typeof updateAssetSchema>;
 
@@ -2096,6 +2164,8 @@ export interface ForecastBoard {
     area: Area;
     status: string;
     job_id: string | null;
+    is_rental?: boolean;
+    rental_vendor?: string | null;
   }[];
   jobs: {
     id: string;

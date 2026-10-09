@@ -1,4 +1,5 @@
 import { Fragment } from "react";
+import { RentalBadge } from "@/components/Rental";
 import { useQuery } from "@tanstack/react-query";
 import type { ServiceAssetDetail, ServiceState } from "@shared/schema";
 import {
@@ -76,6 +77,7 @@ export function ServiceAssetDialog({
           <DialogTitle className="flex items-center gap-2">
             <Gauge className="h-5 w-5" />
             {data ? data.tag : "Centrifuge"}
+            {data && <RentalBadge asset={data} withVendor />}
             {data && (
               <span
                 className={`ml-1 inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${STATE_CLS[data.service_state]}`}

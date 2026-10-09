@@ -562,6 +562,11 @@ var JOB_STATUS = ["Active", "Rig Move", "On Hold", "Completed"];
 var isLiveJobStatus = (s) => s === "Active" || s === "Rig Move";
 var CREWING = ["Manned", "Unmanned"];
 var SCHEDULE_CADENCE = ["run_hours", "calendar_days"];
+var createRentalChargeSchema = z.object({
+  charge_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date"),
+  description: z.string().trim().min(1, "Describe the charge").max(200),
+  amount: z.coerce.number().nonnegative("Amount can't be negative")
+});
 var DEFAULT_SERVICE_HOURS_INTERVAL = 250;
 var SERVICE_SOON_FRACTION = 0.1;
 function serviceStatusFor(a) {
@@ -612,6 +617,17 @@ var dayRateField = z.union([
   z.literal("").transform(() => null),
   z.coerce.number().nonnegative()
 ]).optional();
+var optDate = z.union([z.null(), z.literal("").transform(() => null), z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date")]).optional();
+var optText = z.union([z.null(), z.string().trim().transform((v) => v ? v : null)]).optional();
+var rentalFields = {
+  is_rental: z.boolean().optional(),
+  rental_vendor: optText,
+  rental_ref: optText,
+  rental_monthly_rate: dayRateField,
+  rental_start: optDate,
+  rental_end: optDate,
+  rental_notes: optText
+};
 var centrifugeSlotField = z.union([
   z.null(),
   z.literal("").transform(() => null),
@@ -630,7 +646,8 @@ var createAssetSchema = z.object({
   run_hours: z.number().int().nonnegative().nullable().optional(),
   service_hours_interval: z.number().int().positive().optional(),
   day_rate: dayRateField,
-  centrifuge_slot: centrifugeSlotField
+  centrifuge_slot: centrifugeSlotField,
+  ...rentalFields
 });
 var createMaintenanceScheduleSchema = z.object({
   name: z.string().min(1),
@@ -801,7 +818,8 @@ var updateAssetSchema = z.object({
   description: z.string().nullable().optional(),
   maintenance_schedule_id: z.string().uuid().nullable().optional(),
   day_rate: dayRateField,
-  centrifuge_slot: centrifugeSlotField
+  centrifuge_slot: centrifugeSlotField,
+  ...rentalFields
 });
 var amountField = z.union([
   z.null(),
@@ -1138,22 +1156,24 @@ function registerForecastRoutes(app) {
       }
       const plannedIds = /* @__PURE__ */ new Set();
       forecasts.forEach((f) => f.asset_ids.forEach((a) => plannedIds.add(a)));
-      let aq = client2.from("assets").select("id, tag, category, area, status, job_id").in("category", FORECAST_CATEGORIES);
+      let aq = client2.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("category", FORECAST_CATEGORIES);
       if (area) aq = aq.eq("area", area);
       const { data: aRows, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
-      const assets = [...aRows || []];
+      const assets = (aRows || []).filter(
+        (a) => !(a.is_rental && a.status === "Returned") || plannedIds.has(a.id)
+      );
       const have = new Set(assets.map((a) => a.id));
       const extra = Array.from(plannedIds).filter((id) => !have.has(id));
       if (extra.length) {
-        const { data: more } = await client2.from("assets").select("id, tag, category, area, status, job_id").in("id", extra);
+        const { data: more } = await client2.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("id", extra);
         (more || []).forEach((a) => assets.push(a));
       }
-      const num2 = (t) => {
+      const num3 = (t) => {
         const m = String(t).match(/(\d+)/);
         return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
       };
-      assets.sort((a, b) => num2(a.tag) - num2(b.tag) || String(a.tag).localeCompare(String(b.tag)));
+      assets.sort((a, b) => num3(a.tag) - num3(b.tag) || String(a.tag).localeCompare(String(b.tag)));
       const jobIds = Array.from(new Set(assets.map((a) => a.job_id).filter(Boolean)));
       let jq = client2.from("jobs").select("id, job_number, area, status, started_on, est_release_on, day_rate, archived_at, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
       if (area) jq = jq.or(`area.eq."${area}"${jobIds.length ? `,id.in.(${jobIds.join(",")})` : ""}`);
@@ -1608,6 +1628,203 @@ async function recordRateChange(before, after, by) {
   await c.from("job_rate_events").insert(rows);
 }
 
+// server/rentals.ts
+var db2 = () => supabaseAdmin || supabaseAnon;
+var RENTAL_MONEY_ROLES = ["admin", "area"];
+var canSeeRentalMoney = (role) => !!role && RENTAL_MONEY_ROLES.includes(role);
+var MONEY_FIELDS = ["rental_monthly_rate", "rental_notes"];
+function stripRentalMoney(row, role) {
+  if (!row || canSeeRentalMoney(role)) return row;
+  const out = { ...row };
+  MONEY_FIELDS.forEach((k) => delete out[k]);
+  return out;
+}
+function addDays2(iso, n) {
+  const d = /* @__PURE__ */ new Date(iso + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function daysInMonth(iso) {
+  const y = Number(iso.slice(0, 4));
+  const m = Number(iso.slice(5, 7));
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+var num2 = (v) => {
+  if (v === null || v === void 0 || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+var round2 = (n) => Math.round(n * 100) / 100;
+function computeRental(asset, stints, charges, today = todayCentral()) {
+  const start = asset.rental_start;
+  const monthly = num2(asset.rental_monthly_rate);
+  const one_time = round2(charges.reduce((s, c) => s + (num2(c.amount) ?? 0), 0));
+  if (!start) {
+    return {
+      through: null,
+      days_on_rent: 0,
+      days_on_job: 0,
+      days_missing_rate: 0,
+      rent_cost: 0,
+      one_time_charges: one_time,
+      total_cost: one_time,
+      earned: 0,
+      profit: round2(-one_time),
+      on_rent: false,
+      monthly_rate: monthly
+    };
+  }
+  const end = asset.rental_end && asset.rental_end < today ? asset.rental_end : today;
+  const sorted = [...stints].sort(
+    (a, b) => b.start_date.localeCompare(a.start_date) || String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""))
+  );
+  let days = 0;
+  let onJob = 0;
+  let missing = 0;
+  let rent = 0;
+  let earned = 0;
+  for (let d = start; d <= end; d = addDays2(d, 1)) {
+    days++;
+    if (monthly != null) rent += monthly / daysInMonth(d);
+    const s = sorted.find((x) => x.job_id && x.start_date <= d && (x.end_date == null || x.end_date >= d));
+    if (s) {
+      onJob++;
+      const r = num2(s.day_rate);
+      if (r == null) missing++;
+      else earned += r;
+    }
+    if (days > 3660) break;
+  }
+  rent = round2(rent);
+  earned = round2(earned);
+  const total = round2(rent + one_time);
+  return {
+    through: end < start ? null : end,
+    days_on_rent: end < start ? 0 : days,
+    days_on_job: onJob,
+    days_missing_rate: missing,
+    rent_cost: rent,
+    one_time_charges: one_time,
+    total_cost: total,
+    earned,
+    profit: round2(earned - total),
+    on_rent: !asset.rental_end || asset.rental_end >= today,
+    monthly_rate: monthly
+  };
+}
+var missingSetup = (msg) => !!msg && /rental_|asset_job_stints|is_rental/.test(msg) && /does not exist|schema cache|column/i.test(msg);
+var SETUP_MSG2 = "Rental tracking isn't set up yet. Run the rental centrifuges SQL in the Supabase SQL editor, then refresh.";
+async function loadRentalBits(assetIds) {
+  if (!assetIds.length) return { stints: /* @__PURE__ */ new Map(), charges: /* @__PURE__ */ new Map() };
+  const client2 = db2();
+  const [{ data: st }, { data: ch }] = await Promise.all([
+    client2.from("asset_job_stints").select("id, asset_id, job_id, day_rate, start_date, end_date, created_at, job:jobs(job_number)").in("asset_id", assetIds),
+    client2.from("rental_charges").select("id, asset_id, charge_date, description, amount, created_by_name, created_at").in("asset_id", assetIds).order("charge_date", { ascending: true })
+  ]);
+  const stints = /* @__PURE__ */ new Map();
+  (st || []).forEach((s) => stints.set(s.asset_id, [...stints.get(s.asset_id) || [], s]));
+  const charges = /* @__PURE__ */ new Map();
+  (ch || []).forEach((c) => charges.set(c.asset_id, [...charges.get(c.asset_id) || [], c]));
+  return { stints, charges };
+}
+function registerRentalRoutes(app) {
+  app.get("/api/rentals", requireAuth, requireRole("admin", "area"), async (req, res) => {
+    const scope = areaScopeOf(req.profile);
+    let q = db2().from("assets").select(
+      "id, tag, category, area, status, job_id, day_rate, is_rental, rental_vendor, rental_ref, rental_monthly_rate, rental_start, rental_end, rental_notes, job:jobs(id, job_number)"
+    ).eq("is_rental", true).order("tag", { ascending: true });
+    if (scope) q = q.eq("area", scope);
+    const { data, error } = await q;
+    if (error) {
+      if (missingSetup(error.message)) return res.status(409).json({ message: SETUP_MSG2, setup_required: true });
+      return res.status(500).json({ message: error.message });
+    }
+    const rows = data || [];
+    const { stints, charges } = await loadRentalBits(rows.map((a) => a.id));
+    const today = todayCentral();
+    const out = rows.map((a) => ({
+      ...a,
+      rental: computeRental(a, stints.get(a.id) || [], charges.get(a.id) || [], today)
+    }));
+    const t = out.reduce(
+      (s, a) => {
+        s.total_cost += a.rental.total_cost;
+        s.earned += a.rental.earned;
+        s.profit += a.rental.profit;
+        if (a.rental.on_rent) s.on_rent++;
+        return s;
+      },
+      { total_cost: 0, earned: 0, profit: 0, on_rent: 0 }
+    );
+    res.json({
+      today,
+      rentals: out,
+      totals: { total_cost: round2(t.total_cost), earned: round2(t.earned), profit: round2(t.profit), on_rent: t.on_rent, count: out.length }
+    });
+  });
+  app.get("/api/assets/:id/rental", requireAuth, requireRole("admin", "area"), async (req, res) => {
+    const { data: a, error } = await db2().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
+    if (error) {
+      if (missingSetup(error.message)) return res.status(409).json({ message: SETUP_MSG2, setup_required: true });
+      return res.status(500).json({ message: error.message });
+    }
+    if (!a) return res.status(404).json({ message: "Asset not found" });
+    const scope = areaScopeOf(req.profile);
+    if (scope && a.area !== scope) return res.status(404).json({ message: "Asset not found" });
+    const { stints, charges } = await loadRentalBits([a.id]);
+    const st = stints.get(a.id) || [];
+    const ch = charges.get(a.id) || [];
+    res.json({
+      summary: computeRental(a, st, ch),
+      charges: ch,
+      jobs: st.filter((s) => s.job_id).sort((x, y) => y.start_date.localeCompare(x.start_date)).map((s) => ({
+        job_id: s.job_id,
+        job_number: s.job?.job_number ?? null,
+        day_rate: num2(s.day_rate),
+        start_date: s.start_date,
+        end_date: s.end_date
+      }))
+    });
+  });
+  app.post(
+    "/api/assets/:id/rental-charges",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const parsed = createRentalChargeSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+      const { data: a } = await db2().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
+      if (!a) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && a.area !== scope) return res.status(403).json({ message: "Outside your area" });
+      if (!a.is_rental) return res.status(400).json({ message: "This asset isn't marked as a rental" });
+      const { data, error } = await db2().from("rental_charges").insert({
+        asset_id: a.id,
+        charge_date: parsed.data.charge_date,
+        description: parsed.data.description,
+        amount: parsed.data.amount,
+        created_by: req.profile.id,
+        created_by_name: req.profile.name
+      }).select().single();
+      if (error) {
+        if (missingSetup(error.message) || /rental_charges/.test(error.message))
+          return res.status(409).json({ message: SETUP_MSG2, setup_required: true });
+        return res.status(400).json({ message: error.message });
+      }
+      res.status(201).json(data);
+    }
+  );
+  app.delete("/api/rental-charges/:id", requireAuth, requireRole("admin", "area"), async (req, res) => {
+    const { data: c } = await db2().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
+    if (!c) return res.status(404).json({ message: "Charge not found" });
+    const scope = areaScopeOf(req.profile);
+    if (scope && c.asset?.area !== scope) return res.status(403).json({ message: "Outside your area" });
+    const { error } = await db2().from("rental_charges").delete().eq("id", c.id);
+    if (error) return res.status(400).json({ message: error.message });
+    res.status(204).end();
+  });
+}
+
 // server/routes.ts
 async function logRunHours(client2, report, alloc) {
   if (!alloc.length) return;
@@ -1647,7 +1864,7 @@ function hoursAfter(rows, afterDate) {
   }
   return Math.round(t * 100) / 100;
 }
-var round2 = (n) => Math.round(n * 100) / 100;
+var round22 = (n) => Math.round(n * 100) / 100;
 async function hoursSinceServiceFor(client2, assets) {
   const ids = assets.map((a) => a.id);
   const out = /* @__PURE__ */ new Map();
@@ -1664,7 +1881,7 @@ async function hoursSinceServiceFor(client2, assets) {
     else {
       const meter = Number(a.run_hours ?? 0) || 0;
       const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-      since = round2(Math.max(0, meter - base));
+      since = round22(Math.max(0, meter - base));
     }
     const st = hoursServiceStatusFor(since, !!lastService);
     out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
@@ -1825,6 +2042,27 @@ function describeReportChanges(prior, next) {
   for (const k of Array.from(/* @__PURE__ */ new Set([...Object.keys(pk), ...Object.keys(nk)])))
     cmp(k, pk[k], nk[k], next.kpi_cell_map);
   return out;
+}
+function applyRentalRules(patch, current) {
+  const isRental = patch.is_rental ?? current?.is_rental ?? false;
+  if (patch.is_rental === false) {
+    return null;
+  }
+  if (!isRental) return null;
+  const start = patch.rental_start !== void 0 ? patch.rental_start : current?.rental_start ?? null;
+  const end = patch.rental_end !== void 0 ? patch.rental_end : current?.rental_end ?? null;
+  if (end && !start) return "Enter the date the rental was received before the return date";
+  if (start && end && end < start) return "The return date must be on or after the date received";
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
+  if (patch.rental_end === void 0 && patch.job_id && end && end <= today)
+    return "This rental unit has been returned. Clear its return date before putting it on a job.";
+  if (patch.rental_end !== void 0 && end && end <= today) {
+    patch.job_id = null;
+    patch.status = "Returned";
+  } else if (patch.rental_end !== void 0 && !end && current?.status === "Returned") {
+    patch.status = "Available";
+  }
+  return null;
 }
 async function registerRoutes(httpServer, app) {
   app.get("/api/health", (_req, res) => {
@@ -3436,7 +3674,7 @@ async function registerRoutes(httpServer, app) {
     if (fieldJobIds) q = q.in("job_id", fieldJobIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
-    res.json(data);
+    res.json((data || []).map((a) => stripRentalMoney(a, req.profile.role)));
   });
   app.get(
     "/api/assets/utilization.csv",
@@ -3647,13 +3885,18 @@ async function registerRoutes(httpServer, app) {
         state = svc?.state ?? state;
         interval = SERVICE_INTERVAL_HOURS;
       }
-      res.json({
-        ...asset,
-        run_hours_since_service: hoursSince,
-        service_hours_interval: interval,
-        service_state: state,
-        history
-      });
+      res.json(
+        stripRentalMoney(
+          {
+            ...asset,
+            run_hours_since_service: hoursSince,
+            service_hours_interval: interval,
+            service_state: state,
+            history
+          },
+          req.profile.role
+        )
+      );
     }
   );
   app.post(
@@ -3670,6 +3913,8 @@ async function registerRoutes(httpServer, app) {
       const runHours = tracksRunHours(parsed.data.category) ? parsed.data.run_hours ?? 0 : null;
       const client2 = supabaseAdmin || supabaseAnon;
       const insert = { ...parsed.data, run_hours: runHours };
+      const rentalErr = applyRentalRules(insert, null);
+      if (rentalErr) return res.status(400).json({ message: rentalErr });
       if (!tracksRunHours(parsed.data.category)) delete insert.service_hours_interval;
       const { data, error } = await client2.from("assets").insert(insert).select().single();
       if (error) return res.status(400).json({ message: error.message });
@@ -3685,7 +3930,7 @@ async function registerRoutes(httpServer, app) {
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client2.from("assets").select("area, job_id, category").eq("id", req.params.id).single();
+      const { data: asset } = await client2.from("assets").select("*").eq("id", req.params.id).single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       if (req.profile.role === "area" && asset.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
@@ -3705,6 +3950,8 @@ async function registerRoutes(httpServer, app) {
       }
       const effectiveCategory = patch.category ?? asset.category;
       if (!tracksRunHours(effectiveCategory)) delete patch.service_hours_interval;
+      const rentalErr = applyRentalRules(patch, asset);
+      if (rentalErr) return res.status(400).json({ message: rentalErr });
       const { data, error } = await client2.from("assets").update(patch).eq("id", req.params.id).select().single();
       if (error) {
         const dup = /duplicate|unique/i.test(error.message) && /tag/i.test(error.message);
@@ -3791,14 +4038,16 @@ async function registerRoutes(httpServer, app) {
           } else {
             const meter = Number(a.run_hours ?? 0) || 0;
             const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-            since = round2(Math.max(0, meter - base));
+            since = round22(Math.max(0, meter - base));
           }
           const st = hoursServiceStatusFor(since, !!lastService);
-          const currentJobHours = assigned && log2.ready ? round2(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
+          const currentJobHours = assigned && log2.ready ? round22(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
             tag: a.tag,
+            is_rental: !!a.is_rental,
+            rental_vendor: a.rental_vendor ?? null,
             category: a.category,
             area: a.area,
             status: a.status,
@@ -3849,7 +4098,7 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     async (req, res) => {
       const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client2.from("assets").select("id, tag, category, area, job_id, run_hours, run_hours_at_service, job:jobs(id,job_number)").eq("id", req.params.id).maybeSingle();
+      const { data: asset } = await client2.from("assets").select("*, job:jobs(id,job_number)").eq("id", req.params.id).maybeSingle();
       if (!asset || !tracksRunHours(asset.category))
         return res.status(404).json({ message: "Centrifuge not found" });
       const a = asset;
@@ -3880,7 +4129,7 @@ async function registerRoutes(httpServer, app) {
       else {
         const meter = Number(a.run_hours ?? 0) || 0;
         const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-        since = round2(Math.max(0, meter - base));
+        since = round22(Math.max(0, meter - base));
       }
       const st = hoursServiceStatusFor(since, !!lastService);
       const jobsMap = /* @__PURE__ */ new Map();
@@ -3913,8 +4162,8 @@ async function registerRoutes(httpServer, app) {
       }
       const jobs = Array.from(jobsMap.values()).map(({ _wells, ...j }) => ({
         ...j,
-        hours: round2(j.hours),
-        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round2(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
+        hours: round22(j.hours),
+        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round22(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
       })).sort(
         (x, y) => Number(y.is_current) - Number(x.is_current) || String(y.wells[0]?.last_date ?? "").localeCompare(String(x.wells[0]?.last_date ?? ""))
       );
@@ -3922,6 +4171,8 @@ async function registerRoutes(httpServer, app) {
       const payload = {
         id: a.id,
         tag: a.tag,
+        is_rental: !!a.is_rental,
+        rental_vendor: a.rental_vendor ?? null,
         category: a.category,
         area: a.area,
         job_id: a.job_id,
@@ -3933,7 +4184,7 @@ async function registerRoutes(httpServer, app) {
         last_service_date: lastService,
         last_service_supervisor: history[0]?.supervisor_name ?? null,
         current_job_hours: a.job_id ? log2.ready ? current?.hours ?? 0 : null : null,
-        total_logged_hours: round2(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
+        total_logged_hours: round22(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
         history,
         jobs,
         ledger_ready: log2.ready
@@ -5165,10 +5416,12 @@ async function registerRoutes(httpServer, app) {
       const daily_run_hours_cent2 = numOrNull(kp.daily_run_hours_cent2);
       let centrifuges = [];
       if (report.job_id) {
-        const { data: assets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+        const { data: assets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot, is_rental, rental_vendor").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
         centrifuges = (assets || []).map((a) => ({
           id: a.id,
           tag: a.tag,
+          is_rental: !!a.is_rental,
+          rental_vendor: a.rental_vendor ?? null,
           category: a.category,
           run_hours: a.run_hours,
           centrifuge_slot: a.centrifuge_slot ?? null
@@ -7081,6 +7334,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       res.status(204).end();
     }
   );
+  registerRentalRoutes(app);
   registerForecastRoutes(app);
   return httpServer;
 }

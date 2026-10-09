@@ -39,6 +39,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { AssetTag, RentalBadge, RentalFields, RentalPanel, RentalsSummary, rentalFormFrom, rentalPayload, type RentalForm } from "@/components/Rental";
 import {
   Boxes,
   Plus,
@@ -275,8 +276,10 @@ function CreateAssetDialog({
   const [scheduleId, setScheduleId] = useState<string>(NO_SCHEDULE);
   const [description, setDescription] = useState("");
   const [dayRate, setDayRate] = useState("");
+  const [rental, setRental] = useState<RentalForm>(rentalFormFrom());
 
   const reset = () => {
+    setRental(rentalFormFrom());
     setTag("");
     setCategory("");
     setArea(defaultArea);
@@ -300,6 +303,7 @@ function CreateAssetDialog({
         description: description.trim() || null,
         maintenance_schedule_id: scheduleId === NO_SCHEDULE ? null : scheduleId,
         day_rate: rateStr === "" ? null : Number(rateStr),
+        ...rentalPayload(rental, false),
       });
     },
     onSuccess: () => {
@@ -417,7 +421,7 @@ function CreateAssetDialog({
 
           {/* Rental day rate */}
           <div>
-            <Label htmlFor="asset-rate">Rental day rate (optional)</Label>
+            <Label htmlFor="asset-rate">{rental.is_rental ? "Our day rate (what we charge)" : "Rental day rate (optional)"}</Label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
               <Input
@@ -436,6 +440,9 @@ function CreateAssetDialog({
               Daily rental price for this unit. Used for utilization revenue.
             </p>
           </div>
+
+          {/* Third-party rental */}
+          <RentalFields value={rental} onChange={setRental} />
 
           {/* Description */}
           <div>
@@ -528,6 +535,7 @@ function EditAssetDialog({
   const [dayRate, setDayRate] = useState(
     asset.day_rate != null ? String(asset.day_rate) : "",
   );
+  const [rental, setRental] = useState<RentalForm>(rentalFormFrom(asset));
   // Which centrifuge column on the daily report this unit represents on its
   // job: "1", "2", or "" (unmapped). Only shown for run-hour assets on a job.
   // Radix Select can't use an empty-string item value, so NO_SLOT_VALUE is the
@@ -551,6 +559,7 @@ function EditAssetDialog({
     );
     setDescription(asset.description ?? "");
     setDayRate(asset.day_rate != null ? String(asset.day_rate) : "");
+    setRental(rentalFormFrom(asset));
     setCentrifugeSlot(
       asset.centrifuge_slot != null ? String(asset.centrifuge_slot) : NO_SLOT,
     );
@@ -573,6 +582,7 @@ function EditAssetDialog({
         description: description.trim() || null,
         maintenance_schedule_id: scheduleId === NO_SCHEDULE ? null : scheduleId,
         day_rate: rateStr === "" ? null : Number(rateStr),
+        ...rentalPayload(rental, !!asset.is_rental),
       };
       // Only send a service interval for run-hour assets, and only if provided.
       if (tracksRunHours(category as any)) {
@@ -591,6 +601,8 @@ function EditAssetDialog({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
       queryClient.invalidateQueries({ queryKey: ["/api/assets", asset.id] });
+      queryClient.invalidateQueries({ queryKey: ["/api/rentals"] });
+      queryClient.invalidateQueries({ queryKey: [`/api/assets/${asset.id}/rental`] });
       onOpenChange(false);
       toast({ title: "Asset updated" });
     },
@@ -753,7 +765,7 @@ function EditAssetDialog({
 
           {/* Rental day rate */}
           <div>
-            <Label htmlFor="edit-asset-rate">Rental day rate (optional)</Label>
+            <Label htmlFor="edit-asset-rate">{rental.is_rental ? "Our day rate (what we charge)" : "Rental day rate (optional)"}</Label>
             <div className="relative">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm">$</span>
               <Input
@@ -772,6 +784,9 @@ function EditAssetDialog({
               Daily rental price for this unit. Used for utilization revenue.
             </p>
           </div>
+
+          {/* Third-party rental */}
+          <RentalFields value={rental} onChange={setRental} onJob={onJob} />
 
           {/* Description */}
           <div>
@@ -884,11 +899,12 @@ function AssetDetailDialog({
 
   return (
     <Dialog open={!!assetId} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Boxes className="h-5 w-5 text-muted-foreground" />
             {data ? data.tag : "Asset"}
+            {data && <RentalBadge asset={data} withVendor />}
           </DialogTitle>
           <DialogDescription>
             {data ? `${data.category} \u00b7 ${data.area}` : "Equipment detail"}
@@ -930,7 +946,7 @@ function AssetDetailDialog({
               </div>
               <div>
                 <div className="text-xs text-muted-foreground mb-0.5 flex items-center gap-1">
-                  <DollarSign className="h-3 w-3" /> Rental day rate
+                  <DollarSign className="h-3 w-3" /> {data.is_rental ? "Our day rate (what we charge)" : "Rental day rate"}
                 </div>
                 <div data-testid="detail-day-rate">{fmtDayRate(data.day_rate)}</div>
               </div>
@@ -963,6 +979,8 @@ function AssetDetailDialog({
                 <div>{fmtDate(data.last_maintained)}</div>
               </div>
             </div>
+
+            {data.is_rental && canManage && <RentalPanel asset={data} canEdit={canManage} />}
 
             {data.description && (
               <div className="text-sm">
@@ -1148,7 +1166,10 @@ export default function AssetsPage() {
     queryKey: ["/api/maintenance-schedules"],
   });
 
-  const rows = assets ?? [];
+  // Returned rentals leave the active fleet (still listed under "Rentals").
+  const allAssets = assets ?? [];
+  const rows = allAssets.filter((a) => !(a.is_rental && a.status === "Returned"));
+  const rentalRows = allAssets.filter((a) => a.is_rental);
   const scheduleList = schedules ?? [];
 
   // Currently opened asset detail pop-up (null = closed).
@@ -1157,7 +1178,7 @@ export default function AssetsPage() {
   // Assignment toggle: assigned (active = on a job) vs unassigned (idle = no
   // job). "Assigned" is defined strictly by job_id, matching the fleet
   // utilization metric — not the free-text status string.
-  const [view, setView] = useState<"all" | "assigned" | "idle">("all");
+  const [view, setView] = useState<"all" | "assigned" | "idle" | "rentals">("all");
   const assignedCount = rows.filter((a) => !!a.job_id).length;
   const idleCount = rows.length - assignedCount;
   const byAssignment =
@@ -1165,7 +1186,9 @@ export default function AssetsPage() {
       ? rows.filter((a) => !!a.job_id)
       : view === "idle"
         ? rows.filter((a) => !a.job_id)
-        : rows;
+        : view === "rentals"
+          ? rentalRows
+          : rows;
 
   // Client-side search across the visible asset fields + linked schedule name.
   const [query, setQuery] = useState("");
@@ -1179,6 +1202,7 @@ export default function AssetsPage() {
           a.status,
           a.description,
           a.maintenance_schedule?.name,
+          a.is_rental ? `rental ${a.rental_vendor ?? ""}` : null,
         ]
           .filter(Boolean)
           .some((v) => (v as string).toLowerCase().includes(q)),
@@ -1212,6 +1236,13 @@ export default function AssetsPage() {
           : `Your equipment fleet across ${profile?.area ? profile.area : "all areas"}.`}
       </p>
 
+      {/* Rental centrifuges: cost vs. earnings (Admins + Area Managers) */}
+      {canManage && (
+        <div className="mb-4">
+          <RentalsSummary onOpen={setDetailId} />
+        </div>
+      )}
+
       {/* Assignment toggle + search */}
       {rows.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -1226,7 +1257,8 @@ export default function AssetsPage() {
                 { key: "all", label: "All", count: rows.length },
                 { key: "assigned", label: "Assigned", count: assignedCount },
                 { key: "idle", label: "Idle", count: idleCount },
-              ] as const
+                ...(rentalRows.length ? [{ key: "rentals", label: "Rentals", count: rentalRows.length }] : []),
+              ] as { key: "all" | "assigned" | "idle" | "rentals"; label: string; count: number }[]
             ).map((opt) => (
               <button
                 key={opt.key}
@@ -1337,7 +1369,7 @@ export default function AssetsPage() {
                   onClick={() => setDetailId(a.id)}
                 >
                   <td className="px-3 py-2.5">
-                    <div className="font-medium">{a.tag}</div>
+                    <AssetTag asset={a} />
                   </td>
                   <td className="px-3 py-2.5">{a.category}</td>
                   <td className="px-3 py-2.5">

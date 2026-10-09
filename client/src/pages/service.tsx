@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RentalBadge } from "@/components/Rental";
 import { useAuth } from "@/lib/auth";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -406,7 +407,7 @@ export default function Service() {
                   data-testid={`row-centrifuge-${r.tag}`}
                 >
                   <td className="px-3 py-2.5">
-                    <div className="font-medium">{r.tag}</div>
+                    <div className="flex items-center gap-1.5 font-medium">{r.tag}<RentalBadge asset={r} /></div>
                     <div className="text-xs text-muted-foreground">
                       {r.category}
                     </div>

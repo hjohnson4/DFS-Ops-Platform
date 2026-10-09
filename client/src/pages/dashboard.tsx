@@ -1,4 +1,5 @@
 import { useAuth } from "@/lib/auth";
+import { RentalBadge } from "@/components/Rental";
 import { ROLE_LABELS, AREAS, tracksRunHours, isLiveJobStatus } from "@shared/schema";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
@@ -374,7 +375,9 @@ function FieldTechDashboard({ profile }: { profile: Profile }) {
                 <tbody className="divide-y divide-card-border">
                   {jobAssets.map((a) => (
                     <tr key={a.id} data-testid={`row-asset-${a.id}`}>
-                      <td className="px-4 py-2 font-medium">{a.tag}</td>
+                      <td className="px-4 py-2 font-medium">
+                        <span className="inline-flex items-center gap-1.5">{a.tag}<RentalBadge asset={a} /></span>
+                      </td>
                       <td className="px-4 py-2 text-muted-foreground">
                         {a.category}
                       </td>

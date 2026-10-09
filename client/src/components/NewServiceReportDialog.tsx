@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { RentalBadge } from "@/components/Rental";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -259,7 +260,9 @@ export function NewServiceReportDialog({
                 <SelectContent>
                   {centrifuges.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      {a.tag} — {a.category}
+                      <span className="inline-flex items-center gap-1.5">
+                        {a.tag} <RentalBadge asset={a} /> — {a.category}
+                      </span>
                     </SelectItem>
                   ))}
                   {!assetsLoading && centrifuges.length === 0 && (

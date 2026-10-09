@@ -1,4 +1,5 @@
 import { useState, useEffect, type ReactNode } from "react";
+import { RentalBadge } from "@/components/Rental";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
@@ -256,6 +257,7 @@ export function FieldTicketFormDialog({ trigger, job, ticket, onSaved }: Props) 
                       onCheckedChange={() => toggleAsset(a.id)}
                     />
                     <span className="font-medium">{a.tag}</span>
+                    <RentalBadge asset={a} />
                     <span className="text-muted-foreground">{a.category}</span>
                   </label>
                 ))}
