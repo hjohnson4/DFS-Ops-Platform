@@ -1911,6 +1911,25 @@ async function hoursSinceServiceFor(client2, assets) {
   return out;
 }
 var INGEST_TOKEN = process.env.INGEST_TOKEN || "";
+var MANUAL_RATE_MISSING = "Day rate (AL57)";
+async function manualRateJobIds(client2) {
+  const { data } = await client2.from("jobs").select("id").eq("manual_day_rate", true);
+  return new Set((data || []).map((j) => String(j.id)));
+}
+function dropManualRateField(fields, jobId, manual) {
+  if (!jobId || !manual.has(String(jobId))) return fields;
+  return fields.filter((f) => !String(f).startsWith(MANUAL_RATE_MISSING));
+}
+function withoutManualRateFlag(r, manual) {
+  const mf = r?.analysis?.missing_fields;
+  if (!Array.isArray(mf) || !r.job_id || !manual.has(String(r.job_id))) return r;
+  const kept = dropManualRateField(mf, r.job_id, manual);
+  if (kept.length === mf.length) return r;
+  const analysis = { ...r.analysis };
+  if (kept.length) analysis.missing_fields = kept;
+  else delete analysis.missing_fields;
+  return { ...r, analysis };
+}
 function normJobId(v) {
   return (v || "").toUpperCase().replace(/[\s-]+/g, " ").trim();
 }
@@ -2297,12 +2316,14 @@ async function registerRoutes(httpServer, app) {
       }
       if (canReview) {
         let dq = client2.from("daily_reports").select(
-          "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis"
+          "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis, job_id"
         ).in("status", ["Pending Review", "Needs job match", "Correction pending"]);
         if (scope) dq = dq.eq("area", scope);
         const { data: drData, error: dErr } = await dq;
         if (dErr) console.error("[notifications] daily_reports", dErr.message);
-        for (const r of drData || []) {
+        const manualJobs = await manualRateJobIds(client2);
+        for (const r0 of drData || []) {
+          const r = withoutManualRateFlag(r0, manualJobs);
           const who = r.sender_name || r.sender_email || "Unknown sender";
           const well = r.well_name ? ` \xB7 ${r.well_name}` : "";
           const missing = Array.isArray(r.analysis?.missing_fields) ? r.analysis.missing_fields : [];
@@ -4820,7 +4841,7 @@ async function registerRoutes(httpServer, app) {
     let customer_id = resolved.customer_id;
     const matchedByJobNumber = !!job_id && !!excel.job_number && normJobId(excel.job_number).length > 0;
     const status = job_id ? "Pending Review" : "Needs job match";
-    const missingFields = (excel.missing_fields || []).map(
+    const missingFields = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client2)).map(
       (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
     );
     const row = {
@@ -5353,6 +5374,10 @@ async function registerRoutes(httpServer, app) {
       submitter: void 0,
       signer: void 0
     }));
+    {
+      const manualJobs = await manualRateJobIds(supabaseAnon);
+      if (manualJobs.size) rows = rows.map((r) => withoutManualRateFlag(r, manualJobs));
+    }
     if (jobIds) rows = rows.filter((r) => jobIds.includes(r.job_id));
     const statusFilter = String(req.query.status || "").toLowerCase();
     if (statusFilter === "pending")
@@ -5387,6 +5412,10 @@ async function registerRoutes(httpServer, app) {
       } catch (e) {
         console.error("[daily-report] remarks backfill", e?.message ?? e);
       }
+    }
+    if (rest.job_id && Array.isArray(rest.analysis?.missing_fields)) {
+      const stripped = withoutManualRateFlag(rest, await manualRateJobIds(supabaseAnon));
+      rest.analysis = stripped.analysis;
     }
     res.json({
       ...rest,
@@ -5673,7 +5702,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       summary: excel.summary
     };
     const changes = describeReportChanges(report, next);
-    const missingFields = (excel.missing_fields || []).map(
+    const missingFields = dropManualRateField(excel.missing_fields || [], report.job_id, await manualRateJobIds(client2)).map(
       (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
     );
     const warnings = [];

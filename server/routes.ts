@@ -179,6 +179,30 @@ async function hoursSinceServiceFor(
 // Set INGEST_TOKEN at deploy (M7); blank means ingest is closed.
 const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 
+// Set day rate (Verdun) jobs: the day rate is entered on the job profile, so a
+// blank AL57 on the workbook is expected and is NOT missing critical data.
+const MANUAL_RATE_MISSING = "Day rate (AL57)";
+async function manualRateJobIds(client: any): Promise<Set<string>> {
+  const { data } = await client.from("jobs").select("id").eq("manual_day_rate", true);
+  return new Set(((data || []) as any[]).map((j) => String(j.id)));
+}
+function dropManualRateField(fields: string[], jobId: string | null | undefined, manual: Set<string>): string[] {
+  if (!jobId || !manual.has(String(jobId))) return fields;
+  return fields.filter((f) => !String(f).startsWith(MANUAL_RATE_MISSING));
+}
+// Strip the AL57 flag from a report row's analysis for set-day-rate jobs
+// (covers reports imported before this rule existed).
+function withoutManualRateFlag<T extends { job_id?: string | null; analysis?: any }>(r: T, manual: Set<string>): T {
+  const mf = r?.analysis?.missing_fields;
+  if (!Array.isArray(mf) || !r.job_id || !manual.has(String(r.job_id))) return r;
+  const kept = dropManualRateField(mf, r.job_id, manual);
+  if (kept.length === mf.length) return r;
+  const analysis = { ...r.analysis };
+  if (kept.length) analysis.missing_fields = kept;
+  else delete analysis.missing_fields;
+  return { ...r, analysis };
+}
+
 // Normalize a job identifier / rig name for comparison: uppercase, collapse
 // runs of whitespace, and treat spaces and dashes as equivalent, so that
 // "H&P 266", "H&P-266", and "h&p  266" all compare equal. (Shared with the
@@ -813,13 +837,15 @@ export async function registerRoutes(
         let dq = client
           .from("daily_reports")
           .select(
-            "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis",
+            "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis, job_id",
           )
           .in("status", ["Pending Review", "Needs job match", "Correction pending"]);
         if (scope) dq = dq.eq("area", scope);
         const { data: drData, error: dErr } = await dq;
         if (dErr) console.error("[notifications] daily_reports", dErr.message);
-        for (const r of (drData || []) as any[]) {
+        const manualJobs = await manualRateJobIds(client);
+        for (const r0 of (drData || []) as any[]) {
+          const r = withoutManualRateFlag(r0, manualJobs);
           const who = r.sender_name || r.sender_email || "Unknown sender";
           const well = r.well_name ? ` · ${r.well_name}` : "";
           // Missing critical data: a dedicated warning so whoever signs off
@@ -4507,7 +4533,7 @@ export async function registerRoutes(
     const status = job_id ? "Pending Review" : "Needs job match";
     // Critical blank fields on the imported day tab. When the date was blank
     // but inferred from the prior day, say so, so the reviewer can confirm it.
-    const missingFields = (excel.missing_fields || []).map((f) =>
+    const missingFields = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client)).map((f) =>
       f === "Report date (D3)" && excel.report_date
         ? `Report date (D3) — filled in as ${excel.report_date} from the prior day`
         : f,
@@ -5267,6 +5293,10 @@ export async function registerRoutes(
       submitter: undefined,
       signer: undefined,
     }));
+    {
+      const manualJobs = await manualRateJobIds(supabaseAnon);
+      if (manualJobs.size) rows = rows.map((r: any) => withoutManualRateFlag(r, manualJobs));
+    }
     // Assigned field techs only see daily reports for their assigned job(s).
     if (jobIds) rows = rows.filter((r: any) => jobIds.includes(r.job_id));
     const statusFilter = String(req.query.status || "").toLowerCase();
@@ -5324,6 +5354,10 @@ export async function registerRoutes(
       } catch (e: any) {
         console.error("[daily-report] remarks backfill", e?.message ?? e);
       }
+    }
+    if (rest.job_id && Array.isArray(rest.analysis?.missing_fields)) {
+      const stripped = withoutManualRateFlag(rest, await manualRateJobIds(supabaseAnon));
+      rest.analysis = stripped.analysis;
     }
     res.json({
       ...rest,
@@ -5727,7 +5761,7 @@ export async function registerRoutes(
       summary: excel.summary,
     };
     const changes = describeReportChanges(report, next);
-    const missingFields = (excel.missing_fields || []).map((f) =>
+    const missingFields = dropManualRateField(excel.missing_fields || [], report.job_id, await manualRateJobIds(client)).map((f) =>
       f === "Report date (D3)" && excel.report_date
         ? `Report date (D3) — filled in as ${excel.report_date} from the prior day`
         : f,
