@@ -13,6 +13,7 @@ import {
   type ForecastJob,
 } from "@shared/schema";
 import {
+  type CategoryBlock,
   buildGrid,
   revenueByMonth,
   monthLabel,
@@ -34,7 +35,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Loader2, Plus, Pencil, Boxes, ArrowRightCircle, AlertTriangle, FileText } from "lucide-react";
+import { Loader2, Plus, Pencil, Boxes, ArrowRightCircle, AlertTriangle, FileText, ChevronDown, ChevronRight, Search, X } from "lucide-react";
 import { BidDocuments } from "@/components/BidDocuments";
 import { RentalBadge } from "@/components/Rental";
 
@@ -87,7 +88,6 @@ export function ForecastView({ area }: { area: string }) {
   const { profile } = useAuth();
   const canEdit = profile?.role === "admin" || profile?.role === "area";
   const [lvl, setLvl] = useState<ForecastLevel>(1);
-  const [hideSpare, setHideSpare] = useState(false);
   const [editing, setEditing] = useState<ForecastJob | "new" | null>(null);
   const [placing, setPlacing] = useState<ForecastJob | null>(null);
   const [converting, setConverting] = useState<ForecastJob | null>(null);
@@ -142,118 +142,7 @@ export function ForecastView({ area }: { area: string }) {
       </div>
 
       {/* Centrifuge schedule */}
-      <div className="rounded-lg border border-card-border p-3">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="font-medium">Centrifuge schedule</div>
-            <div className="text-xs text-muted-foreground">
-              Every centrifuge in asset-number order · {monthLabel(board.months[0])} – {monthLabel(board.months[5])} ·
-              hover a square for dates
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Checkbox checked={hideSpare} onCheckedChange={(v) => setHideSpare(!!v)} data-testid="check-hide-spare" />
-              Hide units spare all 6 months
-            </label>
-            <div className="inline-flex rounded-md border border-card-border p-0.5 text-xs">
-              {(["Committed only", "+ Likely", "+ Bids"] as const).map((t, i) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => setLvl(i as ForecastLevel)}
-                  className={`rounded px-2.5 py-1 font-medium ${lvl === i ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                  data-testid={`button-forecast-level-${i}`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto">
-          <div
-            className="grid min-w-[720px] gap-[3px]"
-            style={{ gridTemplateColumns: "96px repeat(6, minmax(96px, 1fr))" }}
-            data-testid="grid-centrifuges"
-          >
-            <div />
-            {board.months.map((m) => (
-              <div key={m} className="pb-1 text-center text-xs text-muted-foreground">
-                {monthLabel(m)}
-              </div>
-            ))}
-            {blocks.map((b) => {
-              const rows = hideSpare
-                ? b.rows.filter((r) => r.cells.some((c) => c.some((p) => p.kind !== "idle")))
-                : b.rows;
-              return (
-                <div key={b.category} className="contents">
-                  <div className="col-span-7 flex justify-between pb-1 pt-3 text-sm font-medium">
-                    {b.category}
-                    <span className="text-xs font-normal text-muted-foreground">{b.rows.length} units</span>
-                  </div>
-                  {rows.map((r) => (
-                    <div key={r.asset.id} className="contents">
-                      <div className="flex flex-col justify-center text-xs font-medium leading-tight" data-testid={`row-unit-${r.asset.tag}`}>
-                        <span className="flex items-center gap-1">
-                          {r.asset.tag}
-                          <RentalBadge asset={r.asset} className="px-1 text-[9px] leading-3" />
-                        </span>
-                        <span className="truncate text-[10px] font-normal text-muted-foreground">
-                          {r.asset.is_rental && r.asset.rental_vendor ? r.asset.rental_vendor : r.asset.area}
-                        </span>
-                      </div>
-                      {r.cells.map((c, i) => (
-                        <Cell key={i} pieces={c} rental={!!r.asset.is_rental} />
-                      ))}
-                    </div>
-                  ))}
-                  {b.needs.map((n) => (
-                    <div key={n.forecast.id} className="contents">
-                      <div className="flex flex-col justify-center text-xs font-medium leading-tight text-rose-700 dark:text-rose-400">
-                        Needs {n.missing}
-                        <span className="truncate text-[10px] font-normal">{n.forecast.rig}</span>
-                      </div>
-                      {n.cells.map((frac, i) => (
-                        <div key={i} className="flex h-8">
-                          {frac > 0 && (
-                            <div
-                              className="ml-auto truncate rounded border-[1.5px] border-dashed border-rose-500 bg-rose-500/10 px-1 text-[10.5px] leading-7 text-rose-700 dark:text-rose-400"
-                              style={{ width: `${Math.round(frac * 100)}%` }}
-                              title={`${n.forecast.rig} still needs ${n.missing} ${n.category}${n.missing > 1 ? "s" : ""} placed`}
-                            >
-                              {frac >= 0.25 ? `${n.missing} to place` : ""}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ))}
-                  <div className="border-t border-card-border pt-1 text-xs text-muted-foreground">Spare</div>
-                  {b.spare.map((s, i) => {
-                    const sh = b.short[i];
-                    return (
-                      <div
-                        key={i}
-                        className={`border-t border-card-border pt-1 text-center text-xs ${
-                          sh ? "font-medium text-rose-700 dark:text-rose-400" : s ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"
-                        }`}
-                        data-testid={`text-spare-${b.category.startsWith("Big") ? "bb" : "sb"}-${i}`}
-                      >
-                        {sh ? `Short ${sh}` : `${s} spare`}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-        <Legend />
-      </div>
-
+      <ScheduleCard board={board} blocks={blocks} lvl={lvl} setLvl={setLvl} />
       {/* Upcoming work */}
       <div className="rounded-lg border border-card-border">
         <div className="flex items-center justify-between gap-3 p-3">
@@ -386,6 +275,238 @@ export function ForecastView({ area }: { area: string }) {
       {placing && <UnitsDialog forecast={placing} board={board} onClose={() => setPlacing(null)} />}
       {docsFor && <BidDocsDialog forecast={docsFor} canEdit={canEdit} onClose={() => setDocsFor(null)} />}
       {converting && <ConvertDialog forecast={converting} board={board} onClose={() => setConverting(null)} />}
+    </div>
+  );
+}
+
+// ---- Centrifuge schedule ---------------------------------------------------
+// Spare-all-6-months units are hidden by default, each category can collapse
+// to just its Spare/Short line, the month row and unit column stay pinned
+// while you scroll inside the card, and a search box filters by unit or rig.
+const isSpareAllMonths = (r: CategoryBlock["rows"][number]) =>
+  !r.cells.some((c) => c.some((p) => p.kind !== "idle"));
+
+function ScheduleCard({
+  board,
+  blocks,
+  lvl,
+  setLvl,
+}: {
+  board: ForecastBoard;
+  blocks: CategoryBlock[];
+  lvl: ForecastLevel;
+  setLvl: (l: ForecastLevel) => void;
+}) {
+  const [hideSpare, setHideSpare] = useState(true);
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const searching = q.length > 0;
+  const rowMatches = (r: CategoryBlock["rows"][number]) => {
+    const hay = [
+      r.asset.tag,
+      r.asset.area,
+      r.asset.rental_vendor,
+      ...r.cells.flatMap((c) => c.flatMap((p) => [p.label, p.tip])),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(q);
+  };
+  const hiddenSpare = hideSpare && !searching
+    ? blocks.reduce((n, b) => n + b.rows.filter(isSpareAllMonths).length, 0)
+    : 0;
+  let matchCount = 0;
+  const view = blocks.map((b) => {
+    let rows = b.rows;
+    let needs = b.needs;
+    if (searching) {
+      rows = rows.filter(rowMatches);
+      needs = needs.filter((n) => `${n.forecast.rig} ${n.forecast.customer_name ?? ""}`.toLowerCase().includes(q));
+    } else if (hideSpare) {
+      rows = rows.filter((r) => !isSpareAllMonths(r));
+    }
+    matchCount += rows.length + needs.length;
+    // Searching always opens the categories so matches are visible.
+    const isOpen = searching || !collapsed[b.category];
+    return { b, rows, needs, isOpen };
+  });
+  const STICKY_LEFT = "sticky left-0 z-10 bg-background";
+  return (
+    <div className="rounded-lg border border-card-border p-3" data-testid="card-schedule">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="font-medium">Centrifuge schedule</div>
+          <div className="text-xs text-muted-foreground">
+            {monthLabel(board.months[0])} – {monthLabel(board.months[5])} · hover a square for dates
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search unit or rig"
+              className="h-8 w-48 pl-7 pr-7 text-xs"
+              data-testid="input-schedule-search"
+            />
+            {searching && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+                aria-label="Clear search"
+                data-testid="button-clear-schedule-search"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox checked={hideSpare} onCheckedChange={(v) => setHideSpare(!!v)} data-testid="check-hide-spare" />
+            Hide units spare all 6 months
+          </label>
+          <div className="inline-flex rounded-md border border-card-border p-0.5 text-xs">
+            {(["Committed only", "+ Likely", "+ Bids"] as const).map((t, i) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setLvl(i as ForecastLevel)}
+                className={`rounded px-2.5 py-1 font-medium ${lvl === i ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                data-testid={`button-forecast-level-${i}`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      {(hiddenSpare > 0 || searching) && (
+        <div className="mb-2 text-xs text-muted-foreground" data-testid="text-schedule-filter-note">
+          {searching ? (
+            <>
+              {matchCount} {matchCount === 1 ? "row matches" : "rows match"} “{query.trim()}” ·{" "}
+              <button type="button" className="font-medium text-primary hover:underline" onClick={() => setQuery("")}>
+                Clear search
+              </button>
+            </>
+          ) : (
+            <>
+              {hiddenSpare} spare {hiddenSpare === 1 ? "unit" : "units"} hidden ·{" "}
+              <button
+                type="button"
+                className="font-medium text-primary hover:underline"
+                onClick={() => setHideSpare(false)}
+                data-testid="button-show-spare"
+              >
+                Show
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {/* Own scroll area so the month row (top) and unit column (left) stay pinned. */}
+      <div className="overflow-auto rounded-md" style={{ maxHeight: "70vh" }} data-testid="scroll-schedule">
+        <div
+          className="grid min-w-[720px] gap-[3px]"
+          style={{ gridTemplateColumns: "96px repeat(6, minmax(96px, 1fr))" }}
+          data-testid="grid-centrifuges"
+        >
+          <div className="sticky left-0 top-0 z-30 bg-background" />
+          {board.months.map((m) => (
+            <div key={m} className="sticky top-0 z-20 bg-background pb-1 pt-0.5 text-center text-xs font-medium text-muted-foreground">
+              {monthLabel(m)}
+            </div>
+          ))}
+          {view.map(({ b, rows, needs, isOpen }) => (
+            <div key={b.category} className="contents">
+              <button
+                type="button"
+                onClick={() => setCollapsed((c) => ({ ...c, [b.category]: !c[b.category] }))}
+                disabled={searching}
+                className="col-span-7 flex items-center justify-between rounded px-1 pb-1 pt-3 text-left text-sm font-medium hover:bg-muted/40 disabled:hover:bg-transparent"
+                aria-expanded={isOpen}
+                data-testid={`button-toggle-${b.category.startsWith("Big") ? "bb" : "sb"}`}
+              >
+                <span className={`flex items-center gap-1 ${STICKY_LEFT}`}>
+                  {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                  {b.category}
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  {searching ? `${rows.length} of ${b.rows.length} units` : `${b.rows.length} units`}
+                  {!isOpen && " · click to show"}
+                </span>
+              </button>
+              {isOpen &&
+                rows.map((r) => (
+                  <div key={r.asset.id} className="contents">
+                    <div
+                      className={`flex flex-col justify-center text-xs font-medium leading-tight ${STICKY_LEFT}`}
+                      data-testid={`row-unit-${r.asset.tag}`}
+                    >
+                      <span className="flex items-center gap-1">
+                        {r.asset.tag}
+                        <RentalBadge asset={r.asset} className="px-1 text-[9px] leading-3" />
+                      </span>
+                      <span className="truncate text-[10px] font-normal text-muted-foreground">
+                        {r.asset.is_rental && r.asset.rental_vendor ? r.asset.rental_vendor : r.asset.area}
+                      </span>
+                    </div>
+                    {r.cells.map((c, i) => (
+                      <Cell key={i} pieces={c} rental={!!r.asset.is_rental} />
+                    ))}
+                  </div>
+                ))}
+              {needs.map((n) => (
+                <div key={n.forecast.id} className="contents">
+                  <div className={`flex flex-col justify-center text-xs font-medium leading-tight text-rose-700 dark:text-rose-400 ${STICKY_LEFT}`}>
+                    Needs {n.missing}
+                    <span className="truncate text-[10px] font-normal">{n.forecast.rig}</span>
+                  </div>
+                  {n.cells.map((frac, i) => (
+                    <div key={i} className="flex h-8">
+                      {frac > 0 && (
+                        <div
+                          className="ml-auto truncate rounded border-[1.5px] border-dashed border-rose-500 bg-rose-500/10 px-1 text-[10.5px] leading-7 text-rose-700 dark:text-rose-400"
+                          style={{ width: `${Math.round(frac * 100)}%` }}
+                          title={`${n.forecast.rig} still needs ${n.missing} ${n.category}${n.missing > 1 ? "s" : ""} placed`}
+                        >
+                          {frac >= 0.25 ? `${n.missing} to place` : ""}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {searching && rows.length === 0 && needs.length === 0 ? null : (
+                <>
+                  <div className={`border-t border-card-border pt-1 text-xs text-muted-foreground ${STICKY_LEFT}`}>Spare</div>
+                  {b.spare.map((s, i) => {
+                    const sh = b.short[i];
+                    return (
+                      <div
+                        key={i}
+                        className={`border-t border-card-border pt-1 text-center text-xs ${
+                          sh ? "font-medium text-rose-700 dark:text-rose-400" : s ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-400"
+                        }`}
+                        data-testid={`text-spare-${b.category.startsWith("Big") ? "bb" : "sb"}-${i}`}
+                      >
+                        {sh ? `Short ${sh}` : `${s} spare`}
+                      </div>
+                    );
+                  })}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+        {searching && matchCount === 0 && (
+          <div className="py-6 text-center text-sm text-muted-foreground">No units or rigs match “{query.trim()}”.</div>
+        )}
+      </div>
+      <Legend />
     </div>
   );
 }
