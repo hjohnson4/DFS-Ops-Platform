@@ -20,7 +20,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { JobFormDialog } from "@/components/JobFormDialog";
 import { buildWellTimeline, fmtWellMoney } from "@/lib/wellTimeline";
-import { Plus, Briefcase, MapPin, Activity, Archive } from "lucide-react";
+import { ForecastView } from "@/components/ForecastView";
+import { Plus, Briefcase, MapPin, Activity, Archive, CalendarRange } from "lucide-react";
 
 const STATUS_TONE: Record<JobStatus, string> = {
   Active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
@@ -227,7 +228,22 @@ export default function JobsPage() {
   const canManage =
     profile?.role === "admin" || profile?.role === "area" || profile?.role === "super";
 
-  const [view, setView] = useState<"active" | "archived">("active");
+  const [view, setViewState] = useState<"active" | "archived" | "forecast">(() => {
+    try {
+      const v = sessionStorage.getItem("jobs-view");
+      return v === "archived" || v === "forecast" ? v : "active";
+    } catch {
+      return "active";
+    }
+  });
+  const setView = (v: "active" | "archived" | "forecast") => {
+    setViewState(v);
+    try {
+      sessionStorage.setItem("jobs-view", v);
+    } catch {}
+  };
+  const canForecast = canManage; // admin, area manager, supervisor (view-only)
+  const showingForecast = view === "forecast" && canForecast;
   const showingArchived = view === "archived";
 
   // Admins see every area, so they get an area filter. Other roles are
@@ -295,7 +311,7 @@ export default function JobsPage() {
           type="button"
           onClick={() => setView("active")}
           className={`rounded px-3 py-1 font-medium transition-colors ${
-            !showingArchived ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            !showingArchived && !showingForecast ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
           }`}
           data-testid="tab-jobs-active"
         >
@@ -311,6 +327,18 @@ export default function JobsPage() {
         >
           <Archive className="h-3.5 w-3.5" /> Archived
         </button>
+        {canForecast && (
+          <button
+            type="button"
+            onClick={() => setView("forecast")}
+            className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-medium transition-colors ${
+              showingForecast ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+            data-testid="tab-jobs-forecast"
+          >
+            <CalendarRange className="h-3.5 w-3.5" /> Forecast
+          </button>
+        )}
       </div>
       {isAdmin && (
         <Select value={areaFilter} onValueChange={setAreaFilter}>
@@ -336,7 +364,9 @@ export default function JobsPage() {
         </div>
       )}
 
-      {isLoading ? (
+      {showingForecast ? (
+        <ForecastView area={activeArea} />
+      ) : isLoading ? (
         <div className="text-sm text-muted-foreground py-8 text-center">Loading…</div>
       ) : visibleJobs && visibleJobs.length === 0 ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
@@ -378,10 +408,10 @@ export default function JobsPage() {
         </div>
       )}
 
-      <p className="mt-3 text-xs text-muted-foreground">
+      {!showingForecast && <p className="mt-3 text-xs text-muted-foreground">
         “—” means no data yet: no dated daily reports for that job, or no day
         rate set (accrued can’t be computed without one).
-      </p>
+      </p>}
     </div>
   );
 }

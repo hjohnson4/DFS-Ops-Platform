@@ -97,6 +97,7 @@ export interface Job {
   day_rate: number | null; // billable day rate ($/day) used for revenue
   well_name: string | null; // used to match emailed Excel daily reports
   archived_at: string | null; // set when the job is archived (soft-deleted)
+  est_release_on?: string | null; // planned release for forecasting (null = indefinite)
   created_at: string;
   // Set day rate: bill day_rate every Active day instead of reading costs from
   // the daily report (Verdun Oil & Gas). See server/manualBilling.ts.
@@ -1984,3 +1985,126 @@ export const updateWorkOrderSchema = z.object({
   notes: z.string().nullable().optional(),
 });
 export type UpdateWorkOrderInput = z.infer<typeof updateWorkOrderSchema>;
+
+// ---- Forecast (upcoming work + centrifuge planning) -----------------------
+// Admins and Area Managers plan upcoming jobs month by month. Each forecast
+// job has a stage (with default odds), a start date and either an end date or
+// none (= indefinite), and the number of centrifuges it needs. Specific units
+// can be placed on it; converting an awarded forecast creates the real job.
+export const FORECAST_STAGES = ["Bid", "Likely", "Awarded", "Converted", "Lost"] as const;
+export type ForecastStage = (typeof FORECAST_STAGES)[number];
+export const FORECAST_OPEN_STAGES: ForecastStage[] = ["Bid", "Likely", "Awarded"];
+export const FORECAST_DEFAULT_ODDS: Record<ForecastStage, number> = {
+  Bid: 25,
+  Likely: 70,
+  Awarded: 100,
+  Converted: 100,
+  Lost: 0,
+};
+export const FORECAST_CATEGORIES = ["Big Bowl Centrifuge", "Small Bowl Centrifuge"] as const;
+
+export interface ForecastJob {
+  id: string;
+  rig: string;
+  customer_id: string | null;
+  customer_name: string | null;
+  area: Area;
+  stage: ForecastStage;
+  odds: number;
+  start_on: string;
+  end_on: string | null; // null = indefinite
+  day_rate: number | null;
+  big_bowl_needed: number;
+  small_bowl_needed: number;
+  notes: string | null;
+  converted_job_id: string | null;
+  created_by: string | null;
+  created_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+  asset_ids?: string[];
+  bid_doc_count?: number;
+}
+
+// A bid PDF attached to an upcoming job (and carried to the real job on convert).
+export interface BidDocument {
+  id: string;
+  forecast_job_id: string | null;
+  job_id: string | null;
+  area: Area;
+  file_name: string;
+  file_mime: string;
+  file_size: number;
+  uploaded_by_name: string | null;
+  created_at: string;
+}
+
+export const uploadBidDocumentSchema = z.object({
+  file_name: z.string().trim().min(1, "Missing file name").max(200),
+  file_base64: z.string().min(1, "Missing file"),
+});
+
+const forecastBase = {
+  rig: z.string().trim().min(1, "Enter the rig / job name"),
+  customer_id: z.string().uuid().nullable().optional(),
+  customer_name: z.string().trim().nullable().optional(),
+  area: z.enum(AREAS),
+  stage: z.enum(["Bid", "Likely", "Awarded"]),
+  odds: z.number().int().min(0).max(100).optional(),
+  start_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a start date"),
+  end_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  day_rate: z.number().nonnegative().nullable().optional(),
+  big_bowl_needed: z.number().int().min(0).max(20),
+  small_bowl_needed: z.number().int().min(0).max(20),
+  notes: z.string().nullable().optional(),
+};
+export const createForecastJobSchema = z
+  .object(forecastBase)
+  .refine((v) => !v.end_on || v.end_on >= v.start_on, {
+    message: "End date must be on or after the start date",
+  });
+export type CreateForecastJobInput = z.infer<typeof createForecastJobSchema>;
+export const updateForecastJobSchema = z
+  .object({
+    ...forecastBase,
+    stage: z.enum(["Bid", "Likely", "Awarded", "Lost"]),
+  })
+  .partial();
+export type UpdateForecastJobInput = z.infer<typeof updateForecastJobSchema>;
+export const setForecastUnitsSchema = z.object({
+  asset_ids: z.array(z.string().uuid()).max(40),
+});
+export const convertForecastSchema = z.object({
+  job_number: z.string().trim().min(1),
+  customer_id: z.string().uuid(),
+  well_name: z.string().trim().nullable().optional(),
+  // units to move onto the new job now (must be free); others stay planned
+  asset_ids: z.array(z.string().uuid()).optional(),
+});
+export const setJobReleaseSchema = z.object({
+  est_release_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+});
+
+export interface ForecastBoard {
+  months: string[]; // "YYYY-MM" x6 starting with the current month
+  window_start: string;
+  window_end: string;
+  assets: {
+    id: string;
+    tag: string;
+    category: string;
+    area: Area;
+    status: string;
+    job_id: string | null;
+  }[];
+  jobs: {
+    id: string;
+    job_number: string;
+    area: Area;
+    customer_name: string;
+    started_on: string | null;
+    est_release_on: string | null; // null = indefinite
+    day_rate: number | null;
+  }[];
+  forecasts: ForecastJob[];
+}

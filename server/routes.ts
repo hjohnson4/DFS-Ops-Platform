@@ -12,6 +12,7 @@ import {
   ExcelParseError,
 } from "./excelDailyReport";
 import * as XLSX from "xlsx";
+import { registerForecastRoutes } from "./forecast";
 import { AREAS, isLiveJobStatus } from "@shared/schema";
 import { computeManualBilling, publicBilling, recordRateChange } from "./manualBilling";
 import {
@@ -8168,6 +8169,9 @@ export async function registerRoutes(
   // Well activity is now inferred from daily reports (see /api/jobs/:jobId/pads
   // and /api/jobs/:jobId/unassigned-wells). Wells are only attached to pads.
 
+
+  // Forecast: upcoming work + centrifuge planning (server/forecast.ts)
+  registerForecastRoutes(app);
 
   return httpServer;
 }

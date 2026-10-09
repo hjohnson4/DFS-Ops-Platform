@@ -3,6 +3,7 @@ import { useRoute, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
+import { BidDocuments } from "@/components/BidDocuments";
 import {
   JOB_STATUS,
   CREWING,
@@ -20,6 +21,7 @@ import {
   type UnassignedWell,
   workDatesLabel,
   isLiveJobStatus,
+  type BidDocument,
 } from "@shared/schema";
 import { FieldTicketFormDialog } from "@/components/FieldTicketFormDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
@@ -550,6 +552,7 @@ export default function JobDetailPage() {
       </div>
 
       {job.manual_day_rate && <SetRateBilling job={job} />}
+      {canEdit && <JobBidDocs jobId={job.id} canEdit={canManageAssets} />}
 
       {job.description && (
         <div className="mt-3 rounded-lg border border-card-border bg-card p-4 text-sm">
@@ -2321,6 +2324,23 @@ function FieldDailyReportsSection({ job }: { job: JobWithCustomer }) {
         </div>
       )}
     </>
+  );
+}
+
+// ---- Bid PDFs carried over from the Forecast --------------------------------
+// Only shown when the job came from a bid that had PDFs attached.
+function JobBidDocs({ jobId, canEdit }: { jobId: string; canEdit: boolean }) {
+  const url = `/api/jobs/${jobId}/bid-documents`;
+  const { data } = useQuery<BidDocument[]>({ queryKey: [url] });
+  if (!data?.length) return null;
+  return (
+    <div className="mt-3 rounded-lg border border-card-border bg-card p-4 text-sm" data-testid="job-bid-documents">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+        <div className="font-medium">Bid PDFs</div>
+        <div className="text-xs text-muted-foreground">Carried over from the Forecast when this bid was won</div>
+      </div>
+      <BidDocuments listUrl={url} uploadUrl={null} canEdit={canEdit} />
+    </div>
   );
 }
 
