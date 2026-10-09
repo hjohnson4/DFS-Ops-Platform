@@ -570,7 +570,7 @@ function ForecastJobDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{forecast ? "Edit upcoming job" : "Add upcoming job"}</DialogTitle>
           <DialogDescription>
@@ -758,7 +758,7 @@ function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; boar
   });
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Place units · {forecast.rig}</DialogTitle>
           <DialogDescription>
@@ -816,7 +816,7 @@ function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; boar
 function BidDocsDialog({ forecast, canEdit, onClose }: { forecast: ForecastJob; canEdit: boolean; onClose: () => void }) {
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Bid PDFs · {forecast.rig}</DialogTitle>
           <DialogDescription>
@@ -879,7 +879,7 @@ function ConvertDialog({ forecast, board, onClose }: { forecast: ForecastJob; bo
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Convert to job · {forecast.rig}</DialogTitle>
           <DialogDescription>Everything carries over from the forecast. Review, then create the job.</DialogDescription>
