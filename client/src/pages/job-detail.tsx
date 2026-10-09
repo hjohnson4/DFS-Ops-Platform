@@ -2361,7 +2361,7 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-medium">Set day rate billing</div>
         <div className="text-xs text-muted-foreground">
-          Billed every Active day from the oldest daily report · $0 on Rig Move, On Hold and Completed
+          Billed every Active day from the spud date (AU6) · $0 on Rig Move, On Hold and Completed
         </div>
       </div>
       <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -2378,6 +2378,11 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
         <div>
           <div className="text-xs text-muted-foreground">Billing since</div>
           <div className="text-base font-semibold">{b?.start_date ? fmtDate(b.start_date) : "—"}</div>
+          {b?.start_date && (
+            <div className="text-[11px] text-muted-foreground" data-testid="set-rate-start-source">
+              {b.start_source === "spud_date" ? "Spud date (AU6)" : "Oldest report — no spud date in AU6"}
+            </div>
+          )}
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Today</div>
@@ -2388,7 +2393,7 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
       </div>
       {!b?.start_date && (
         <div className="mt-2 text-xs text-muted-foreground">
-          Billing starts on the oldest daily report — none on file for this job yet.
+          Billing starts on the spud date in AU6 of the daily report — none on file for this job yet.
         </div>
       )}
       {b && b.missing_rate_days > 0 && (

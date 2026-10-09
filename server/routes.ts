@@ -5062,7 +5062,7 @@ export async function registerRoutes(
       // one row at a time below, keeping every round-trip small.
       let listQ = client
         .from("daily_reports")
-        .select("id, report_day, kpis", { count: "exact" })
+        .select("id, report_day, kpis, well_context", { count: "exact" })
         .not("attachment_base64", "is", null)
         .order("created_at", { ascending: true })
         .range(offset, offset + batchLimit - 1);
@@ -5098,15 +5098,21 @@ export async function registerRoutes(
           // Merge freshly parsed KPIs over whatever was stored so no existing
           // KPI is lost if the parser ever drops a field.
           const mergedKpis = { ...(r.kpis || {}), ...(excel.kpis || {}) };
+          // Also refresh the spud date (AU6) without touching other context.
+          const oldCtx: any = (r as any).well_context || {};
+          const newSpud = excel.well_context?.spud_date ?? null;
+          const ctxChanged = (oldCtx.spud_date ?? null) !== newSpud;
           const before = JSON.stringify(r.kpis || {});
           const after = JSON.stringify(mergedKpis);
-          if (before === after) {
+          if (before === after && !ctxChanged) {
             unchanged += 1;
             continue;
           }
+          const patch: any = { kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map };
+          if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud };
           const { error: upErr } = await client
             .from("daily_reports")
-            .update({ kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map })
+            .update(patch)
             .eq("id", r.id);
           if (upErr) {
             errors += 1;

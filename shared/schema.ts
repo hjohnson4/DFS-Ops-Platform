@@ -114,7 +114,9 @@ export interface ManualBillingEvent {
 }
 
 export interface ManualBilling {
-  start_date: string | null; // oldest daily report date
+  start_date: string | null; // first well's spud date (AU6), else oldest daily report date
+  start_source?: "spud_date" | "first_report" | null;
+  current_well_spud_date?: string | null;
   through_date: string; // today (Central)
   billable_days: number;
   missing_rate_days: number; // Active days with no rate set
@@ -123,7 +125,7 @@ export interface ManualBilling {
   today_status: string;
   current_well: string | null;
   current_well_revenue: number | null;
-  by_well: { well: string; revenue: number }[];
+  by_well: { well: string; revenue: number; start?: string; spud_date?: string | null }[];
   events: ManualBillingEvent[];
 }
 
@@ -906,6 +908,9 @@ export interface DailyReportWellContext {
   supervisor?: string | null;
   // Crew notes / comments from cell B57 on the Report Day sheet.
   remarks?: string | null;
+  // Spud date from cell AU6 ("Spud Date:" label in AQ6). Set day rate billing
+  // starts on this date.
+  spud_date?: string | null;
 }
 
 // Report origin. Emailed reports arrive as an Excel workbook and carry locked,

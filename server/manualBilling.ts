@@ -2,8 +2,13 @@
 //
 // Some customers (Verdun Oil & Gas) cannot carry daily costs on the daily
 // report. For those jobs the job's own day rate is billed EVERY calendar day,
-// starting on the job's oldest daily report date and running through today
-// (Central time). A day bills $0 when the job was on Rig Move, On Hold or
+// starting on the well's SPUD DATE (cell AU6 on the daily report, labeled
+// "Spud Date:") and running through today (Central time). The spud date is
+// taken from the well's most recent report, so a corrected AU6 on a later
+// report fixes the whole well. Days before the spud date are not billed. A
+// well with no spud date on any report falls back to its oldest report date.
+// On a multi-well job each day bills to the well whose start (spud date) is
+// the latest one on or before that day. A day bills $0 when the job was on Rig Move, On Hold or
 // Completed that day.
 //
 // Rate / status history lives in job_rate_events. Each change applies from the
@@ -97,14 +102,18 @@ export async function computeManualBilling(
   const events = await loadRateEvents(ids);
   const { data: reps } = await client()
     .from("daily_reports")
-    .select("job_id, well_name, report_date, report_day")
+    .select("job_id, well_name, report_date, report_day, well_context")
     .in("job_id", ids);
-  const repsByJob = new Map<string, { day: string; rd: number; well: string }[]>();
+  const repsByJob = new Map<string, { day: string; rd: number; well: string; spud: string | null }[]>();
+  const oldestSpud = addDays(today, -730);
   for (const r of reps ?? []) {
     const day = r.report_date ? String(r.report_date).slice(0, 10) : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today) continue;
     const arr = repsByJob.get(r.job_id) ?? [];
-    arr.push({ day, rd: Number(r.report_day) || 0, well: (r.well_name ?? "").trim() });
+    const sp = String((r as any).well_context?.spud_date ?? "").slice(0, 10);
+    // Ignore blank, future, or clearly stale template spud dates.
+    const spud = /^\d{4}-\d{2}-\d{2}$/.test(sp) && sp <= today && sp >= oldestSpud ? sp : null;
+    arr.push({ day, rd: Number(r.report_day) || 0, well: (r.well_name ?? "").trim(), spud });
     repsByJob.set(r.job_id, arr);
   }
 
@@ -114,7 +123,23 @@ export async function computeManualBilling(
     const reports = (repsByJob.get(j.id) ?? []).sort((a, b) =>
       a.day !== b.day ? (a.day < b.day ? -1 : 1) : a.rd - b.rd,
     );
-    const start = reports.length ? reports[0].day : null;
+    // One segment per well: starts on its spud date (from the well's latest
+    // report that has one), else its oldest report date.
+    type Seg = { key: string; name: string; first: string; order: number; spud: string | null; start: string };
+    const segMap = new Map<string, Seg>();
+    reports.forEach((r, i) => {
+      const k = wellKey(r.well);
+      const g = segMap.get(k);
+      if (!g) segMap.set(k, { key: k, name: r.well, first: r.day, order: i, spud: r.spud, start: r.day });
+      else {
+        if (r.well) g.name = r.well;
+        if (r.spud) g.spud = r.spud;
+      }
+    });
+    const segs = Array.from(segMap.values())
+      .map((g) => ({ ...g, start: g.spud ?? g.first }))
+      .sort((a, b) => (a.start !== b.start ? (a.start < b.start ? -1 : 1) : a.order - b.order));
+    const start = segs.length ? segs[0].start : null;
 
     // State in effect on `day`: last event dated on/before it; before the
     // first event, the first event-day's final state.
@@ -140,13 +165,10 @@ export async function computeManualBilling(
     let billable = 0;
     let missingRateDays = 0;
     if (start) {
-      let ri = 0;
-      let curWell = reports[0].well;
+      let si = 0;
       for (let d = start; d <= today; d = addDays(d, 1)) {
-        while (ri < reports.length && reports[ri].day <= d) {
-          if (reports[ri].well) curWell = reports[ri].well;
-          ri++;
-        }
+        while (si + 1 < segs.length && segs[si + 1].start <= d) si++;
+        const seg = segs[si];
         const st = stateOn(d);
         if (st.status !== "Active") continue;
         if (st.rate == null || st.rate <= 0) {
@@ -156,16 +178,19 @@ export async function computeManualBilling(
         billable++;
         total += st.rate;
         daily.set(d, st.rate);
-        const k = wellKey(curWell);
-        byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
-        if (!wellDisplay.has(k)) wellDisplay.set(k, curWell);
+        byWell.set(seg.key, (byWell.get(seg.key) ?? 0) + st.rate);
       }
     }
+    for (const g of segs) wellDisplay.set(g.key, g.name || g.key);
     const todayState = stateOn(today);
-    const currentWell = reports.length ? reports[reports.length - 1].well || null : null;
-    const curKey = currentWell ? wellKey(currentWell) : null;
+    const lastWell = reports.length ? reports[reports.length - 1].well || null : null;
+    const curKey = lastWell != null ? wellKey(lastWell) : null;
+    const curSeg = curKey != null ? segMap.get(curKey) : undefined;
+    const currentWell = curSeg?.name || lastWell;
     out.set(j.id, {
       start_date: start,
+      start_source: !start ? null : segs[0].spud ? "spud_date" : "first_report",
+      current_well_spud_date: curSeg?.spud ?? null,
       through_date: today,
       billable_days: billable,
       missing_rate_days: missingRateDays,
@@ -179,9 +204,11 @@ export async function computeManualBilling(
       today_status: todayState.status,
       current_well: currentWell,
       current_well_revenue: curKey != null ? byWell.get(curKey) ?? 0 : null,
-      by_well: Array.from(byWell.entries()).map(([k, v]) => ({
-        well: wellDisplay.get(k) ?? k,
-        revenue: Math.round(v * 100) / 100,
+      by_well: segs.map((g) => ({
+        well: wellDisplay.get(g.key) ?? g.key,
+        revenue: Math.round((byWell.get(g.key) ?? 0) * 100) / 100,
+        start: g.start,
+        spud_date: g.spud,
       })),
       events: evs,
       daily,

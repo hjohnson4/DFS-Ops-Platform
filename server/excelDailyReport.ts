@@ -78,6 +78,7 @@ const CONTEXT_CELLS: { field: keyof DailyReportWellContext; cell: string }[] = [
 ];
 
 const DATE_CELL = "D3";
+const SPUD_DATE_CELL = "AU6";
 // Well name lives on the "Well Recap" sheet (C4) and/or the ROC sheet (C2).
 const WELL_RECAP_SHEET = "Well Recap";
 const WELL_NAME_CELLS: { sheet: string; cell: string }[] = [
@@ -357,6 +358,12 @@ function parseDaySheet(
   // Notes / comments typed by the crew in B57 (operations summary). Stored
   // verbatim (line breaks kept) so the report detail page can show it.
   well_context.remarks = toText(rawCell(ws, REMARKS_CELL));
+  // Spud date in AU6 (labeled "Spud Date:" in AQ6). Set day rate billing
+  // (e.g. Verdun) starts on this date.
+  // A blank template cell (0) reads as 1899-12-30 — treat anything before
+  // 2000 as no spud date.
+  const spud = toDateStr(rawCell(ws, SPUD_DATE_CELL));
+  well_context.spud_date = spud && spud >= "2000-01-01" ? spud : null;
 
   const report_date = toDateStr(rawCell(ws, DATE_CELL));
 

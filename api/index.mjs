@@ -286,6 +286,7 @@ var CONTEXT_CELLS = [
   { field: "mud_engineer", cell: "H11" }
 ];
 var DATE_CELL = "D3";
+var SPUD_DATE_CELL = "AU6";
 var WELL_NAME_CELLS = [
   { sheet: "Well Recap", cell: "C4" },
   { sheet: "ROC", cell: "C2" }
@@ -448,6 +449,8 @@ function parseDaySheet(wb, chosen, incomplete) {
   well_context.meas_depth_ft = toNumber(rawCell(ws2, "AI9"));
   well_context.supervisor = toText(rawCell(ws2, "AI11"));
   well_context.remarks = toText(rawCell(ws2, REMARKS_CELL));
+  const spud = toDateStr(rawCell(ws2, SPUD_DATE_CELL));
+  well_context.spud_date = spud && spud >= "2000-01-01" ? spud : null;
   const report_date = toDateStr(rawCell(ws2, DATE_CELL));
   const v8raw = toText(rawCell(ws2, "V8"));
   const job_number = v8raw && !/^\d+(\.\d+)?$/.test(v8raw) ? v8raw : null;
@@ -1519,13 +1522,16 @@ async function computeManualBilling(jobs) {
   const ids = manual.map((j) => j.id);
   const today = todayCentral();
   const events = await loadRateEvents(ids);
-  const { data: reps } = await client().from("daily_reports").select("job_id, well_name, report_date, report_day").in("job_id", ids);
+  const { data: reps } = await client().from("daily_reports").select("job_id, well_name, report_date, report_day, well_context").in("job_id", ids);
   const repsByJob = /* @__PURE__ */ new Map();
+  const oldestSpud = addDays(today, -730);
   for (const r of reps ?? []) {
     const day = r.report_date ? String(r.report_date).slice(0, 10) : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today) continue;
     const arr = repsByJob.get(r.job_id) ?? [];
-    arr.push({ day, rd: Number(r.report_day) || 0, well: (r.well_name ?? "").trim() });
+    const sp = String(r.well_context?.spud_date ?? "").slice(0, 10);
+    const spud = /^\d{4}-\d{2}-\d{2}$/.test(sp) && sp <= today && sp >= oldestSpud ? sp : null;
+    arr.push({ day, rd: Number(r.report_day) || 0, well: (r.well_name ?? "").trim(), spud });
     repsByJob.set(r.job_id, arr);
   }
   for (const j of manual) {
@@ -1534,7 +1540,18 @@ async function computeManualBilling(jobs) {
     const reports = (repsByJob.get(j.id) ?? []).sort(
       (a, b) => a.day !== b.day ? a.day < b.day ? -1 : 1 : a.rd - b.rd
     );
-    const start = reports.length ? reports[0].day : null;
+    const segMap = /* @__PURE__ */ new Map();
+    reports.forEach((r, i) => {
+      const k = wellKey(r.well);
+      const g2 = segMap.get(k);
+      if (!g2) segMap.set(k, { key: k, name: r.well, first: r.day, order: i, spud: r.spud, start: r.day });
+      else {
+        if (r.well) g2.name = r.well;
+        if (r.spud) g2.spud = r.spud;
+      }
+    });
+    const segs = Array.from(segMap.values()).map((g2) => ({ ...g2, start: g2.spud ?? g2.first })).sort((a, b) => a.start !== b.start ? a.start < b.start ? -1 : 1 : a.order - b.order);
+    const start = segs.length ? segs[0].start : null;
     const stateOn = (day) => {
       if (!evs.length)
         return { rate: jobRate, status: day < today ? "Active" : j.status };
@@ -1556,13 +1573,10 @@ async function computeManualBilling(jobs) {
     let billable = 0;
     let missingRateDays = 0;
     if (start) {
-      let ri = 0;
-      let curWell = reports[0].well;
+      let si = 0;
       for (let d = start; d <= today; d = addDays(d, 1)) {
-        while (ri < reports.length && reports[ri].day <= d) {
-          if (reports[ri].well) curWell = reports[ri].well;
-          ri++;
-        }
+        while (si + 1 < segs.length && segs[si + 1].start <= d) si++;
+        const seg = segs[si];
         const st = stateOn(d);
         if (st.status !== "Active") continue;
         if (st.rate == null || st.rate <= 0) {
@@ -1572,16 +1586,19 @@ async function computeManualBilling(jobs) {
         billable++;
         total += st.rate;
         daily.set(d, st.rate);
-        const k = wellKey(curWell);
-        byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
-        if (!wellDisplay.has(k)) wellDisplay.set(k, curWell);
+        byWell.set(seg.key, (byWell.get(seg.key) ?? 0) + st.rate);
       }
     }
+    for (const g2 of segs) wellDisplay.set(g2.key, g2.name || g2.key);
     const todayState = stateOn(today);
-    const currentWell = reports.length ? reports[reports.length - 1].well || null : null;
-    const curKey = currentWell ? wellKey(currentWell) : null;
+    const lastWell = reports.length ? reports[reports.length - 1].well || null : null;
+    const curKey = lastWell != null ? wellKey(lastWell) : null;
+    const curSeg = curKey != null ? segMap.get(curKey) : void 0;
+    const currentWell = curSeg?.name || lastWell;
     out.set(j.id, {
       start_date: start,
+      start_source: !start ? null : segs[0].spud ? "spud_date" : "first_report",
+      current_well_spud_date: curSeg?.spud ?? null,
       through_date: today,
       billable_days: billable,
       missing_rate_days: missingRateDays,
@@ -1590,9 +1607,11 @@ async function computeManualBilling(jobs) {
       today_status: todayState.status,
       current_well: currentWell,
       current_well_revenue: curKey != null ? byWell.get(curKey) ?? 0 : null,
-      by_well: Array.from(byWell.entries()).map(([k, v]) => ({
-        well: wellDisplay.get(k) ?? k,
-        revenue: Math.round(v * 100) / 100
+      by_well: segs.map((g2) => ({
+        well: wellDisplay.get(g2.key) ?? g2.key,
+        revenue: Math.round((byWell.get(g2.key) ?? 0) * 100) / 100,
+        start: g2.start,
+        spud_date: g2.spud
       })),
       events: evs,
       daily,
@@ -5159,7 +5178,7 @@ async function registerRoutes(httpServer, app) {
       const batchLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 25) : 12;
       const rawOffset = Number(req.body?.offset);
       const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
-      let listQ = client2.from("daily_reports").select("id, report_day, kpis", { count: "exact" }).not("attachment_base64", "is", null).order("created_at", { ascending: true }).range(offset, offset + batchLimit - 1);
+      let listQ = client2.from("daily_reports").select("id, report_day, kpis, well_context", { count: "exact" }).not("attachment_base64", "is", null).order("created_at", { ascending: true }).range(offset, offset + batchLimit - 1);
       if (jobId) listQ = listQ.eq("job_id", jobId);
       const { data: rows, error, count } = await listQ;
       if (error) return res.status(400).json({ message: error.message });
@@ -5183,13 +5202,18 @@ async function registerRoutes(httpServer, app) {
           const buf = Buffer.from(full.attachment_base64, "base64");
           const excel = parseDailyReportWorkbook(buf, r.report_day ?? void 0);
           const mergedKpis = { ...r.kpis || {}, ...excel.kpis || {} };
+          const oldCtx = r.well_context || {};
+          const newSpud = excel.well_context?.spud_date ?? null;
+          const ctxChanged = (oldCtx.spud_date ?? null) !== newSpud;
           const before = JSON.stringify(r.kpis || {});
           const after = JSON.stringify(mergedKpis);
-          if (before === after) {
+          if (before === after && !ctxChanged) {
             unchanged += 1;
             continue;
           }
-          const { error: upErr } = await client2.from("daily_reports").update({ kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map }).eq("id", r.id);
+          const patch = { kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map };
+          if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud };
+          const { error: upErr } = await client2.from("daily_reports").update(patch).eq("id", r.id);
           if (upErr) {
             errors += 1;
             problems.push({ id: r.id, message: upErr.message });
