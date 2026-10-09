@@ -118,7 +118,7 @@ export interface ManualBilling {
   start_source?: "spud_date" | "first_report" | null;
   current_well_spud_date?: string | null;
   through_date: string; // today (Central)
-  billable_days: number;
+  billable_days: number; // report days dated on/after the spud date
   missing_rate_days: number; // Active days with no rate set
   total: number | null; // billed to date; null = no reports or no rate
   today_rate: number | null; // 0 on Rig Move / On Hold / Completed

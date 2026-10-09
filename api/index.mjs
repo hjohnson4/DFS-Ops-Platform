@@ -1572,22 +1572,25 @@ async function computeManualBilling(jobs) {
     let total = 0;
     let billable = 0;
     let missingRateDays = 0;
-    if (start) {
-      let si = 0;
-      for (let d = start; d <= today; d = addDays(d, 1)) {
-        while (si + 1 < segs.length && segs[si + 1].start <= d) si++;
-        const seg = segs[si];
-        const st = stateOn(d);
-        if (st.status !== "Active") continue;
-        if (st.rate == null || st.rate <= 0) {
-          missingRateDays++;
-          continue;
-        }
-        billable++;
-        total += st.rate;
-        daily.set(d, st.rate);
-        byWell.set(seg.key, (byWell.get(seg.key) ?? 0) + st.rate);
+    const counted = /* @__PURE__ */ new Set();
+    for (const r of reports) {
+      const k = wellKey(r.well);
+      const seg = segMap.get(k);
+      const wellStart = seg.spud ?? seg.first;
+      if (r.day < wellStart) continue;
+      const dayKey = `${k}|${r.rd > 0 ? `d${r.rd}` : r.day}`;
+      if (counted.has(dayKey)) continue;
+      counted.add(dayKey);
+      const st = stateOn(r.day);
+      if (st.status !== "Active") continue;
+      if (st.rate == null || st.rate <= 0) {
+        missingRateDays++;
+        continue;
       }
+      billable++;
+      total += st.rate;
+      daily.set(r.day, (daily.get(r.day) ?? 0) + st.rate);
+      byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
     }
     for (const g2 of segs) wellDisplay.set(g2.key, g2.name || g2.key);
     const todayState = stateOn(today);

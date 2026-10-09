@@ -518,11 +518,11 @@ export default function JobDetailPage() {
                     className="mt-0.5"
                   />
                   <span>
-                    <span className="font-medium">Bill this day rate every day</span>
+                    <span className="font-medium">Bill this day rate per report day</span>
                     <span className="block text-xs text-muted-foreground">
-                      For customers whose daily reports don't carry costs. The day rate above adds up every
-                      Active day starting from the oldest daily report. Rig Move, On Hold and Completed days
-                      bill $0. Changes to the rate or status apply from today.
+                      For customers whose daily reports don't carry costs. The day rate above is billed once for
+                      each daily report day dated on or after the spud date (cell AU6). Rig Move, On Hold and
+                      Completed days bill $0. Changes to the rate or status apply from today.
                     </span>
                   </span>
                 </label>
@@ -2361,7 +2361,7 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-medium">Set day rate billing</div>
         <div className="text-xs text-muted-foreground">
-          Billed every Active day from the spud date (AU6) · $0 on Rig Move, On Hold and Completed
+          Billed per daily report day from the spud date (AU6) on · $0 on Rig Move, On Hold and Completed
         </div>
       </div>
       <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -2370,7 +2370,7 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
           <div className="text-base font-semibold tabular-nums" data-testid="set-rate-total">{money(b?.total)}</div>
         </div>
         <div>
-          <div className="text-xs text-muted-foreground">Billable days</div>
+          <div className="text-xs text-muted-foreground">Billable report days</div>
           <div className="text-base font-semibold tabular-nums" data-testid="set-rate-days">
             {b?.start_date ? b.billable_days : "—"}
           </div>
@@ -2398,7 +2398,7 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
       )}
       {b && b.missing_rate_days > 0 && (
         <div className="mt-2 text-xs text-destructive">
-          {b.missing_rate_days} Active day{b.missing_rate_days === 1 ? "" : "s"} had no day rate set and billed nothing.
+          {b.missing_rate_days} report day{b.missing_rate_days === 1 ? "" : "s"} had no day rate set and billed nothing.
         </div>
       )}
       {history.length > 0 && (

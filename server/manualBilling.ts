@@ -1,14 +1,12 @@
 // Set day rate billing ("manual day rate" jobs).
 //
 // Some customers (Verdun Oil & Gas) cannot carry daily costs on the daily
-// report. For those jobs the job's own day rate is billed EVERY calendar day,
-// starting on the well's SPUD DATE (cell AU6 on the daily report, labeled
-// "Spud Date:") and running through today (Central time). The spud date is
-// taken from the well's most recent report, so a corrected AU6 on a later
-// report fixes the whole well. Days before the spud date are not billed. A
-// well with no spud date on any report falls back to its oldest report date.
-// On a multi-well job each day bills to the well whose start (spud date) is
-// the latest one on or before that day. A day bills $0 when the job was on Rig Move, On Hold or
+// report. For those jobs the job's own day rate is billed once for EACH
+// received daily report day (any review status; a day number reported twice
+// counts once) dated on or after the well's SPUD DATE (cell AU6 on the daily
+// report, labeled "Spud Date:"). The spud date is taken from the well's most
+// recent report, so a corrected AU6 on a later report fixes the whole well.
+// A well with no spud date on any report counts all of its report days. A day bills $0 when the job was on Rig Move, On Hold or
 // Completed that day.
 //
 // Rate / status history lives in job_rate_events. Each change applies from the
@@ -164,22 +162,27 @@ export async function computeManualBilling(
     let total = 0;
     let billable = 0;
     let missingRateDays = 0;
-    if (start) {
-      let si = 0;
-      for (let d = start; d <= today; d = addDays(d, 1)) {
-        while (si + 1 < segs.length && segs[si + 1].start <= d) si++;
-        const seg = segs[si];
-        const st = stateOn(d);
-        if (st.status !== "Active") continue;
-        if (st.rate == null || st.rate <= 0) {
-          missingRateDays++;
-          continue;
-        }
-        billable++;
-        total += st.rate;
-        daily.set(d, st.rate);
-        byWell.set(seg.key, (byWell.get(seg.key) ?? 0) + st.rate);
+    // Bill one day per received report day (any status, duplicates of the
+    // same day number counted once) dated on/after the well's spud date.
+    const counted = new Set<string>();
+    for (const r of reports) {
+      const k = wellKey(r.well);
+      const seg = segMap.get(k)!;
+      const wellStart = seg.spud ?? seg.first;
+      if (r.day < wellStart) continue;
+      const dayKey = `${k}|${r.rd > 0 ? `d${r.rd}` : r.day}`;
+      if (counted.has(dayKey)) continue;
+      counted.add(dayKey);
+      const st = stateOn(r.day);
+      if (st.status !== "Active") continue;
+      if (st.rate == null || st.rate <= 0) {
+        missingRateDays++;
+        continue;
       }
+      billable++;
+      total += st.rate;
+      daily.set(r.day, (daily.get(r.day) ?? 0) + st.rate);
+      byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
     }
     for (const g of segs) wellDisplay.set(g.key, g.name || g.key);
     const todayState = stateOn(today);
