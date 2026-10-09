@@ -379,6 +379,7 @@ export function ForecastView({ area }: { area: string }) {
           forecast={editing === "new" ? null : editing}
           defaultArea={qArea || profile?.area || "West Texas"}
           lockArea={profile?.role !== "admin" ? (profile?.area ?? null) : null}
+          board={board ?? null}
           onClose={() => setEditing(null)}
         />
       )}
@@ -511,11 +512,13 @@ function ForecastJobDialog({
   forecast,
   defaultArea,
   lockArea,
+  board,
   onClose,
 }: {
   forecast: ForecastJob | null;
   defaultArea: string;
   lockArea: string | null;
+  board: ForecastBoard | null;
   onClose: () => void;
 }) {
   const { toast } = useToast();
@@ -533,6 +536,20 @@ function ForecastJobDialog({
   const [bb, setBb] = useState(String(forecast?.big_bowl_needed ?? 0));
   const [sb, setSb] = useState(String(forecast?.small_bowl_needed ?? 0));
   const [notes, setNotes] = useState(forecast?.notes ?? "");
+  const [units, setUnits] = useState<Set<string>>(new Set(forecast?.asset_ids || []));
+  const unitsChanged = (() => {
+    const before = new Set(forecast?.asset_ids || []);
+    return before.size !== units.size || Array.from(units).some((id) => !before.has(id));
+  })();
+  // Picking more units than the count needed raises the count to match.
+  const pickUnits = (next: Set<string>) => {
+    setUnits(next);
+    const count = (cat: string) => (board?.assets ?? []).filter((a) => a.category === cat && next.has(a.id)).length;
+    const nb = count("Big Bowl Centrifuge");
+    const ns = count("Small Bowl Centrifuge");
+    if (nb > (Number(bb) || 0)) setBb(String(nb));
+    if (ns > (Number(sb) || 0)) setSb(String(ns));
+  };
 
   const save = useMutation({
     mutationFn: async () => {
@@ -554,11 +571,27 @@ function ForecastJobDialog({
       const res = forecast
         ? await apiRequest("PATCH", `/api/forecast-jobs/${forecast.id}`, body)
         : await apiRequest("POST", "/api/forecast-jobs", body);
-      return res.json();
+      const saved = await res.json();
+      let unitError: string | null = null;
+      const fid = forecast?.id ?? saved?.id;
+      if (unitsChanged && fid) {
+        try {
+          await apiRequest("PUT", `/api/forecast-jobs/${fid}/units`, { asset_ids: Array.from(units) });
+        } catch (e: any) {
+          unitError = e.message;
+        }
+      }
+      return { saved, unitError };
     },
-    onSuccess: () => {
+    onSuccess: ({ unitError }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/forecast"] });
-      toast({ title: forecast ? "Upcoming job updated" : "Upcoming job added" });
+      if (unitError)
+        toast({
+          title: "Job saved, but the units were not",
+          description: `${unitError}. Use Place units on the job to try again.`,
+          variant: "destructive",
+        });
+      else toast({ title: forecast ? "Upcoming job updated" : "Upcoming job added" });
       onClose();
     },
     onError: (e: any) => toast({ title: "Could not save", description: e.message, variant: "destructive" }),
@@ -584,7 +617,7 @@ function ForecastJobDialog({
         <DialogHeader>
           <DialogTitle>{forecast ? "Edit upcoming job" : "Add upcoming job"}</DialogTitle>
           <DialogDescription>
-            Plan the work and how many centrifuges it needs. Units and bid PDFs can be added after you save.
+            Plan the work, how many centrifuges it needs, and (optionally) which units go on it. Bid PDFs can be added after you save.
           </DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-3">
@@ -689,6 +722,26 @@ function ForecastJobDialog({
             <Label>Notes</Label>
             <Textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} data-testid="input-forecast-notes" />
           </div>
+          <div className="col-span-2 rounded-md border border-card-border p-3" data-testid="forecast-assign-units">
+            <div className="mb-1 text-sm font-medium">Assign units (optional)</div>
+            {!board ? (
+              <p className="text-xs text-muted-foreground">Loading units…</p>
+            ) : !start ? (
+              <p className="text-xs text-muted-foreground">Pick a start date to see which units are free.</p>
+            ) : (
+              <UnitPicker
+                board={board}
+                forecastId={forecast?.id ?? null}
+                area={area}
+                start={start}
+                end={indef ? null : end || null}
+                need={{ "Big Bowl Centrifuge": Number(bb) || 0, "Small Bowl Centrifuge": Number(sb) || 0 }}
+                sel={units}
+                onChange={pickUnits}
+                maxHeight="max-h-64"
+              />
+            )}
+          </div>
         </div>
         <DialogFooter className="flex-wrap gap-2 sm:justify-between">
           <div className="flex gap-2">
@@ -726,13 +779,30 @@ function ForecastJobDialog({
 }
 
 // ---- Place specific units -------------------------------------------------
-function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; board: ForecastBoard; onClose: () => void }) {
-  const { toast } = useToast();
-  const [sel, setSel] = useState<Set<string>>(new Set(forecast.asset_ids || []));
+// Shared checklist of centrifuges with free/busy notes for a date range.
+function UnitPicker({
+  board,
+  forecastId,
+  area,
+  start,
+  end,
+  need,
+  sel,
+  onChange,
+  maxHeight = "max-h-[55vh]",
+}: {
+  board: ForecastBoard;
+  forecastId: string | null;
+  area: string;
+  start: string;
+  end: string | null;
+  need: Record<string, number>;
+  sel: Set<string>;
+  onChange: (next: Set<string>) => void;
+  maxHeight?: string;
+}) {
   const jobs = new Map(board.jobs.map((j) => [j.id, j]));
-  const start = forecast.start_on;
-  const end = forecast.end_on;
-  // Is the unit busy (job or another forecast) during this forecast's dates?
+  // Is the unit busy (job or another forecast) during these dates?
   const busyNote = (a: ForecastBoard["assets"][number]): string | null => {
     const j = a.job_id ? jobs.get(a.job_id) : undefined;
     if (j) {
@@ -740,12 +810,61 @@ function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; boar
       if (j.est_release_on >= start) return `On ${j.job_number} until ${shortDate(j.est_release_on)}`;
     }
     for (const f of board.forecasts) {
-      if (f.id === forecast.id || !(f.asset_ids || []).includes(a.id)) continue;
+      if (f.id === forecastId || !(f.asset_ids || []).includes(a.id)) continue;
       const overlap = (!f.end_on || f.end_on >= start) && (!end || f.start_on <= end);
       if (overlap) return `Planned on ${f.rig} (${f.stage})`;
     }
     return null;
   };
+  const groups = FORECAST_CATEGORIES.map((c) => {
+    const units = board.assets
+      .filter((a) => a.category === c)
+      .map((a) => ({ a, note: busyNote(a) }))
+      // free units in the job's area first, then the rest in asset order
+      .sort((x, y) => Number(!!x.note) - Number(!!y.note) || Number(x.a.area !== area) - Number(y.a.area !== area));
+    const picked = units.filter((u) => sel.has(u.a.id)).length;
+    return { c, need: need[c] ?? 0, units, picked };
+  });
+  return (
+    <div className={`${maxHeight} space-y-4 overflow-y-auto pr-1`}>
+      {groups.map((g) => (
+        <div key={g.c}>
+          <div className="mb-1.5 flex justify-between text-sm font-medium">
+            {g.c}
+            <span className={`text-xs ${g.picked < g.need ? "text-rose-600" : "text-muted-foreground"}`}>
+              {g.picked} of {g.need} picked
+            </span>
+          </div>
+          {g.units.length === 0 && <p className="text-xs text-muted-foreground">No units in the fleet.</p>}
+          <div className="space-y-1">
+            {g.units.map(({ a, note }) => (
+              <label key={a.id} className="flex items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-muted/50">
+                <Checkbox
+                  checked={sel.has(a.id)}
+                  onCheckedChange={(v) => {
+                    const n = new Set(sel);
+                    v ? n.add(a.id) : n.delete(a.id);
+                    onChange(n);
+                  }}
+                  data-testid={`check-unit-${a.tag}`}
+                />
+                <span className="flex w-28 items-center gap-1 font-medium">{a.tag}<RentalBadge asset={a} /></span>
+                <span className="text-xs text-muted-foreground">{a.area}</span>
+                <span className={`ml-auto text-xs ${note ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}`}>
+                  {note || "Free"}
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; board: ForecastBoard; onClose: () => void }) {
+  const { toast } = useToast();
+  const [sel, setSel] = useState<Set<string>>(new Set(forecast.asset_ids || []));
   const save = useMutation({
     mutationFn: async () =>
       (await apiRequest("PUT", `/api/forecast-jobs/${forecast.id}/units`, { asset_ids: Array.from(sel) })).json(),
@@ -755,16 +874,6 @@ function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; boar
       onClose();
     },
     onError: (e: any) => toast({ title: "Could not save", description: e.message, variant: "destructive" }),
-  });
-  const groups = FORECAST_CATEGORIES.map((c) => {
-    const need = c === "Big Bowl Centrifuge" ? forecast.big_bowl_needed : forecast.small_bowl_needed;
-    const units = board.assets
-      .filter((a) => a.category === c)
-      .map((a) => ({ a, note: busyNote(a) }))
-      // free units in the job's area first, then the rest in asset order
-      .sort((x, y) => Number(!!x.note) - Number(!!y.note) || Number(x.a.area !== forecast.area) - Number(y.a.area !== forecast.area));
-    const picked = units.filter((u) => sel.has(u.a.id)).length;
-    return { c, need, units, picked };
   });
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -776,38 +885,16 @@ function UnitsDialog({ forecast, board, onClose }: { forecast: ForecastJob; boar
             listed first. A busy unit can still be picked — it will show as double-booked until the dates line up.
           </DialogDescription>
         </DialogHeader>
-        <div className="max-h-[55vh] space-y-4 overflow-y-auto pr-1">
-          {groups.map((g) => (
-            <div key={g.c}>
-              <div className="mb-1.5 flex justify-between text-sm font-medium">
-                {g.c}
-                <span className={`text-xs ${g.picked < g.need ? "text-rose-600" : "text-muted-foreground"}`}>
-                  {g.picked} of {g.need} picked
-                </span>
-              </div>
-              <div className="space-y-1">
-                {g.units.map(({ a, note }) => (
-                  <label key={a.id} className="flex items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-muted/50">
-                    <Checkbox
-                      checked={sel.has(a.id)}
-                      onCheckedChange={(v) => {
-                        const n = new Set(sel);
-                        v ? n.add(a.id) : n.delete(a.id);
-                        setSel(n);
-                      }}
-                      data-testid={`check-unit-${a.tag}`}
-                    />
-                    <span className="flex w-28 items-center gap-1 font-medium">{a.tag}<RentalBadge asset={a} /></span>
-                    <span className="text-xs text-muted-foreground">{a.area}</span>
-                    <span className={`ml-auto text-xs ${note ? "text-amber-700 dark:text-amber-400" : "text-emerald-700 dark:text-emerald-400"}`}>
-                      {note || "Free"}
-                    </span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          ))}
-        </div>
+        <UnitPicker
+          board={board}
+          forecastId={forecast.id}
+          area={forecast.area}
+          start={forecast.start_on}
+          end={forecast.end_on}
+          need={{ "Big Bowl Centrifuge": forecast.big_bowl_needed, "Small Bowl Centrifuge": forecast.small_bowl_needed }}
+          sel={sel}
+          onChange={setSel}
+        />
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             Cancel
