@@ -181,7 +181,29 @@ const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 
 // Set day rate (Verdun) jobs: the day rate is entered on the job profile, so a
 // blank AL57 on the workbook is expected and is NOT missing critical data.
-const MANUAL_RATE_MISSING = "Day rate (AL57)";
+// Prefix match so both workbook layouts ("Day rate (AL57)" on the original
+// workbook, "Day rate (AL59)" on the updated 4-centrifuge workbook) are covered.
+const MANUAL_RATE_MISSING = "Day rate (";
+
+// Centrifuge slots on the daily report. The updated workbook has four
+// centrifuge columns (Centrifuge 1-4); the original has two.
+const CENTRIFUGE_SLOT_NUMBERS = [1, 2, 3, 4] as const;
+function isMappedSlot(slot: any): boolean {
+  return CENTRIFUGE_SLOT_NUMBERS.includes(Number(slot) as any) && slot != null;
+}
+// Daily hours per slot from a report's KPIs. Slot 1 falls back to the legacy
+// combined field when the report predates per-centrifuge parsing.
+function slotDailyHours(kp: any): Record<number, number | null> {
+  const n = (v: any) =>
+    v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+  const k = kp || {};
+  return {
+    1: n(k.daily_run_hours_cent1) ?? n(k.daily_run_hours),
+    2: n(k.daily_run_hours_cent2),
+    3: n(k.daily_run_hours_cent3),
+    4: n(k.daily_run_hours_cent4),
+  };
+}
 async function manualRateJobIds(client: any): Promise<Set<string>> {
   const { data } = await client.from("jobs").select("id").eq("manual_day_rate", true);
   return new Set(((data || []) as any[]).map((j) => String(j.id)));
@@ -424,12 +446,14 @@ const CHANGE_LABELS: Record<string, string> = {
   rig_activity: "Rig activity (AI8)",
   meas_depth_ft: "Measured depth (AI9)",
   supervisor: "Supervisor (AI11)",
-  remarks: "Notes (B57)",
-  day_rate: "Day rate (AL57)",
-  accrued_current_well: "Accrued, current well (AS57)",
+  remarks: "Notes",
+  day_rate: "Day rate",
+  accrued_current_well: "Accrued, current well",
   mud_weight_ppg: "Mud weight (G14)",
-  daily_run_hours: "Run hours, centrifuge 1 (AA37)",
-  daily_run_hours_cent2: "Run hours, centrifuge 2 (AM37)",
+  daily_run_hours: "Run hours, centrifuge 1",
+  daily_run_hours_cent2: "Run hours, centrifuge 2",
+  daily_run_hours_cent3: "Run hours, centrifuge 3",
+  daily_run_hours_cent4: "Run hours, centrifuge 4",
 };
 const SKIP_CHANGE_KEYS = new Set(["daily_run_hours_cent1", "total_run_hours_cent1"]);
 
@@ -4807,9 +4831,7 @@ export async function registerRoutes(
       const backfillNeedsMapping =
         !!job_id &&
         centrifuges.length >= 2 &&
-        centrifuges.some(
-          (c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2,
-        );
+        centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
       // Track a running in-memory tally so multiple days accrue correctly within
       // one import without re-reading each asset every loop.
       const runHourTally = new Map<string, number>();
@@ -4843,7 +4865,7 @@ export async function registerRoutes(
           }
 
           // Accrue this day's run hours onto the job's centrifuges, routed by
-          // each unit's centrifuge_slot (slot 1 = AA37, slot 2 = AM37). Single
+          // each unit's centrifuge_slot (Centrifuge 1-4 on the report). Single
           // centrifuge → whole day. 2+ → route each slot's own hours; if any
           // centrifuge is unmapped, skip accrual entirely (never apply to the
           // wrong unit).
@@ -4854,12 +4876,11 @@ export async function registerRoutes(
               : Number(v);
           const dk = (excel.kpis as any) || {};
           const dailyHours = numOrNull(dk.daily_run_hours);
-          const slot1Hours = numOrNull(dk.daily_run_hours_cent1) ?? dailyHours;
-          const slot2Hours = numOrNull(dk.daily_run_hours_cent2);
+          const bySlot = slotDailyHours(dk);
+          const slot1Hours = bySlot[1];
           const anyHours =
             (dailyHours != null && dailyHours > 0) ||
-            (slot1Hours != null && slot1Hours > 0) ||
-            (slot2Hours != null && slot2Hours > 0);
+            Object.values(bySlot).some((h) => h != null && h > 0);
 
           // Build the per-asset additions for this day.
           let dayAlloc: { id: string; tag: string; add: number }[] = [];
@@ -4875,7 +4896,7 @@ export async function registerRoutes(
               if (hrs > 0) dayAlloc = [{ id: c.id, tag: c.tag, add: hrs }];
             } else {
               const hoursForSlot = (slot: number | null) =>
-                slot === 1 ? slot1Hours : slot === 2 ? slot2Hours : null;
+                slot != null ? bySlot[slot] ?? null : null;
               dayAlloc = centrifuges
                 .map((c) => {
                   const hrs = hoursForSlot(c.centrifuge_slot);
@@ -5030,10 +5051,10 @@ export async function registerRoutes(
         days_error: results.filter((r) => r.status === "error").length,
         // Set when the job has 2+ centrifuges but not all are mapped to a
         // centrifuge slot: reports imported but run hours were NOT accrued.
-        // Map each centrifuge to slot 1 or 2 on its asset, then re-run.
+        // Map each centrifuge to a slot (1-4) on its asset, then re-run.
         run_hours_needs_slot_mapping: backfillNeedsMapping,
         run_hours_note: backfillNeedsMapping
-          ? "Reports were imported, but run hours were not accrued because this job has two centrifuges and at least one is not mapped to Centrifuge 1 or 2. Map each centrifuge's slot on its asset, then re-import to accrue run hours."
+          ? "Reports were imported, but run hours were not accrued because this job has two or more centrifuges and at least one is not mapped to a centrifuge slot (Centrifuge 1-4). Map each centrifuge's slot on its asset, then re-import to accrue run hours."
           : null,
         results,
       };
@@ -5429,11 +5450,13 @@ export async function registerRoutes(
         v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
       const kp = (report.kpis as any) || {};
       const daily_run_hours = numOrNull(kp.daily_run_hours);
-      // Slot 1 falls back to the legacy combined field (AA37) when the report
-      // predates per-centrifuge parsing; slot 2 (AM37) has no legacy fallback.
-      const daily_run_hours_cent1 =
-        numOrNull(kp.daily_run_hours_cent1) ?? daily_run_hours;
-      const daily_run_hours_cent2 = numOrNull(kp.daily_run_hours_cent2);
+      // Slot 1 falls back to the legacy combined field when the report
+      // predates per-centrifuge parsing; slots 2-4 have no legacy fallback.
+      const bySlot = slotDailyHours(kp);
+      const daily_run_hours_cent1 = bySlot[1];
+      const daily_run_hours_cent2 = bySlot[2];
+      const daily_run_hours_cent3 = bySlot[3];
+      const daily_run_hours_cent4 = bySlot[4];
 
       let centrifuges: any[] = [];
       if (report.job_id) {
@@ -5457,12 +5480,14 @@ export async function registerRoutes(
       // before hours can be routed; otherwise accrual is blocked.
       const needs_slot_mapping =
         centrifuges.length >= 2 &&
-        centrifuges.some((c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2);
+        centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
 
       res.json({
         daily_run_hours,
         daily_run_hours_cent1,
         daily_run_hours_cent2,
+        daily_run_hours_cent3,
+        daily_run_hours_cent4,
         already_applied: !!report.run_hours_applied,
         centrifuges,
         needs_slot_mapping,
@@ -5515,17 +5540,16 @@ export async function registerRoutes(
         const kp = (report.kpis as any) || {};
         const numOrNull = (v: any) =>
           v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
-        // Combined day hours (legacy AA37) and per-slot hours (AA37 / AM37).
+        // Combined day hours and per-slot hours (Centrifuge 1-4).
         const dailyHours = numOrNull(kp.daily_run_hours);
-        const slot1Hours = numOrNull(kp.daily_run_hours_cent1) ?? dailyHours;
-        const slot2Hours = numOrNull(kp.daily_run_hours_cent2);
+        const bySlot = slotDailyHours(kp);
+        const slot1Hours = bySlot[1];
 
         // We accrue when there is at least one centrifuge on the job and any
         // slot has positive hours to apply.
         const anyHours =
           (dailyHours != null && dailyHours > 0) ||
-          (slot1Hours != null && slot1Hours > 0) ||
-          (slot2Hours != null && slot2Hours > 0);
+          Object.values(bySlot).some((h) => h != null && h > 0);
 
         if (!report.run_hours_applied && report.job_id && anyHours) {
           const { data: centAssets } = await client
@@ -5547,21 +5571,20 @@ export async function registerRoutes(
               allocation = [{ asset_id: c.id, tag: c.tag, add: hrs }];
           } else if (centrifuges.length >= 2) {
             // Multiple centrifuges: route each centrifuge's OWN slot hours to it.
-            // Every centrifuge on the job must be mapped to slot 1 or 2 first;
+            // Every centrifuge on the job must be mapped to a slot (1-4) first;
             // if any is unmapped we do NOT accrue (never apply hours to the
             // wrong asset) and tell the reviewer to map the centrifuge slots.
             const unmapped = centrifuges.filter(
-              (c: any) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2,
+              (c: any) => !isMappedSlot(c.centrifuge_slot),
             );
             if (unmapped.length > 0) {
               return res.status(400).json({
                 message:
-                  "This job has two centrifuges. Map each one to Centrifuge 1 or Centrifuge 2 (on the asset) before signing off so run hours go to the right unit. Needs mapping: " +
+                  "This job has two or more centrifuges. Map each one to its centrifuge slot (Centrifuge 1, 2, 3, or 4 on the asset) before signing off so run hours go to the right unit. Needs mapping: " +
                   unmapped.map((c: any) => c.tag).join(", "),
               });
             }
-            const hoursForSlot = (slot: number) =>
-              slot === 1 ? slot1Hours : slot === 2 ? slot2Hours : null;
+            const hoursForSlot = (slot: number) => bySlot[slot] ?? null;
             allocation = centrifuges
               .map((c: any) => {
                 const hrs = hoursForSlot(c.centrifuge_slot);

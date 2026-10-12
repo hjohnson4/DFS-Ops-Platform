@@ -741,8 +741,8 @@ function EditAssetDialog({
           )}
 
           {/* Centrifuge slot — run-hour assets on a job only. Maps this unit to
-              Centrifuge 1 or 2 on the daily report so per-centrifuge run hours
-              accrue to the correct asset when a job has two centrifuges. */}
+              Centrifuge 1-4 on the daily report so per-centrifuge run hours
+              accrue to the correct asset when a job has 2+ centrifuges. */}
           {tracksRunHours(category as any) && onJob && (
             <div>
               <Label>Centrifuge slot (on this job)</Label>
@@ -754,11 +754,14 @@ function EditAssetDialog({
                   <SelectItem value={NO_SLOT_VALUE}>Not mapped</SelectItem>
                   <SelectItem value="1">Centrifuge 1</SelectItem>
                   <SelectItem value="2">Centrifuge 2</SelectItem>
+                  <SelectItem value="3">Centrifuge 3</SelectItem>
+                  <SelectItem value="4">Centrifuge 4</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground mt-1">
-                On a job with two centrifuges, map this unit to “Centrifuge 1” or
-                “Centrifuge 2” so its daily run hours from the report accrue here.
+                On a job with two or more centrifuges, map this unit to the
+                centrifuge column it is reported under on the daily report
+                (Centrifuge 1, 2, 3, or 4) so its daily run hours accrue here.
               </p>
             </div>
           )}

@@ -10,9 +10,18 @@ import type {
   DailyReportWellContext,
 } from "@shared/schema";
 
-// Fixed cell map for a "Report Day N" sheet (same layout on every day tab).
+// Two report-day layouts exist in the field:
+//   v1 — original workbook: 2 centrifuge columns (AA, AM), run hours row 37.
+//   v2 — updated workbook (Oct 2026): 4 centrifuge columns (AA, AG, AM, AS),
+//        an "Asset Number" row, and everything from row 17 down shifted
+//        (rows 17-27 by +1, rows 28+ by +2).
+// The layout is detected PER DAY TAB (some updated workbooks still carry an
+// old-layout tab), from where the "Daily Run Hours" label sits in column Q.
+type SheetLayout = "v1" | "v2";
+type KpiCell = { field: keyof DailyFieldKpis; cell: string; numeric: boolean };
+
 // key = app KPI field, value = cell address on the report-day sheet.
-const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }[] = [
+const KPI_CELLS_V1: KpiCell[] = [
   // Mud properties: label in col B, value in col G.
   { field: "mud_type", cell: "G13", numeric: false },
   { field: "mud_weight_ppg", cell: "G14", numeric: true },
@@ -23,18 +32,13 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   { field: "daily_fluid_recovery_bbl", cell: "M31", numeric: true },
   { field: "total_fluid_recovery_bbl", cell: "M32", numeric: true },
   // Centrifuge run/maintenance hours: value in the merged AA block (AA:AF),
-  // labeled in col R. This is the block the crews actually fill in — the old
-  // col-M rows 33-35 are a legacy summary area that stays zero.
+  // labeled in col Q. `daily_run_hours` equals Centrifuge 1's daily hours.
   { field: "daily_run_hours", cell: "AA37", numeric: true },
   { field: "total_run_hours", cell: "AA38", numeric: true },
   { field: "maintenance_hours", cell: "AA39", numeric: true },
-  // Per-centrifuge run hours. The report has two centrifuge columns:
+  // Per-centrifuge run hours (v1 has two centrifuge columns):
   //   Centrifuge 1 -> AA37 (daily) / AA38 (total)
   //   Centrifuge 2 -> AM37 (daily) / AM38 (total)
-  // `daily_run_hours` above equals Centrifuge 1's daily hours (AA37); we also
-  // expose it explicitly as _cent1 so run-hours accrual can route each
-  // centrifuge's actual hours to the asset mapped to that slot, instead of
-  // splitting a single total evenly.
   { field: "daily_run_hours_cent1", cell: "AA37", numeric: true },
   { field: "total_run_hours_cent1", cell: "AA38", numeric: true },
   { field: "daily_run_hours_cent2", cell: "AM37", numeric: true },
@@ -42,8 +46,7 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   // Volume processed by Centrifuge 1 / 2 (bbls): AR60 / AR61, labeled in Y60/Y61.
   { field: "volume_processed_bbl", cell: "AR60", numeric: true },
   { field: "volume_processed_cent2_bbl", cell: "AR61", numeric: true },
-  // Centrifuge operating parameters: values in the AA column (rows 31-36),
-  // labeled in col Q. Feed/effluent weight (AA35/AA36) are often blank.
+  // Centrifuge operating parameters (Centrifuge 1 column, rows 31-36).
   { field: "centrifuge_feed_rate_gpm", cell: "AA31", numeric: true },
   { field: "centrifuge_feed_pump_speed_rpm", cell: "AA32", numeric: true },
   { field: "centrifuge_bowl_speed_rpm", cell: "AA33", numeric: true },
@@ -60,14 +63,66 @@ const KPI_CELLS: { field: keyof DailyFieldKpis; cell: string; numeric: boolean }
   { field: "cuttings_volume_bbl", cell: "Q53", numeric: true },
   { field: "vac_trucks", cell: "Q54", numeric: true },
   { field: "liquids_to_disposal_bbl", cell: "Q55", numeric: true },
-  // Accrued total for the current well: running cumulative figure in AS57 that
-  // grows each report day. The most recent report for a well carries that
-  // well's latest accrued amount, which the jobs page displays directly.
+  // Accrued total for the current well (running cumulative) and the billable
+  // day rate for this report day.
   { field: "accrued_current_well", cell: "AS57", numeric: true },
-  // Billable day rate ($/day) for this report day: cell AL57. The rate can vary
-  // by operation/period across a job, so each report carries its own value.
   { field: "day_rate", cell: "AL57", numeric: true },
 ];
+
+// v2 (updated workbook). Same fields, new positions, plus Centrifuge 3 and 4.
+// Centrifuge columns: 1 = AA, 2 = AG, 3 = AM, 4 = AS. Run hours in row 39
+// (daily) / 40 (total); maintenance in row 41.
+const KPI_CELLS_V2: KpiCell[] = [
+  { field: "mud_type", cell: "G13", numeric: false },
+  { field: "mud_weight_ppg", cell: "G14", numeric: true },
+  { field: "lgs_pct", cell: "G15", numeric: true },
+  { field: "retort_roc_pct", cell: "I27", numeric: true },
+  { field: "daily_fluid_recovery_bbl", cell: "M33", numeric: true },
+  { field: "total_fluid_recovery_bbl", cell: "M34", numeric: true },
+  { field: "daily_run_hours", cell: "AA39", numeric: true },
+  { field: "total_run_hours", cell: "AA40", numeric: true },
+  { field: "maintenance_hours", cell: "AA41", numeric: true },
+  { field: "daily_run_hours_cent1", cell: "AA39", numeric: true },
+  { field: "total_run_hours_cent1", cell: "AA40", numeric: true },
+  { field: "daily_run_hours_cent2", cell: "AG39", numeric: true },
+  { field: "total_run_hours_cent2", cell: "AG40", numeric: true },
+  { field: "daily_run_hours_cent3", cell: "AM39", numeric: true },
+  { field: "total_run_hours_cent3", cell: "AM40", numeric: true },
+  { field: "daily_run_hours_cent4", cell: "AS39", numeric: true },
+  { field: "total_run_hours_cent4", cell: "AS40", numeric: true },
+  { field: "volume_processed_bbl", cell: "AR62", numeric: true },
+  { field: "volume_processed_cent2_bbl", cell: "AR63", numeric: true },
+  { field: "centrifuge_feed_rate_gpm", cell: "AA33", numeric: true },
+  { field: "centrifuge_feed_pump_speed_rpm", cell: "AA34", numeric: true },
+  { field: "centrifuge_bowl_speed_rpm", cell: "AA35", numeric: true },
+  { field: "centrifuge_backdrive_rpm", cell: "AA36", numeric: true },
+  { field: "centrifuge_feed_weight_ppg", cell: "AA37", numeric: true },
+  { field: "centrifuge_effluent_weight_ppg", cell: "AA38", numeric: true },
+  { field: "add_base_diesel_bbl", cell: "H47", numeric: true },
+  { field: "add_water_bbl", cell: "H48", numeric: true },
+  { field: "add_barite_bbl", cell: "H50", numeric: true },
+  { field: "add_chemicals_bbl", cell: "H51", numeric: true },
+  { field: "end_dumps_loaded", cell: "Q54", numeric: true },
+  { field: "cuttings_volume_bbl", cell: "Q55", numeric: true },
+  { field: "vac_trucks", cell: "Q56", numeric: true },
+  { field: "liquids_to_disposal_bbl", cell: "Q57", numeric: true },
+  { field: "accrued_current_well", cell: "AS59", numeric: true },
+  { field: "day_rate", cell: "AL59", numeric: true },
+];
+
+const LAYOUTS: Record<
+  SheetLayout,
+  { kpis: KpiCell[]; remarks: string; dayRate: string }
+> = {
+  v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57" },
+  v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59" },
+};
+
+function sheetLayout(ws: XLSX.WorkSheet | undefined): SheetLayout {
+  const q39 = ws?.["Q39"]?.v;
+  if (typeof q39 === "string" && /daily\s*run\s*hours/i.test(q39)) return "v2";
+  return "v1";
+}
 
 // Well-header context cells on the "Report Day N" sheet.
 const CONTEXT_CELLS: { field: keyof DailyReportWellContext; cell: string }[] = [
@@ -169,12 +224,15 @@ const DEPTH_CELL = "AI9"; // Measured depth (ft) — hand-entered per worked day
 // with remarks, waste and equipment filled in but forget the measured depth —
 // that day is still a real worked day and must be picked up (not skipped back
 // to the prior day, which would re-import yesterday's report).
-const REMARKS_CELL = "B57";
+// (B57 on v1 tabs, B59 on v2 tabs — see LAYOUTS.)
+function remarksCell(ws: XLSX.WorkSheet | undefined): string {
+  return LAYOUTS[sheetLayout(ws)].remarks;
+}
 
 function sheetIsCompleted(ws: XLSX.WorkSheet | undefined): boolean {
   if (!ws) return false;
   if (toNumber(rawCell(ws, DEPTH_CELL)) != null) return true;
-  const remarks = toText(rawCell(ws, REMARKS_CELL));
+  const remarks = toText(rawCell(ws, remarksCell(ws)));
   return !!(remarks && remarks.trim().length > 0);
 }
 
@@ -229,8 +287,9 @@ export function missingCriticalFields(ws: XLSX.WorkSheet | undefined): string[] 
   if (!ws) return ["Day tab not found"];
   if (toDateStr(rawCell(ws, DATE_CELL)) == null) out.push("Report date (D3)");
   if (toNumber(rawCell(ws, DEPTH_CELL)) == null) out.push("Measured depth (AI9)");
-  const rate = toNumber(rawCell(ws, "AL57"));
-  if (rate == null || rate === 0) out.push("Day rate (AL57)");
+  const rateCell = LAYOUTS[sheetLayout(ws)].dayRate;
+  const rate = toNumber(rawCell(ws, rateCell));
+  if (rate == null || rate === 0) out.push(`Day rate (${rateCell})`);
   if (!toText(rawCell(ws, "V9"))) out.push("Well name (V9)");
   const v8 = toText(rawCell(ws, "V8"));
   if (!v8 || /^\d+(\.\d+)?$/.test(v8.trim())) out.push("Rig / job (V8)");
@@ -334,7 +393,8 @@ function parseDaySheet(
   // Read every KPI straight from its fixed cell, recording provenance.
   const kpis: DailyFieldKpis = {};
   const cellMap: Record<string, KpiCellRef> = {};
-  for (const { field, cell, numeric } of KPI_CELLS) {
+  const layout = LAYOUTS[sheetLayout(ws)];
+  for (const { field, cell, numeric } of layout.kpis) {
     const raw = rawCell(ws, cell);
     const value = numeric ? toNumber(raw) : toText(raw);
     (kpis as any)[field] = value;
@@ -357,7 +417,7 @@ function parseDaySheet(
   well_context.supervisor = toText(rawCell(ws, "AI11"));
   // Notes / comments typed by the crew in B57 (operations summary). Stored
   // verbatim (line breaks kept) so the report detail page can show it.
-  well_context.remarks = toText(rawCell(ws, REMARKS_CELL));
+  well_context.remarks = toText(rawCell(ws, layout.remarks));
   // Spud date in AU6 (labeled "Spud Date:" in AQ6). Set day rate billing
   // (e.g. Verdun) starts on this date.
   // A blank template cell (0) reads as 1899-12-30 — treat anything before
@@ -482,5 +542,6 @@ export function readDayRemarks(buf: Buffer, reportDay: number): string | null {
   const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
   const day = reportDaySheets(wb).find((d) => d.day === reportDay);
   if (!day) return null;
-  return toText(rawCell(wb.Sheets[day.name], REMARKS_CELL));
+  const ws = wb.Sheets[day.name];
+  return toText(rawCell(ws, remarksCell(ws)));
 }

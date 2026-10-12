@@ -223,7 +223,7 @@ async function sendNotificationEmails(kind, ctx) {
 
 // server/excelDailyReport.ts
 import * as XLSX from "xlsx";
-var KPI_CELLS = [
+var KPI_CELLS_V1 = [
   // Mud properties: label in col B, value in col G.
   { field: "mud_type", cell: "G13", numeric: false },
   { field: "mud_weight_ppg", cell: "G14", numeric: true },
@@ -234,18 +234,13 @@ var KPI_CELLS = [
   { field: "daily_fluid_recovery_bbl", cell: "M31", numeric: true },
   { field: "total_fluid_recovery_bbl", cell: "M32", numeric: true },
   // Centrifuge run/maintenance hours: value in the merged AA block (AA:AF),
-  // labeled in col R. This is the block the crews actually fill in — the old
-  // col-M rows 33-35 are a legacy summary area that stays zero.
+  // labeled in col Q. `daily_run_hours` equals Centrifuge 1's daily hours.
   { field: "daily_run_hours", cell: "AA37", numeric: true },
   { field: "total_run_hours", cell: "AA38", numeric: true },
   { field: "maintenance_hours", cell: "AA39", numeric: true },
-  // Per-centrifuge run hours. The report has two centrifuge columns:
+  // Per-centrifuge run hours (v1 has two centrifuge columns):
   //   Centrifuge 1 -> AA37 (daily) / AA38 (total)
   //   Centrifuge 2 -> AM37 (daily) / AM38 (total)
-  // `daily_run_hours` above equals Centrifuge 1's daily hours (AA37); we also
-  // expose it explicitly as _cent1 so run-hours accrual can route each
-  // centrifuge's actual hours to the asset mapped to that slot, instead of
-  // splitting a single total evenly.
   { field: "daily_run_hours_cent1", cell: "AA37", numeric: true },
   { field: "total_run_hours_cent1", cell: "AA38", numeric: true },
   { field: "daily_run_hours_cent2", cell: "AM37", numeric: true },
@@ -253,8 +248,7 @@ var KPI_CELLS = [
   // Volume processed by Centrifuge 1 / 2 (bbls): AR60 / AR61, labeled in Y60/Y61.
   { field: "volume_processed_bbl", cell: "AR60", numeric: true },
   { field: "volume_processed_cent2_bbl", cell: "AR61", numeric: true },
-  // Centrifuge operating parameters: values in the AA column (rows 31-36),
-  // labeled in col Q. Feed/effluent weight (AA35/AA36) are often blank.
+  // Centrifuge operating parameters (Centrifuge 1 column, rows 31-36).
   { field: "centrifuge_feed_rate_gpm", cell: "AA31", numeric: true },
   { field: "centrifuge_feed_pump_speed_rpm", cell: "AA32", numeric: true },
   { field: "centrifuge_bowl_speed_rpm", cell: "AA33", numeric: true },
@@ -271,14 +265,57 @@ var KPI_CELLS = [
   { field: "cuttings_volume_bbl", cell: "Q53", numeric: true },
   { field: "vac_trucks", cell: "Q54", numeric: true },
   { field: "liquids_to_disposal_bbl", cell: "Q55", numeric: true },
-  // Accrued total for the current well: running cumulative figure in AS57 that
-  // grows each report day. The most recent report for a well carries that
-  // well's latest accrued amount, which the jobs page displays directly.
+  // Accrued total for the current well (running cumulative) and the billable
+  // day rate for this report day.
   { field: "accrued_current_well", cell: "AS57", numeric: true },
-  // Billable day rate ($/day) for this report day: cell AL57. The rate can vary
-  // by operation/period across a job, so each report carries its own value.
   { field: "day_rate", cell: "AL57", numeric: true }
 ];
+var KPI_CELLS_V2 = [
+  { field: "mud_type", cell: "G13", numeric: false },
+  { field: "mud_weight_ppg", cell: "G14", numeric: true },
+  { field: "lgs_pct", cell: "G15", numeric: true },
+  { field: "retort_roc_pct", cell: "I27", numeric: true },
+  { field: "daily_fluid_recovery_bbl", cell: "M33", numeric: true },
+  { field: "total_fluid_recovery_bbl", cell: "M34", numeric: true },
+  { field: "daily_run_hours", cell: "AA39", numeric: true },
+  { field: "total_run_hours", cell: "AA40", numeric: true },
+  { field: "maintenance_hours", cell: "AA41", numeric: true },
+  { field: "daily_run_hours_cent1", cell: "AA39", numeric: true },
+  { field: "total_run_hours_cent1", cell: "AA40", numeric: true },
+  { field: "daily_run_hours_cent2", cell: "AG39", numeric: true },
+  { field: "total_run_hours_cent2", cell: "AG40", numeric: true },
+  { field: "daily_run_hours_cent3", cell: "AM39", numeric: true },
+  { field: "total_run_hours_cent3", cell: "AM40", numeric: true },
+  { field: "daily_run_hours_cent4", cell: "AS39", numeric: true },
+  { field: "total_run_hours_cent4", cell: "AS40", numeric: true },
+  { field: "volume_processed_bbl", cell: "AR62", numeric: true },
+  { field: "volume_processed_cent2_bbl", cell: "AR63", numeric: true },
+  { field: "centrifuge_feed_rate_gpm", cell: "AA33", numeric: true },
+  { field: "centrifuge_feed_pump_speed_rpm", cell: "AA34", numeric: true },
+  { field: "centrifuge_bowl_speed_rpm", cell: "AA35", numeric: true },
+  { field: "centrifuge_backdrive_rpm", cell: "AA36", numeric: true },
+  { field: "centrifuge_feed_weight_ppg", cell: "AA37", numeric: true },
+  { field: "centrifuge_effluent_weight_ppg", cell: "AA38", numeric: true },
+  { field: "add_base_diesel_bbl", cell: "H47", numeric: true },
+  { field: "add_water_bbl", cell: "H48", numeric: true },
+  { field: "add_barite_bbl", cell: "H50", numeric: true },
+  { field: "add_chemicals_bbl", cell: "H51", numeric: true },
+  { field: "end_dumps_loaded", cell: "Q54", numeric: true },
+  { field: "cuttings_volume_bbl", cell: "Q55", numeric: true },
+  { field: "vac_trucks", cell: "Q56", numeric: true },
+  { field: "liquids_to_disposal_bbl", cell: "Q57", numeric: true },
+  { field: "accrued_current_well", cell: "AS59", numeric: true },
+  { field: "day_rate", cell: "AL59", numeric: true }
+];
+var LAYOUTS = {
+  v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57" },
+  v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59" }
+};
+function sheetLayout(ws2) {
+  const q39 = ws2?.["Q39"]?.v;
+  if (typeof q39 === "string" && /daily\s*run\s*hours/i.test(q39)) return "v2";
+  return "v1";
+}
 var CONTEXT_CELLS = [
   { field: "operator", cell: "H8" },
   { field: "company_man", cell: "H9" },
@@ -340,11 +377,13 @@ function addDaysToDateStr(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 var DEPTH_CELL = "AI9";
-var REMARKS_CELL = "B57";
+function remarksCell(ws2) {
+  return LAYOUTS[sheetLayout(ws2)].remarks;
+}
 function sheetIsCompleted(ws2) {
   if (!ws2) return false;
   if (toNumber(rawCell(ws2, DEPTH_CELL)) != null) return true;
-  const remarks = toText(rawCell(ws2, REMARKS_CELL));
+  const remarks = toText(rawCell(ws2, remarksCell(ws2)));
   return !!(remarks && remarks.trim().length > 0);
 }
 function sheetMissingKeyFields(ws2) {
@@ -377,8 +416,9 @@ function missingCriticalFields(ws2) {
   if (!ws2) return ["Day tab not found"];
   if (toDateStr(rawCell(ws2, DATE_CELL)) == null) out.push("Report date (D3)");
   if (toNumber(rawCell(ws2, DEPTH_CELL)) == null) out.push("Measured depth (AI9)");
-  const rate = toNumber(rawCell(ws2, "AL57"));
-  if (rate == null || rate === 0) out.push("Day rate (AL57)");
+  const rateCell = LAYOUTS[sheetLayout(ws2)].dayRate;
+  const rate = toNumber(rawCell(ws2, rateCell));
+  if (rate == null || rate === 0) out.push(`Day rate (${rateCell})`);
   if (!toText(rawCell(ws2, "V9"))) out.push("Well name (V9)");
   const v8 = toText(rawCell(ws2, "V8"));
   if (!v8 || /^\d+(\.\d+)?$/.test(v8.trim())) out.push("Rig / job (V8)");
@@ -432,7 +472,8 @@ function parseDaySheet(wb, chosen, incomplete) {
   const ws2 = wb.Sheets[chosen.name];
   const kpis = {};
   const cellMap = {};
-  for (const { field, cell, numeric } of KPI_CELLS) {
+  const layout = LAYOUTS[sheetLayout(ws2)];
+  for (const { field, cell, numeric } of layout.kpis) {
     const raw = rawCell(ws2, cell);
     const value = numeric ? toNumber(raw) : toText(raw);
     kpis[field] = value;
@@ -448,7 +489,7 @@ function parseDaySheet(wb, chosen, incomplete) {
   well_context.rig_activity = toText(rawCell(ws2, "AI8"));
   well_context.meas_depth_ft = toNumber(rawCell(ws2, "AI9"));
   well_context.supervisor = toText(rawCell(ws2, "AI11"));
-  well_context.remarks = toText(rawCell(ws2, REMARKS_CELL));
+  well_context.remarks = toText(rawCell(ws2, layout.remarks));
   const spud = toDateStr(rawCell(ws2, SPUD_DATE_CELL));
   well_context.spud_date = spud && spud >= "2000-01-01" ? spud : null;
   const report_date = toDateStr(rawCell(ws2, DATE_CELL));
@@ -528,7 +569,8 @@ function readDayRemarks(buf, reportDay) {
   const wb = XLSX.read(buf, { type: "buffer", cellDates: true });
   const day = reportDaySheets(wb).find((d) => d.day === reportDay);
   if (!day) return null;
-  return toText(rawCell(wb.Sheets[day.name], REMARKS_CELL));
+  const ws2 = wb.Sheets[day.name];
+  return toText(rawCell(ws2, remarksCell(ws2)));
 }
 
 // server/routes.ts
@@ -634,8 +676,8 @@ var rentalFields = {
 var centrifugeSlotField = z.union([
   z.null(),
   z.literal("").transform(() => null),
-  z.coerce.number().int().refine((n) => n === 1 || n === 2, {
-    message: "Centrifuge slot must be 1 or 2"
+  z.coerce.number().int().refine((n) => n >= 1 && n <= 4, {
+    message: "Centrifuge slot must be 1, 2, 3, or 4"
   })
 ]).optional();
 var createAssetSchema = z.object({
@@ -1911,7 +1953,21 @@ async function hoursSinceServiceFor(client2, assets) {
   return out;
 }
 var INGEST_TOKEN = process.env.INGEST_TOKEN || "";
-var MANUAL_RATE_MISSING = "Day rate (AL57)";
+var MANUAL_RATE_MISSING = "Day rate (";
+var CENTRIFUGE_SLOT_NUMBERS = [1, 2, 3, 4];
+function isMappedSlot(slot) {
+  return CENTRIFUGE_SLOT_NUMBERS.includes(Number(slot)) && slot != null;
+}
+function slotDailyHours(kp) {
+  const n = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+  const k = kp || {};
+  return {
+    1: n(k.daily_run_hours_cent1) ?? n(k.daily_run_hours),
+    2: n(k.daily_run_hours_cent2),
+    3: n(k.daily_run_hours_cent3),
+    4: n(k.daily_run_hours_cent4)
+  };
+}
 async function manualRateJobIds(client2) {
   const { data } = await client2.from("jobs").select("id").eq("manual_day_rate", true);
   return new Set((data || []).map((j) => String(j.id)));
@@ -2048,12 +2104,14 @@ var CHANGE_LABELS = {
   rig_activity: "Rig activity (AI8)",
   meas_depth_ft: "Measured depth (AI9)",
   supervisor: "Supervisor (AI11)",
-  remarks: "Notes (B57)",
-  day_rate: "Day rate (AL57)",
-  accrued_current_well: "Accrued, current well (AS57)",
+  remarks: "Notes",
+  day_rate: "Day rate",
+  accrued_current_well: "Accrued, current well",
   mud_weight_ppg: "Mud weight (G14)",
-  daily_run_hours: "Run hours, centrifuge 1 (AA37)",
-  daily_run_hours_cent2: "Run hours, centrifuge 2 (AM37)"
+  daily_run_hours: "Run hours, centrifuge 1",
+  daily_run_hours_cent2: "Run hours, centrifuge 2",
+  daily_run_hours_cent3: "Run hours, centrifuge 3",
+  daily_run_hours_cent4: "Run hours, centrifuge 4"
 };
 var SKIP_CHANGE_KEYS = /* @__PURE__ */ new Set(["daily_run_hours_cent1", "total_run_hours_cent1"]);
 function fmtChangeVal(v) {
@@ -5016,9 +5074,7 @@ async function registerRoutes(httpServer, app) {
         const { data: centAssets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", job_id).in("category", RUN_HOUR_CATEGORIES);
         centrifuges = centAssets || [];
       }
-      const backfillNeedsMapping = !!job_id && centrifuges.length >= 2 && centrifuges.some(
-        (c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2
-      );
+      const backfillNeedsMapping = !!job_id && centrifuges.length >= 2 && centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
       const runHourTally = /* @__PURE__ */ new Map();
       const results = [];
       const reviewer = req.profile;
@@ -5045,9 +5101,9 @@ async function registerRoutes(httpServer, app) {
           const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
           const dk = excel.kpis || {};
           const dailyHours = numOrNull(dk.daily_run_hours);
-          const slot1Hours = numOrNull(dk.daily_run_hours_cent1) ?? dailyHours;
-          const slot2Hours = numOrNull(dk.daily_run_hours_cent2);
-          const anyHours = dailyHours != null && dailyHours > 0 || slot1Hours != null && slot1Hours > 0 || slot2Hours != null && slot2Hours > 0;
+          const bySlot = slotDailyHours(dk);
+          const slot1Hours = bySlot[1];
+          const anyHours = dailyHours != null && dailyHours > 0 || Object.values(bySlot).some((h) => h != null && h > 0);
           let dayAlloc = [];
           if (!!job_id && centrifuges.length > 0 && anyHours && !backfillNeedsMapping) {
             if (centrifuges.length === 1) {
@@ -5055,7 +5111,7 @@ async function registerRoutes(httpServer, app) {
               const hrs = dailyHours ?? slot1Hours ?? 0;
               if (hrs > 0) dayAlloc = [{ id: c.id, tag: c.tag, add: hrs }];
             } else {
-              const hoursForSlot = (slot) => slot === 1 ? slot1Hours : slot === 2 ? slot2Hours : null;
+              const hoursForSlot = (slot) => slot != null ? bySlot[slot] ?? null : null;
               dayAlloc = centrifuges.map((c) => {
                 const hrs = hoursForSlot(c.centrifuge_slot);
                 return {
@@ -5183,9 +5239,9 @@ async function registerRoutes(httpServer, app) {
         days_error: results.filter((r) => r.status === "error").length,
         // Set when the job has 2+ centrifuges but not all are mapped to a
         // centrifuge slot: reports imported but run hours were NOT accrued.
-        // Map each centrifuge to slot 1 or 2 on its asset, then re-run.
+        // Map each centrifuge to a slot (1-4) on its asset, then re-run.
         run_hours_needs_slot_mapping: backfillNeedsMapping,
-        run_hours_note: backfillNeedsMapping ? "Reports were imported, but run hours were not accrued because this job has two centrifuges and at least one is not mapped to Centrifuge 1 or 2. Map each centrifuge's slot on its asset, then re-import to accrue run hours." : null,
+        run_hours_note: backfillNeedsMapping ? "Reports were imported, but run hours were not accrued because this job has two or more centrifuges and at least one is not mapped to a centrifuge slot (Centrifuge 1-4). Map each centrifuge's slot on its asset, then re-import to accrue run hours." : null,
         results
       };
       res.status(201).json(summary);
@@ -5468,8 +5524,11 @@ async function registerRoutes(httpServer, app) {
       const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
       const kp = report.kpis || {};
       const daily_run_hours = numOrNull(kp.daily_run_hours);
-      const daily_run_hours_cent1 = numOrNull(kp.daily_run_hours_cent1) ?? daily_run_hours;
-      const daily_run_hours_cent2 = numOrNull(kp.daily_run_hours_cent2);
+      const bySlot = slotDailyHours(kp);
+      const daily_run_hours_cent1 = bySlot[1];
+      const daily_run_hours_cent2 = bySlot[2];
+      const daily_run_hours_cent3 = bySlot[3];
+      const daily_run_hours_cent4 = bySlot[4];
       let centrifuges = [];
       if (report.job_id) {
         const { data: assets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot, is_rental, rental_vendor").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
@@ -5483,11 +5542,13 @@ async function registerRoutes(httpServer, app) {
           centrifuge_slot: a.centrifuge_slot ?? null
         }));
       }
-      const needs_slot_mapping = centrifuges.length >= 2 && centrifuges.some((c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2);
+      const needs_slot_mapping = centrifuges.length >= 2 && centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
       res.json({
         daily_run_hours,
         daily_run_hours_cent1,
         daily_run_hours_cent2,
+        daily_run_hours_cent3,
+        daily_run_hours_cent4,
         already_applied: !!report.run_hours_applied,
         centrifuges,
         needs_slot_mapping
@@ -5521,9 +5582,9 @@ async function registerRoutes(httpServer, app) {
         const kp = report.kpis || {};
         const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
         const dailyHours = numOrNull(kp.daily_run_hours);
-        const slot1Hours = numOrNull(kp.daily_run_hours_cent1) ?? dailyHours;
-        const slot2Hours = numOrNull(kp.daily_run_hours_cent2);
-        const anyHours = dailyHours != null && dailyHours > 0 || slot1Hours != null && slot1Hours > 0 || slot2Hours != null && slot2Hours > 0;
+        const bySlot = slotDailyHours(kp);
+        const slot1Hours = bySlot[1];
+        const anyHours = dailyHours != null && dailyHours > 0 || Object.values(bySlot).some((h) => h != null && h > 0);
         if (!report.run_hours_applied && report.job_id && anyHours) {
           const { data: centAssets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
           const centrifuges = centAssets || [];
@@ -5535,14 +5596,14 @@ async function registerRoutes(httpServer, app) {
               allocation = [{ asset_id: c.id, tag: c.tag, add: hrs }];
           } else if (centrifuges.length >= 2) {
             const unmapped = centrifuges.filter(
-              (c) => c.centrifuge_slot !== 1 && c.centrifuge_slot !== 2
+              (c) => !isMappedSlot(c.centrifuge_slot)
             );
             if (unmapped.length > 0) {
               return res.status(400).json({
-                message: "This job has two centrifuges. Map each one to Centrifuge 1 or Centrifuge 2 (on the asset) before signing off so run hours go to the right unit. Needs mapping: " + unmapped.map((c) => c.tag).join(", ")
+                message: "This job has two or more centrifuges. Map each one to its centrifuge slot (Centrifuge 1, 2, 3, or 4 on the asset) before signing off so run hours go to the right unit. Needs mapping: " + unmapped.map((c) => c.tag).join(", ")
               });
             }
-            const hoursForSlot = (slot) => slot === 1 ? slot1Hours : slot === 2 ? slot2Hours : null;
+            const hoursForSlot = (slot) => bySlot[slot] ?? null;
             allocation = centrifuges.map((c) => {
               const hrs = hoursForSlot(c.centrifuge_slot);
               return {

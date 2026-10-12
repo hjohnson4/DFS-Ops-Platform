@@ -71,9 +71,9 @@ const CHANGE_FIELD_OPTIONS = [
   "Rig activity (AI8)",
   "Measured depth (AI9)",
   "Mud weight (G14)",
-  "Run hours (AA37 / AM37)",
-  "Day rate (AL57)",
-  "Notes / comments (B57)",
+  "Run hours (Centrifuge 1-4)",
+  "Day rate",
+  "Notes / comments",
   "Crew or equipment section",
 ];
 
@@ -157,13 +157,18 @@ export default function DailyReportDetailPage() {
   const multiCent = (runCtx?.centrifuges?.length ?? 0) >= 2;
   const dailyHrs = runCtx?.daily_run_hours ?? null;
   const cent1Hrs = runCtx?.daily_run_hours_cent1 ?? null;
-  const cent2Hrs = runCtx?.daily_run_hours_cent2 ?? null;
-  // With two centrifuges, hours route by each unit's mapped slot. Accrual is
-  // blocked until every centrifuge is mapped to Centrifuge 1 or 2.
+  const slotHrs: Record<number, number | null> = {
+    1: cent1Hrs,
+    2: runCtx?.daily_run_hours_cent2 ?? null,
+    3: runCtx?.daily_run_hours_cent3 ?? null,
+    4: runCtx?.daily_run_hours_cent4 ?? null,
+  };
+  // With 2+ centrifuges, hours route by each unit's mapped slot. Accrual is
+  // blocked until every centrifuge is mapped to Centrifuge 1-4.
   const needsSlotMapping = !!runCtx?.needs_slot_mapping;
-  // Hours this centrifuge will receive from its mapped slot (1 -> AA37, 2 -> AM37).
+  // Hours this centrifuge will receive from its mapped slot (Centrifuge 1-4).
   const hoursForSlot = (slot: number | null | undefined): number | null =>
-    slot === 1 ? cent1Hrs : slot === 2 ? cent2Hrs : null;
+    slot != null ? slotHrs[slot] ?? null : null;
   // Sign-off is blocked only when two centrifuges still need slot mapping.
   const allocValid = !multiCent || !needsSlotMapping;
 
@@ -723,21 +728,21 @@ export default function DailyReportDetailPage() {
                   >
                     <div className="font-medium">Map centrifuge slots first</div>
                     <div className="text-xs mt-1">
-                      This job has two centrifuges. To route run hours correctly,
-                      open each centrifuge under Assets and set its
-                      {" "}“Centrifuge slot (on this job)” to Centrifuge 1 or
-                      Centrifuge 2, then reopen this report. Hours are not applied
-                      until both are mapped.
+                      This job has two or more centrifuges. To route run hours
+                      correctly, open each centrifuge under Assets and set its
+                      {" "}“Centrifuge slot (on this job)” to the column it is
+                      reported under (Centrifuge 1, 2, 3, or 4), then reopen this
+                      report. Hours are not applied until every unit is mapped.
                     </div>
                     <ul className="text-xs mt-1 list-disc pl-4">
                       {(runCtx?.centrifuges ?? []).map((c) => (
                         <li key={c.id}>
                           {c.tag} <RentalBadge asset={c} /> —{" "}
-                          {c.centrifuge_slot === 1
-                            ? "Centrifuge 1"
-                            : c.centrifuge_slot === 2
-                              ? "Centrifuge 2"
-                              : "not mapped"}
+                          {c.centrifuge_slot != null &&
+                          c.centrifuge_slot >= 1 &&
+                          c.centrifuge_slot <= 4
+                            ? `Centrifuge ${c.centrifuge_slot}`
+                            : "not mapped"}
                         </li>
                       ))}
                     </ul>
