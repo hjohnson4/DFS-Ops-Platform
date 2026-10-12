@@ -22,6 +22,7 @@ import {
   type UnassignedWell,
   workDatesLabel,
   isLiveJobStatus,
+  tracksRunHours,
   type BidDocument,
 } from "@shared/schema";
 import { FieldTicketFormDialog } from "@/components/FieldTicketFormDialog";
@@ -126,6 +127,9 @@ export default function JobDetailPage() {
     enabled: !!id,
   });
   const assignedAssets = (allAssets || []).filter((a) => a.job_id === id);
+  // Centrifuges (run-hour assets) on this job. With 2+, each must be mapped to
+  // a centrifuge slot so daily-report run hours accrue to the right unit.
+  const centrifugeCount = assignedAssets.filter((a) => tracksRunHours(a.category)).length;
   // assets available to attach: unassigned AND in this job's operating area
   // (the backend enforces the same-area rule; we mirror it in the picker)
   const attachableAssets = (allAssets || []).filter(
@@ -202,6 +206,9 @@ export default function JobDetailPage() {
       const res = await apiRequest("PATCH", `/api/assets/${assetId}`, {
         job_id: null,
         status: "Available",
+        // The centrifuge slot is per job — clear it so it doesn't carry over
+        // to the unit's next job.
+        centrifuge_slot: null,
       });
       return res.json();
     },
@@ -238,12 +245,23 @@ export default function JobDetailPage() {
   // edit the well/location label on an already-assigned asset
   const [editAsset, setEditAsset] = useState<Asset | null>(null);
   const [editWell, setEditWell] = useState("");
+  // Centrifuge slot on this job ("1"-"4", or "none"). Only shown/sent for
+  // run-hour assets (centrifuges).
+  const [editSlot, setEditSlot] = useState<string>("none");
+  const openEditAsset = (a: Asset) => {
+    setEditAsset(a);
+    setEditWell(a.job_or_well ?? "");
+    setEditSlot(a.centrifuge_slot != null ? String(a.centrifuge_slot) : "none");
+  };
   const editAssetWell = useMutation({
     mutationFn: async () => {
       if (!editAsset) return;
-      const res = await apiRequest("PATCH", `/api/assets/${editAsset.id}`, {
+      const body: any = {
         job_or_well: editWell.trim() === "" ? null : editWell.trim(),
-      });
+      };
+      if (tracksRunHours(editAsset.category))
+        body.centrifuge_slot = editSlot === "none" ? null : Number(editSlot);
+      const res = await apiRequest("PATCH", `/api/assets/${editAsset.id}`, body);
       return res.json();
     },
     onSuccess: () => {
@@ -604,10 +622,18 @@ export default function JobDetailPage() {
         </div>
       ) : (
         <div className="rounded-lg border border-card-border bg-card divide-y divide-card-border">
-          {assignedAssets.map((a) => (
+          {assignedAssets.map((a) => {
+            const canEditRow = canManageAssets && isLiveJobStatus(job.status);
+            const isCent = tracksRunHours(a.category);
+            const slot = a.centrifuge_slot;
+            return (
             <div
               key={a.id}
-              className="flex items-center gap-3 px-4 py-3 text-sm"
+              className={
+                "flex items-center gap-3 px-4 py-3 text-sm" +
+                (canEditRow ? " cursor-pointer hover:bg-muted/40" : "")
+              }
+              onClick={canEditRow ? () => openEditAsset(a) : undefined}
               data-testid={`assigned-asset-${a.id}`}
             >
               <Wrench className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -617,20 +643,36 @@ export default function JobDetailPage() {
               {a.job_or_well && (
                 <span className="text-muted-foreground">· {a.job_or_well}</span>
               )}
+              {isCent &&
+                (slot != null && slot >= 1 && slot <= 4 ? (
+                  <span
+                    className="inline-flex rounded border border-card-border px-1.5 py-0.5 text-xs"
+                    data-testid={`badge-slot-${a.id}`}
+                  >
+                    Centrifuge {slot}
+                  </span>
+                ) : centrifugeCount >= 2 ? (
+                  <span
+                    className="inline-flex rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
+                    data-testid={`badge-slot-${a.id}`}
+                  >
+                    Slot not mapped
+                  </span>
+                ) : null)}
               <span className="ml-auto inline-flex rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                 {a.status}
               </span>
-              {canManageAssets && isLiveJobStatus(job.status) && (
-                <div className="flex items-center gap-0.5">
+              {canEditRow && (
+                <div
+                  className="flex items-center gap-0.5"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <Button
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7 text-muted-foreground"
-                    onClick={() => {
-                      setEditAsset(a);
-                      setEditWell(a.job_or_well ?? "");
-                    }}
-                    aria-label="Edit well/location"
+                    onClick={() => openEditAsset(a)}
+                    aria-label={isCent ? "Edit well/location and centrifuge slot" : "Edit well/location"}
                     data-testid={`button-edit-asset-${a.id}`}
                   >
                     <Pencil className="h-3.5 w-3.5" />
@@ -670,7 +712,8 @@ export default function JobDetailPage() {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -739,6 +782,27 @@ export default function JobDetailPage() {
               Updates where this asset is working on Job {job.job_number}. To move
               it to a different job, release it and add it there.
             </p>
+            {editAsset && tracksRunHours(editAsset.category) && (
+              <div className="pt-1">
+                <Label htmlFor="edit-asset-slot">Centrifuge slot (on this job)</Label>
+                <Select value={editSlot} onValueChange={setEditSlot}>
+                  <SelectTrigger id="edit-asset-slot" className="mt-1.5" data-testid="select-edit-asset-slot">
+                    <SelectValue placeholder="Not mapped" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Not mapped</SelectItem>
+                    <SelectItem value="1">Centrifuge 1</SelectItem>
+                    <SelectItem value="2">Centrifuge 2</SelectItem>
+                    <SelectItem value="3">Centrifuge 3</SelectItem>
+                    <SelectItem value="4">Centrifuge 4</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Pick the centrifuge column this unit is reported under on the
+                  daily report so its run hours accrue to it.
+                </p>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setEditAsset(null)} data-testid="button-cancel-edit-asset">
