@@ -283,7 +283,7 @@ export default function JobDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ["/api/jobs", id] });
       queryClient.invalidateQueries({ queryKey: ["/api/jobs"] });
       queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
-      toast({ title: "Job archived", description: "Assigned assets were released back to Available." });
+      toast({ title: "Job archived", description: "Marked Completed. Assigned assets were released back to Available." });
     },
     onError: (e: any) =>
       toast({ title: "Could not archive job", description: e.message, variant: "destructive" }),
@@ -407,10 +407,11 @@ export default function JobDetailPage() {
                     <AlertDialogHeader>
                       <AlertDialogTitle>Archive job {job.job_number}?</AlertDialogTitle>
                       <AlertDialogDescription>
-                        The job and all its history (pads, wells, field tickets,
-                        daily reports, JSAs) are kept, but it's hidden from the
-                        default jobs list. Any assets assigned to it are released
-                        back to Available. You can restore it anytime.
+                        The job is marked Completed and hidden from the default
+                        jobs list. All its history (pads, wells, field tickets,
+                        daily reports, JSAs) is kept. Any assets assigned to it
+                        are released back to Available. You can restore it
+                        anytime; a restored job goes back to Active.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>

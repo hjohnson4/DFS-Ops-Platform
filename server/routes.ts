@@ -2159,8 +2159,8 @@ export async function registerRoutes(
 
   // Archive (soft-delete) a job. Preserves the job and all its history
   // (pads/wells/stints, field tickets, daily reports, JSAs) but hides it from
-  // the default jobs list. Assigned assets are released back to Available so
-  // they can be used on other jobs.
+  // the default jobs list, and sets its status to Completed. Assigned assets
+  // are released back to Available so they can be used on other jobs.
   app.post(
     "/api/jobs/:id/archive",
     requireAuth,
@@ -2179,7 +2179,7 @@ export async function registerRoutes(
         return res.status(409).json({ message: "Job is already archived" });
       const { data, error } = await client
         .from("jobs")
-        .update({ archived_at: new Date().toISOString() })
+        .update({ archived_at: new Date().toISOString(), status: "Completed" })
         .eq("id", req.params.id)
         .select()
         .single();
@@ -2195,8 +2195,10 @@ export async function registerRoutes(
     },
   );
 
-  // Restore an archived job. Does not re-assign the assets that were released
-  // when it was archived — those are picked again from the job page.
+  // Restore an archived job. A Completed job comes back as Active (it was
+  // completed by archiving); any other status is kept. Does not re-assign the
+  // assets that were released when it was archived — those are picked again
+  // from the job page.
   app.post(
     "/api/jobs/:id/unarchive",
     requireAuth,
@@ -2205,7 +2207,7 @@ export async function registerRoutes(
       const client = supabaseAdmin || supabaseAnon;
       const { data: job } = await client
         .from("jobs")
-        .select("area, archived_at")
+        .select("area, archived_at, status")
         .eq("id", req.params.id)
         .single();
       if (!job) return res.status(404).json({ message: "Job not found" });
@@ -2215,7 +2217,10 @@ export async function registerRoutes(
         return res.status(409).json({ message: "Job is not archived" });
       const { data, error } = await client
         .from("jobs")
-        .update({ archived_at: null })
+        .update({
+          archived_at: null,
+          status: (job as any).status === "Completed" ? "Active" : (job as any).status,
+        })
         .eq("id", req.params.id)
         .select()
         .single();

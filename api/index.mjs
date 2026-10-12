@@ -3286,7 +3286,7 @@ async function registerRoutes(httpServer, app) {
         return res.status(403).json({ message: "Outside your area" });
       if (job.archived_at)
         return res.status(409).json({ message: "Job is already archived" });
-      const { data, error } = await client2.from("jobs").update({ archived_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", req.params.id).select().single();
+      const { data, error } = await client2.from("jobs").update({ archived_at: (/* @__PURE__ */ new Date()).toISOString(), status: "Completed" }).eq("id", req.params.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       const { error: relErr } = await client2.from("assets").update({ job_id: null, status: "Available" }).eq("job_id", req.params.id);
       if (relErr)
@@ -3300,13 +3300,16 @@ async function registerRoutes(httpServer, app) {
     requireRole("admin", "area", "super"),
     async (req, res) => {
       const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("area, archived_at").eq("id", req.params.id).single();
+      const { data: job } = await client2.from("jobs").select("area, archived_at, status").eq("id", req.params.id).single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile.role !== "admin" && job.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
       if (!job.archived_at)
         return res.status(409).json({ message: "Job is not archived" });
-      const { data, error } = await client2.from("jobs").update({ archived_at: null }).eq("id", req.params.id).select().single();
+      const { data, error } = await client2.from("jobs").update({
+        archived_at: null,
+        status: job.status === "Completed" ? "Active" : job.status
+      }).eq("id", req.params.id).select().single();
       if (error) {
         if (error.code === "23505")
           return res.status(409).json({
