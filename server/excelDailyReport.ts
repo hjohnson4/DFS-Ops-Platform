@@ -492,8 +492,15 @@ function parseDaySheet(
 
   // A short, honest summary built ONLY from cell values (no interpretation).
   const summaryBits: string[] = [];
-  if (kpis.daily_run_hours != null)
-    summaryBits.push(`Run hours ${kpis.daily_run_hours}`);
+  {
+    // Run hours per centrifuge column that has a value (Centrifuge 1-4).
+    const kv = kpis as any;
+    const per = [1, 2, 3, 4]
+      .map((n) => ({ n, v: n === 1 ? kv.daily_run_hours_cent1 ?? kv.daily_run_hours : kv[`daily_run_hours_cent${n}`] }))
+      .filter((x) => x.v != null);
+    if (per.length === 1 && per[0].n === 1) summaryBits.push(`Run hours ${per[0].v}`);
+    else if (per.length) summaryBits.push(`Run hours ${per.map((x) => `C${x.n} ${x.v}`).join(", ")}`);
+  }
   if (kpis.daily_fluid_recovery_bbl != null)
     summaryBits.push(`Daily fluid recovery ${kpis.daily_fluid_recovery_bbl} bbl`);
   if (kpis.mud_weight_ppg != null)

@@ -162,7 +162,10 @@ export default function DailyReportDetailPage() {
     const slot = c.centrifuge_slot;
     if (slot != null && slot >= 1 && slot <= 4) (centSlotTags[slot] ||= []).push(c.tag);
   }
-  const dailyHrs = runCtx?.daily_run_hours ?? null;
+  // Total day hours across every centrifuge column (1-4) on the report.
+  const dailyHrs = runCtx?.day_total_hours ?? runCtx?.daily_run_hours ?? null;
+  // Hours a lone centrifuge gets: its own column on the report.
+  const soloHrs = runCtx?.solo_hours ?? dailyHrs;
   const cent1Hrs = runCtx?.daily_run_hours_cent1 ?? null;
   const slotHrs: Record<number, number | null> = {
     1: cent1Hrs,
@@ -722,7 +725,7 @@ export default function DailyReportDetailPage() {
                 </div>
                 {!multiCent ? (
                   <div className="text-muted-foreground mt-1">
-                    Signing off adds {dailyHrs} hrs to{" "}
+                    Signing off adds {soloHrs ?? 0} hrs to{" "}
                     <span className="font-medium text-foreground">
                       {runCtx?.centrifuges?.[0]?.tag}
                     </span>{" "}

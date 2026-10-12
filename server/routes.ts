@@ -204,6 +204,22 @@ function slotDailyHours(kp: any): Record<number, number | null> {
     4: n(k.daily_run_hours_cent4),
   };
 }
+// Hours for a job with exactly ONE centrifuge. Uses the column that unit is
+// mapped to (Centrifuge 1-4) when that column has hours; otherwise Centrifuge
+// 1's cell; otherwise, if exactly one centrifuge column on the report has
+// hours (e.g. the crew filled in Centrifuge 3), that column. 0 = nothing.
+function soloCentrifugeHours(kp: any, slot: any): number {
+  const by = slotDailyHours(kp);
+  if (isMappedSlot(slot)) {
+    const own = by[Number(slot)];
+    if (own != null && own > 0) return own;
+  }
+  const d = kp?.daily_run_hours;
+  const daily = d == null || d === "" || !Number.isFinite(Number(d)) ? null : Number(d);
+  if (daily != null && daily > 0) return daily;
+  const filled = CENTRIFUGE_SLOT_NUMBERS.filter((s) => (by[s] ?? 0) > 0);
+  return filled.length === 1 ? (by[filled[0]] as number) : 0;
+}
 async function manualRateJobIds(client: any): Promise<Set<string>> {
   const { data } = await client.from("jobs").select("id").eq("manual_day_rate", true);
   return new Set(((data || []) as any[]).map((j) => String(j.id)));
@@ -4907,7 +4923,7 @@ export async function registerRoutes(
           ) {
             if (centrifuges.length === 1) {
               const c = centrifuges[0];
-              const hrs = dailyHours ?? slot1Hours ?? 0;
+              const hrs = soloCentrifugeHours(dk, c.centrifuge_slot);
               if (hrs > 0) dayAlloc = [{ id: c.id, tag: c.tag, add: hrs }];
             } else {
               const hoursForSlot = (slot: number | null) =>
@@ -5497,7 +5513,22 @@ export async function registerRoutes(
         centrifuges.length >= 2 &&
         centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
 
+      // Sum of every centrifuge column's day hours (Centrifuge 1-4), and the
+      // hours a lone centrifuge would receive.
+      const slotVals = [bySlot[1], bySlot[2], bySlot[3], bySlot[4]].filter(
+        (h): h is number => h != null && h > 0,
+      );
+      const day_total_hours = slotVals.length
+        ? slotVals.reduce((a, b) => a + b, 0)
+        : daily_run_hours != null && daily_run_hours > 0
+          ? daily_run_hours
+          : null;
+      const solo_hours =
+        centrifuges.length === 1 ? soloCentrifugeHours(kp, centrifuges[0].centrifuge_slot) : null;
+
       res.json({
+        day_total_hours,
+        solo_hours,
         daily_run_hours,
         daily_run_hours_cent1,
         daily_run_hours_cent2,
@@ -5581,7 +5612,7 @@ export async function registerRoutes(
             // Prefer the combined day total (matches historic behavior); fall
             // back to slot 1 if only per-slot values were parsed.
             const c = centrifuges[0] as any;
-            const hrs = dailyHours ?? slot1Hours ?? 0;
+            const hrs = soloCentrifugeHours(kp, c.centrifuge_slot);
             if (hrs > 0)
               allocation = [{ asset_id: c.id, tag: c.tag, add: hrs }];
           } else if (centrifuges.length >= 2) {

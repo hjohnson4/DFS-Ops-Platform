@@ -1013,6 +1013,10 @@ export interface ReportRunHoursContext {
   daily_run_hours_cent2: number | null;
   daily_run_hours_cent3: number | null;
   daily_run_hours_cent4: number | null;
+  // Sum of Centrifuge 1-4 day hours on the report (null = none).
+  day_total_hours?: number | null;
+  // Hours a lone centrifuge on the job receives at sign-off (its own column).
+  solo_hours?: number | null;
   already_applied: boolean;
   centrifuges: CentrifugeOnJob[];
   // True when the job has 2+ run-hour assets and at least one of them has no

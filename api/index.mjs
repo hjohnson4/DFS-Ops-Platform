@@ -530,8 +530,12 @@ function parseDaySheet(wb, chosen, incomplete) {
   }
   const dayLabel = `Report Day ${chosen.day}`;
   const summaryBits = [];
-  if (kpis.daily_run_hours != null)
-    summaryBits.push(`Run hours ${kpis.daily_run_hours}`);
+  {
+    const kv = kpis;
+    const per = [1, 2, 3, 4].map((n) => ({ n, v: n === 1 ? kv.daily_run_hours_cent1 ?? kv.daily_run_hours : kv[`daily_run_hours_cent${n}`] })).filter((x) => x.v != null);
+    if (per.length === 1 && per[0].n === 1) summaryBits.push(`Run hours ${per[0].v}`);
+    else if (per.length) summaryBits.push(`Run hours ${per.map((x) => `C${x.n} ${x.v}`).join(", ")}`);
+  }
   if (kpis.daily_fluid_recovery_bbl != null)
     summaryBits.push(`Daily fluid recovery ${kpis.daily_fluid_recovery_bbl} bbl`);
   if (kpis.mud_weight_ppg != null)
@@ -1991,6 +1995,18 @@ function slotDailyHours(kp) {
     3: n(k.daily_run_hours_cent3),
     4: n(k.daily_run_hours_cent4)
   };
+}
+function soloCentrifugeHours(kp, slot) {
+  const by = slotDailyHours(kp);
+  if (isMappedSlot(slot)) {
+    const own = by[Number(slot)];
+    if (own != null && own > 0) return own;
+  }
+  const d = kp?.daily_run_hours;
+  const daily = d == null || d === "" || !Number.isFinite(Number(d)) ? null : Number(d);
+  if (daily != null && daily > 0) return daily;
+  const filled = CENTRIFUGE_SLOT_NUMBERS.filter((s) => (by[s] ?? 0) > 0);
+  return filled.length === 1 ? by[filled[0]] : 0;
 }
 async function manualRateJobIds(client2) {
   const { data } = await client2.from("jobs").select("id").eq("manual_day_rate", true);
@@ -5146,7 +5162,7 @@ async function registerRoutes(httpServer, app) {
           if (!!job_id && centrifuges.length > 0 && anyHours && !backfillNeedsMapping) {
             if (centrifuges.length === 1) {
               const c = centrifuges[0];
-              const hrs = dailyHours ?? slot1Hours ?? 0;
+              const hrs = soloCentrifugeHours(dk, c.centrifuge_slot);
               if (hrs > 0) dayAlloc = [{ id: c.id, tag: c.tag, add: hrs }];
             } else {
               const hoursForSlot = (slot) => slot != null ? bySlot[slot] ?? null : null;
@@ -5581,7 +5597,14 @@ async function registerRoutes(httpServer, app) {
         }));
       }
       const needs_slot_mapping = centrifuges.length >= 2 && centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
+      const slotVals = [bySlot[1], bySlot[2], bySlot[3], bySlot[4]].filter(
+        (h) => h != null && h > 0
+      );
+      const day_total_hours = slotVals.length ? slotVals.reduce((a, b) => a + b, 0) : daily_run_hours != null && daily_run_hours > 0 ? daily_run_hours : null;
+      const solo_hours = centrifuges.length === 1 ? soloCentrifugeHours(kp, centrifuges[0].centrifuge_slot) : null;
       res.json({
+        day_total_hours,
+        solo_hours,
         daily_run_hours,
         daily_run_hours_cent1,
         daily_run_hours_cent2,
@@ -5629,7 +5652,7 @@ async function registerRoutes(httpServer, app) {
           let allocation = [];
           if (centrifuges.length === 1) {
             const c = centrifuges[0];
-            const hrs = dailyHours ?? slot1Hours ?? 0;
+            const hrs = soloCentrifugeHours(kp, c.centrifuge_slot);
             if (hrs > 0)
               allocation = [{ asset_id: c.id, tag: c.tag, add: hrs }];
           } else if (centrifuges.length >= 2) {
