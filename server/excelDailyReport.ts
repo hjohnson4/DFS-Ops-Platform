@@ -69,6 +69,32 @@ const KPI_CELLS_V1: KpiCell[] = [
   { field: "day_rate", cell: "AL57", numeric: true },
 ];
 
+// Per-centrifuge operating parameters for Centrifuge 2+ (Centrifuge 1 uses the
+// unsuffixed centrifuge_* fields above, so older reports keep working).
+// Field names: <param>_cent2, <param>_cent3, <param>_cent4.
+export const CENTRIFUGE_PARAM_FIELDS = [
+  "centrifuge_feed_rate_gpm",
+  "centrifuge_feed_pump_speed_rpm",
+  "centrifuge_bowl_speed_rpm",
+  "centrifuge_backdrive_rpm",
+  "centrifuge_feed_weight_ppg",
+  "centrifuge_effluent_weight_ppg",
+] as const;
+function centParamCells(
+  firstRow: number,
+  cols: { slot: number; col: string }[],
+): KpiCell[] {
+  const out: KpiCell[] = [];
+  for (const { slot, col } of cols)
+    CENTRIFUGE_PARAM_FIELDS.forEach((f, i) =>
+      out.push({ field: `${f}_cent${slot}` as any, cell: `${col}${firstRow + i}`, numeric: true }),
+    );
+  return out;
+}
+// Original workbook: Centrifuge 2 parameters are in column AM, rows 31-36
+// (AG and AS are spare columns under the same Centrifuge 1 / 2 headings).
+KPI_CELLS_V1.push(...centParamCells(31, [{ slot: 2, col: "AM" }]));
+
 // v2 (updated workbook). Same fields, new positions, plus Centrifuge 3 and 4.
 // Centrifuge columns: 1 = AA, 2 = AG, 3 = AM, 4 = AS. Run hours in row 39
 // (daily) / 40 (total); maintenance in row 41.
@@ -109,6 +135,14 @@ const KPI_CELLS_V2: KpiCell[] = [
   { field: "accrued_current_well", cell: "AS59", numeric: true },
   { field: "day_rate", cell: "AL59", numeric: true },
 ];
+// Updated workbook: Centrifuge 2/3/4 parameters in AG/AM/AS, rows 33-38.
+KPI_CELLS_V2.push(
+  ...centParamCells(33, [
+    { slot: 2, col: "AG" },
+    { slot: 3, col: "AM" },
+    { slot: 4, col: "AS" },
+  ]),
+);
 
 const LAYOUTS: Record<
   SheetLayout,

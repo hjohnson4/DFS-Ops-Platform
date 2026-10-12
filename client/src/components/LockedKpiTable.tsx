@@ -6,6 +6,8 @@ import { FileSpreadsheet, Lock } from "lucide-react";
 // Excel "Report Day N" sheet and are locked (read-only) in the app.
 const KPI_GROUPS: {
   group: string;
+  // Shown as one column per centrifuge when more than one centrifuge has data.
+  perCentrifuge?: boolean;
   fields: { key: keyof DailyFieldKpis; label: string; text?: boolean }[];
 }[] = [
   {
@@ -31,6 +33,7 @@ const KPI_GROUPS: {
   },
   {
     group: "Centrifuge parameters",
+    perCentrifuge: true,
     fields: [
       { key: "centrifuge_feed_rate_gpm", label: "Feed rate (gpm)" },
       { key: "centrifuge_feed_pump_speed_rpm", label: "Feed pump speed (rpm)" },
@@ -69,19 +72,37 @@ function fmt(v: unknown): string {
   return String(v);
 }
 
+// Key for a parameter on a given centrifuge: Centrifuge 1 uses the plain
+// field, Centrifuge 2-4 use the _cent2/_cent3/_cent4 suffix.
+const centKey = (key: string, slot: number) => (slot === 1 ? key : `${key}_cent${slot}`);
+const hasVal = (v: unknown) => v !== null && v !== undefined && v !== "";
+
 export default function LockedKpiTable({
   kpis,
   cellMap,
   sourceSheet,
   attachmentName,
+  slotTags,
 }: {
   kpis: DailyFieldKpis | null | undefined;
   cellMap?: Record<string, KpiCellRef> | null;
   sourceSheet?: string | null;
   attachmentName?: string | null;
+  // Optional asset tag per centrifuge slot (from the job's slot mapping).
+  slotTags?: Record<number, string[]>;
 }) {
   const k = kpis || {};
   const map = cellMap || {};
+  const kv = k as Record<string, unknown>;
+
+  // Which centrifuges have parameter data on this report. Centrifuge 1 is
+  // always included; 2-4 only when at least one of their cells has a value.
+  const centGroup = KPI_GROUPS.find((g) => g.perCentrifuge);
+  const centSlots = [1, 2, 3, 4].filter(
+    (slot) =>
+      slot === 1 ||
+      (centGroup?.fields ?? []).some((f) => hasVal(kv[centKey(f.key as string, slot)])),
+  );
 
   return (
     <div className="rounded-lg border border-card-border bg-card overflow-hidden">
@@ -111,6 +132,57 @@ export default function LockedKpiTable({
             <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
               {g.group}
             </div>
+            {g.perCentrifuge && centSlots.length > 1 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm" data-testid="kpi-centrifuge-params">
+                  <thead>
+                    <tr className="text-xs text-muted-foreground">
+                      <th className="py-1 pr-3 text-left font-normal">Parameter</th>
+                      {centSlots.map((slot) => (
+                        <th
+                          key={slot}
+                          className="py-1 pl-3 text-right font-medium text-foreground whitespace-nowrap"
+                          data-testid={`kpi-cent-col-${slot}`}
+                        >
+                          Centrifuge {slot}
+                          {slotTags?.[slot]?.length ? (
+                            <div className="text-[11px] font-normal text-muted-foreground">
+                              {slotTags[slot].join(", ")}
+                            </div>
+                          ) : null}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-card-border">
+                    {g.fields.map((f) => (
+                      <tr key={f.key as string} data-testid={`kpi-row-${f.key}`}>
+                        <td className="py-1.5 pr-3 text-muted-foreground">{f.label}</td>
+                        {centSlots.map((slot) => {
+                          const key = centKey(f.key as string, slot);
+                          const ref = map[key];
+                          return (
+                            <td
+                              key={slot}
+                              className="py-1.5 pl-3 text-right font-medium tabular-nums whitespace-nowrap"
+                              title={ref?.cell ? `Cell ${ref.sheet ? `${ref.sheet}!` : ""}${ref.cell}` : undefined}
+                              data-testid={`kpi-cell-${key}`}
+                            >
+                              {fmt(kv[key])}
+                              {ref?.cell && (
+                                <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground">
+                                  {ref.cell}
+                                </span>
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
             <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-1.5">
               {g.fields.map((f) => {
                 const ref = map[f.key as string];
@@ -136,6 +208,7 @@ export default function LockedKpiTable({
                 );
               })}
             </dl>
+            )}
           </div>
         ))}
       </div>

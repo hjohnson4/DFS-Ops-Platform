@@ -455,6 +455,21 @@ const CHANGE_LABELS: Record<string, string> = {
   daily_run_hours_cent3: "Run hours, centrifuge 3",
   daily_run_hours_cent4: "Run hours, centrifuge 4",
 };
+// Centrifuge parameter labels per centrifuge (Centrifuge 1 = unsuffixed).
+{
+  const params: [string, string][] = [
+    ["centrifuge_feed_rate_gpm", "Feed rate (gpm)"],
+    ["centrifuge_feed_pump_speed_rpm", "Feed pump speed (rpm)"],
+    ["centrifuge_bowl_speed_rpm", "Bowl speed (rpm)"],
+    ["centrifuge_backdrive_rpm", "Backdrive (rpm)"],
+    ["centrifuge_feed_weight_ppg", "Feed weight (ppg)"],
+    ["centrifuge_effluent_weight_ppg", "Effluent weight (ppg)"],
+  ];
+  for (const [key, label] of params) {
+    CHANGE_LABELS[key] = `${label}, centrifuge 1`;
+    for (const n of [2, 3, 4]) CHANGE_LABELS[`${key}_cent${n}`] = `${label}, centrifuge ${n}`;
+  }
+}
 const SKIP_CHANGE_KEYS = new Set(["daily_run_hours_cent1", "total_run_hours_cent1"]);
 
 function fmtChangeVal(v: any): string {

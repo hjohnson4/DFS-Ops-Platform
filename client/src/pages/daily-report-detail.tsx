@@ -155,6 +155,13 @@ export default function DailyReportDetailPage() {
   });
 
   const multiCent = (runCtx?.centrifuges?.length ?? 0) >= 2;
+  // Asset tags currently mapped to each centrifuge slot on this job, shown
+  // above each centrifuge's column in the KPI table.
+  const centSlotTags: Record<number, string[]> = {};
+  for (const c of runCtx?.centrifuges ?? []) {
+    const slot = c.centrifuge_slot;
+    if (slot != null && slot >= 1 && slot <= 4) (centSlotTags[slot] ||= []).push(c.tag);
+  }
   const dailyHrs = runCtx?.daily_run_hours ?? null;
   const cent1Hrs = runCtx?.daily_run_hours_cent1 ?? null;
   const slotHrs: Record<number, number | null> = {
@@ -564,6 +571,7 @@ export default function DailyReportDetailPage() {
               cellMap={report.kpi_cell_map as any}
               sourceSheet={report.source_sheet}
               attachmentName={report.attachment_name}
+              slotTags={centSlotTags}
             />
           </div>
 

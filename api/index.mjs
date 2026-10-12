@@ -270,6 +270,23 @@ var KPI_CELLS_V1 = [
   { field: "accrued_current_well", cell: "AS57", numeric: true },
   { field: "day_rate", cell: "AL57", numeric: true }
 ];
+var CENTRIFUGE_PARAM_FIELDS = [
+  "centrifuge_feed_rate_gpm",
+  "centrifuge_feed_pump_speed_rpm",
+  "centrifuge_bowl_speed_rpm",
+  "centrifuge_backdrive_rpm",
+  "centrifuge_feed_weight_ppg",
+  "centrifuge_effluent_weight_ppg"
+];
+function centParamCells(firstRow, cols) {
+  const out = [];
+  for (const { slot, col } of cols)
+    CENTRIFUGE_PARAM_FIELDS.forEach(
+      (f, i) => out.push({ field: `${f}_cent${slot}`, cell: `${col}${firstRow + i}`, numeric: true })
+    );
+  return out;
+}
+KPI_CELLS_V1.push(...centParamCells(31, [{ slot: 2, col: "AM" }]));
 var KPI_CELLS_V2 = [
   { field: "mud_type", cell: "G13", numeric: false },
   { field: "mud_weight_ppg", cell: "G14", numeric: true },
@@ -307,6 +324,13 @@ var KPI_CELLS_V2 = [
   { field: "accrued_current_well", cell: "AS59", numeric: true },
   { field: "day_rate", cell: "AL59", numeric: true }
 ];
+KPI_CELLS_V2.push(
+  ...centParamCells(33, [
+    { slot: 2, col: "AG" },
+    { slot: 3, col: "AM" },
+    { slot: 4, col: "AS" }
+  ])
+);
 var LAYOUTS = {
   v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57" },
   v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59" }
@@ -2113,6 +2137,20 @@ var CHANGE_LABELS = {
   daily_run_hours_cent3: "Run hours, centrifuge 3",
   daily_run_hours_cent4: "Run hours, centrifuge 4"
 };
+{
+  const params = [
+    ["centrifuge_feed_rate_gpm", "Feed rate (gpm)"],
+    ["centrifuge_feed_pump_speed_rpm", "Feed pump speed (rpm)"],
+    ["centrifuge_bowl_speed_rpm", "Bowl speed (rpm)"],
+    ["centrifuge_backdrive_rpm", "Backdrive (rpm)"],
+    ["centrifuge_feed_weight_ppg", "Feed weight (ppg)"],
+    ["centrifuge_effluent_weight_ppg", "Effluent weight (ppg)"]
+  ];
+  for (const [key, label] of params) {
+    CHANGE_LABELS[key] = `${label}, centrifuge 1`;
+    for (const n of [2, 3, 4]) CHANGE_LABELS[`${key}_cent${n}`] = `${label}, centrifuge ${n}`;
+  }
+}
 var SKIP_CHANGE_KEYS = /* @__PURE__ */ new Set(["daily_run_hours_cent1", "total_run_hours_cent1"]);
 function fmtChangeVal(v) {
   if (v == null || v === "") return "\u2014";

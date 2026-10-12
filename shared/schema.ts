@@ -728,6 +728,10 @@ export interface DailyFieldKpis {
   centrifuge_backdrive_rpm?: number | null;
   centrifuge_feed_weight_ppg?: number | null;
   centrifuge_effluent_weight_ppg?: number | null;
+  // Same six parameters for Centrifuge 2-4 (suffix _cent2/_cent3/_cent4).
+  // Original workbook: Centrifuge 2 = AM31-AM36. Updated workbook:
+  // Centrifuge 2/3/4 = AG/AM/AS rows 33-38. Centrifuge 1 uses the fields above.
+  [k: `centrifuge_${string}_cent${2 | 3 | 4}`]: number | null | undefined;
   add_base_diesel_bbl?: number | null;
   add_water_bbl?: number | null;
   add_barite_bbl?: number | null;
