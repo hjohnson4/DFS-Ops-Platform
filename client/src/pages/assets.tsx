@@ -39,12 +39,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { CentrifugeScheduleView } from "@/components/ForecastView";
 import { AssetTag, RentalBadge, RentalFields, RentalPanel, RentalsSummary, rentalFormFrom, rentalPayload, type RentalForm } from "@/components/Rental";
 import {
   Boxes,
   Plus,
   Loader2,
   CalendarClock,
+  CalendarRange,
   Settings2,
   Search,
   X,
@@ -1160,7 +1162,29 @@ export default function AssetsPage() {
   const canManage = profile?.role === "admin" || profile?.role === "area";
   const areaLocked = profile?.role === "area";
   const isField = profile?.role === "field";
+  const isAdmin = profile?.role === "admin";
   const defaultArea = profile?.area ?? "";
+
+  // Top-level tab: the asset list, or the centrifuge schedule (moved here from
+  // Field Ops & Jobs -> Forecast). Same roles that can see the forecast:
+  // Admins, Area Managers and Supervisors (view-only for Supervisors).
+  const canSchedule = isAdmin || profile?.role === "area" || profile?.role === "super";
+  const [tab, setTabState] = useState<"assets" | "schedule">(() => {
+    try {
+      return sessionStorage.getItem("assets-tab") === "schedule" ? "schedule" : "assets";
+    } catch {
+      return "assets";
+    }
+  });
+  const setTab = (t: "assets" | "schedule") => {
+    setTabState(t);
+    try {
+      sessionStorage.setItem("assets-tab", t);
+    } catch {}
+  };
+  const showingSchedule = tab === "schedule" && canSchedule;
+  // Admins see every area, so the schedule gets an area filter for them.
+  const [scheduleArea, setScheduleArea] = useState<string>("all");
 
   const { data: assets, isLoading } = useQuery<AssetWithSchedule[]>({
     queryKey: ["/api/assets"],
@@ -1239,6 +1263,58 @@ export default function AssetsPage() {
           : `Your equipment fleet across ${profile?.area ? profile.area : "all areas"}.`}
       </p>
 
+      {/* Assets / Centrifuge Schedule tabs */}
+      {canSchedule && (
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <div className="inline-flex rounded-md border border-card-border p-0.5 text-sm" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!showingSchedule}
+              onClick={() => setTab("assets")}
+              className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-medium transition-colors ${
+                !showingSchedule ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+              data-testid="tab-assets-list"
+            >
+              <Boxes className="h-3.5 w-3.5" /> Assets
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={showingSchedule}
+              onClick={() => setTab("schedule")}
+              className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-medium transition-colors ${
+                showingSchedule ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+              data-testid="tab-assets-schedule"
+            >
+              <CalendarRange className="h-3.5 w-3.5" /> Centrifuge Schedule
+            </button>
+          </div>
+          {showingSchedule && isAdmin && (
+            <Select value={scheduleArea} onValueChange={setScheduleArea}>
+              <SelectTrigger className="h-9 w-[210px]" data-testid="select-schedule-area">
+                <MapPin className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+                <SelectValue placeholder="All areas" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All areas</SelectItem>
+                {AREAS.map((a) => (
+                  <SelectItem key={a} value={a}>
+                    {a}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+      )}
+
+      {showingSchedule ? (
+        <CentrifugeScheduleView area={isAdmin ? scheduleArea : profile?.area ?? "all"} />
+      ) : (
+      <>
       {/* Rental centrifuges: cost vs. earnings (Admins + Area Managers) */}
       {canManage && (
         <div className="mb-4">
@@ -1419,6 +1495,8 @@ export default function AssetsPage() {
           </p>
         )}
       </div>
+      </>
+      )}
 
       <AssetDetailDialog assetId={detailId} onClose={() => setDetailId(null)} />
     </div>

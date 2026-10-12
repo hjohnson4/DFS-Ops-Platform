@@ -84,28 +84,56 @@ function Cell({ pieces, rental = false }: { pieces: Piece[]; rental?: boolean })
 }
 
 // ---------------------------------------------------------------------------
-export function ForecastView({ area }: { area: string }) {
-  const { profile } = useAuth();
-  const canEdit = profile?.role === "admin" || profile?.role === "area";
-  const [lvl, setLvl] = useState<ForecastLevel>(1);
-  const [editing, setEditing] = useState<ForecastJob | "new" | null>(null);
-  const [placing, setPlacing] = useState<ForecastJob | null>(null);
-  const [converting, setConverting] = useState<ForecastJob | null>(null);
-  const [docsFor, setDocsFor] = useState<ForecastJob | null>(null);
-
+// Shared loader for the forecast board (same data for both views).
+function useForecastBoard(area: string) {
   const qArea = area !== "all" ? area : "";
-  const { data: board, isLoading, error } = useQuery<ForecastBoard>({
+  const query = useQuery<ForecastBoard>({
     queryKey: ["/api/forecast", qArea],
     queryFn: async () => {
       const res = await apiRequest("GET", `/api/forecast${qArea ? `?area=${encodeURIComponent(qArea)}` : ""}`);
       return res.json();
     },
   });
+  return { ...query, qArea };
+}
 
+// Centrifuge schedule (per-unit, month by month). Lives under Assets ->
+// "Centrifuge Schedule"; the job-side forecast (upcoming work, release dates,
+// revenue) stays under Field Ops & Jobs -> Forecast.
+export function CentrifugeScheduleView({ area }: { area: string }) {
+  const [lvl, setLvl] = useState<ForecastLevel>(1);
+  const { data: board, isLoading, error } = useForecastBoard(area);
   const blocks = useMemo(
     () => (board ? buildGrid(board, lvl, FORECAST_CATEGORIES) : []),
     [board, lvl],
   );
+  if (isLoading) return <div className="py-8 text-center text-sm text-muted-foreground">Loading schedule…</div>;
+  if (error || !board)
+    return (
+      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-sm" data-testid="text-schedule-error">
+        {(error as Error)?.message || "Could not load the centrifuge schedule."}
+      </div>
+    );
+  return (
+    <div className="space-y-3" data-testid="section-centrifuge-schedule">
+      <ScheduleCard board={board} blocks={blocks} lvl={lvl} setLvl={setLvl} />
+      <p className="text-xs text-muted-foreground">
+        Upcoming jobs, their unit needs and release dates are managed under Field Ops &amp; Jobs → Forecast.
+      </p>
+    </div>
+  );
+}
+
+export function ForecastView({ area }: { area: string }) {
+  const { profile } = useAuth();
+  const canEdit = profile?.role === "admin" || profile?.role === "area";
+  const [editing, setEditing] = useState<ForecastJob | "new" | null>(null);
+  const [placing, setPlacing] = useState<ForecastJob | null>(null);
+  const [converting, setConverting] = useState<ForecastJob | null>(null);
+  const [docsFor, setDocsFor] = useState<ForecastJob | null>(null);
+
+  const { data: board, isLoading, error, qArea } = useForecastBoard(area);
+
   const revenue = useMemo(() => (board ? revenueByMonth(board) : null), [board]);
 
   if (isLoading) return <div className="py-8 text-center text-sm text-muted-foreground">Loading forecast…</div>;
@@ -141,8 +169,10 @@ export function ForecastView({ area }: { area: string }) {
         />
       </div>
 
-      {/* Centrifuge schedule */}
-      <ScheduleCard board={board} blocks={blocks} lvl={lvl} setLvl={setLvl} />
+      {/* The centrifuge schedule now lives under Assets -> Centrifuge Schedule. */}
+      <p className="text-xs text-muted-foreground" data-testid="text-schedule-moved">
+        The unit-by-unit centrifuge schedule is under Assets → Centrifuge Schedule.
+      </p>
       {/* Upcoming work */}
       <div className="rounded-lg border border-card-border">
         <div className="flex items-center justify-between gap-3 p-3">
