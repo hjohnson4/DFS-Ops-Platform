@@ -8,7 +8,14 @@ const KPI_GROUPS: {
   group: string;
   // Shown as one column per centrifuge when more than one centrifuge has data.
   perCentrifuge?: boolean;
-  fields: { key: keyof DailyFieldKpis; label: string; text?: boolean }[];
+  fields: {
+    key: keyof DailyFieldKpis;
+    label: string;
+    text?: boolean;
+    // Per-centrifuge source keys (first one with a value wins). Defaults to
+    // the plain key for Centrifuge 1 and <key>_centN for Centrifuge 2-4.
+    slotKeys?: (slot: number) => string[];
+  }[];
 }[] = [
   {
     group: "Mud properties",
@@ -20,21 +27,34 @@ const KPI_GROUPS: {
     ],
   },
   {
-    group: "Fluid recovery & run hours",
+    group: "Fluid recovery",
     fields: [
       { key: "daily_fluid_recovery_bbl", label: "Daily fluid recovery (bbl)" },
       { key: "total_fluid_recovery_bbl", label: "Total fluid recovery (bbl)" },
-      { key: "daily_run_hours", label: "Daily run hours" },
-      { key: "total_run_hours", label: "Total run hours" },
       { key: "maintenance_hours", label: "Maintenance hours" },
       { key: "volume_processed_bbl", label: "Volume processed — Cent 1 (bbl)" },
       { key: "volume_processed_cent2_bbl", label: "Volume processed — Cent 2 (bbl)" },
     ],
   },
   {
-    group: "Centrifuge parameters",
+    group: "Centrifuge KPIs",
     perCentrifuge: true,
     fields: [
+      // Run hours come from each centrifuge's own column on the report
+      // (old workbook: AA37 / AM37; new workbook: AA39 / AG39 / AM39 / AS39).
+      // Centrifuge 1 falls back to the combined field on older reports.
+      {
+        key: "daily_run_hours",
+        label: "Daily run hours",
+        slotKeys: (slot) =>
+          slot === 1 ? ["daily_run_hours_cent1", "daily_run_hours"] : [`daily_run_hours_cent${slot}`],
+      },
+      {
+        key: "total_run_hours",
+        label: "Total run hours",
+        slotKeys: (slot) =>
+          slot === 1 ? ["total_run_hours_cent1", "total_run_hours"] : [`total_run_hours_cent${slot}`],
+      },
       { key: "centrifuge_feed_rate_gpm", label: "Feed rate (gpm)" },
       { key: "centrifuge_feed_pump_speed_rpm", label: "Feed pump speed (rpm)" },
       { key: "centrifuge_bowl_speed_rpm", label: "Bowl speed (rpm)" },
@@ -76,6 +96,13 @@ function fmt(v: unknown): string {
 // field, Centrifuge 2-4 use the _cent2/_cent3/_cent4 suffix.
 const centKey = (key: string, slot: number) => (slot === 1 ? key : `${key}_cent${slot}`);
 const hasVal = (v: unknown) => v !== null && v !== undefined && v !== "";
+type KpiField = (typeof KPI_GROUPS)[number]["fields"][number];
+// Value (and the key it came from) for a field on one centrifuge.
+function slotValue(kv: Record<string, unknown>, f: KpiField, slot: number): { key: string; value: unknown } {
+  const keys = f.slotKeys ? f.slotKeys(slot) : [centKey(f.key as string, slot)];
+  for (const key of keys) if (hasVal(kv[key])) return { key, value: kv[key] };
+  return { key: keys[0], value: null };
+}
 
 export default function LockedKpiTable({
   kpis,
@@ -101,7 +128,7 @@ export default function LockedKpiTable({
   const centSlots = [1, 2, 3, 4].filter(
     (slot) =>
       slot === 1 ||
-      (centGroup?.fields ?? []).some((f) => hasVal(kv[centKey(f.key as string, slot)])),
+      (centGroup?.fields ?? []).some((f) => hasVal(slotValue(kv, f, slot).value)),
   );
 
   return (
@@ -159,7 +186,7 @@ export default function LockedKpiTable({
                       <tr key={f.key as string} data-testid={`kpi-row-${f.key}`}>
                         <td className="py-1.5 pr-3 text-muted-foreground">{f.label}</td>
                         {centSlots.map((slot) => {
-                          const key = centKey(f.key as string, slot);
+                          const { key, value } = slotValue(kv, f, slot);
                           const ref = map[key];
                           return (
                             <td
@@ -168,7 +195,7 @@ export default function LockedKpiTable({
                               title={ref?.cell ? `Cell ${ref.sheet ? `${ref.sheet}!` : ""}${ref.cell}` : undefined}
                               data-testid={`kpi-cell-${key}`}
                             >
-                              {fmt(kv[key])}
+                              {fmt(value)}
                               {ref?.cell && (
                                 <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground">
                                   {ref.cell}
@@ -185,7 +212,10 @@ export default function LockedKpiTable({
             ) : (
             <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-1.5">
               {g.fields.map((f) => {
-                const ref = map[f.key as string];
+                // Single-centrifuge view of the per-centrifuge group reads
+                // Centrifuge 1's own cells (e.g. its run hours).
+                const sv = g.perCentrifuge ? slotValue(kv, f, 1) : { key: f.key as string, value: kv[f.key as string] };
+                const ref = map[sv.key];
                 return (
                   <div
                     key={f.key as string}
@@ -194,7 +224,7 @@ export default function LockedKpiTable({
                   >
                     <dt className="text-muted-foreground">{f.label}</dt>
                     <dd className="flex items-baseline gap-2 font-medium tabular-nums">
-                      <span>{fmt((k as any)[f.key])}</span>
+                      <span>{fmt(sv.value)}</span>
                       {ref?.cell && (
                         <span
                           className="rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground"
