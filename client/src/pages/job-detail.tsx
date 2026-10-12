@@ -29,6 +29,7 @@ import { FieldTicketFormDialog } from "@/components/FieldTicketFormDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
 import { SignoffControls } from "@/components/SignoffControls";
 import { JobKpiTrend } from "@/components/JobKpiTrend";
+import { WellRunHours } from "@/components/WellRunHours";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -819,6 +820,9 @@ export default function JobDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Run hours per centrifuge per well */}
+      <WellRunHours jobId={job.id} />
 
       {/* Field tickets */}
       <div className="mt-6 mb-2 flex items-center justify-between">

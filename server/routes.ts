@@ -1686,6 +1686,128 @@ export async function registerRoutes(
     res.json(rows);
   });
 
+  // Run hours per asset per well on one job, from the run-hours log (one row
+  // per asset per signed-off daily report). Also reports, per well, the day
+  // hours on this job's reports that have NOT been credited to any asset yet
+  // (awaiting sign-off, or signed off without being applied).
+  app.get("/api/jobs/:id/well-run-hours", requireAuth, async (req: Request, res: Response) => {
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: job } = await client.from("jobs").select("id, area").eq("id", req.params.id).single();
+    if (!job) return res.status(404).json({ message: "Job not found" });
+    const scope = areaScopeOf(req.profile!);
+    if (scope && job.area !== scope) return res.status(404).json({ message: "Job not found" });
+    const jobIds = await jobScopeOf(req.profile!);
+    if (jobIds && !jobIds.includes(job.id)) return res.status(404).json({ message: "Job not found" });
+
+    const num = (v: any) => (v == null || v === "" || !Number.isFinite(Number(v)) ? 0 : Number(v));
+    const wellKey = (w: any) => String(w ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+
+    // 1) Credited hours from the log.
+    const log: any[] = [];
+    let ready = true;
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await client
+        .from("asset_run_hours")
+        .select("asset_id, daily_report_id, well_name, report_date, hours")
+        .eq("job_id", job.id)
+        .range(from, from + 999);
+      if (error) { ready = false; break; }
+      log.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+
+    // 2) This job's daily reports (for not-yet-credited hours and dates).
+    const reports: any[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data } = await client
+        .from("daily_reports")
+        .select("id, well_name, report_date, status, run_hours_applied, kpis")
+        .eq("job_id", job.id)
+        .range(from, from + 999);
+      reports.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+
+    // 3) Assets: everything that logged hours here plus centrifuges on the job now.
+    const assetIds = Array.from(new Set(log.map((r) => r.asset_id)));
+    const { data: onJob } = await client
+      .from("assets")
+      .select("id, tag, category, is_rental, rental_vendor, centrifuge_slot, job_id")
+      .eq("job_id", job.id)
+      .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
+    const missing = assetIds.filter((id) => !(onJob || []).some((a: any) => a.id === id));
+    const { data: past } = missing.length
+      ? await client
+          .from("assets")
+          .select("id, tag, category, is_rental, rental_vendor, centrifuge_slot, job_id")
+          .in("id", missing)
+      : { data: [] as any[] };
+    const assets = [...(onJob || []), ...(past || [])].map((a: any) => ({
+      id: a.id,
+      tag: a.tag,
+      category: a.category,
+      is_rental: !!a.is_rental,
+      rental_vendor: a.rental_vendor ?? null,
+      centrifuge_slot: a.job_id === job.id ? a.centrifuge_slot ?? null : null,
+      on_job_now: a.job_id === job.id,
+    }));
+
+    type W = {
+      well_name: string;
+      first_date: string | null;
+      last_date: string | null;
+      by_asset: Record<string, number>;
+      total: number;
+      awaiting_hours: number;
+      uncredited_hours: number;
+    };
+    const wells = new Map<string, W>();
+    const getW = (name: any): W => {
+      const k = wellKey(name) || "(no well name)";
+      let w = wells.get(k);
+      if (!w) {
+        w = { well_name: String(name ?? "").trim() || "(no well name)", first_date: null, last_date: null, by_asset: {}, total: 0, awaiting_hours: 0, uncredited_hours: 0 };
+        wells.set(k, w);
+      }
+      return w;
+    };
+    const touch = (w: W, d: string | null) => {
+      if (!d) return;
+      if (!w.first_date || d < w.first_date) w.first_date = d;
+      if (!w.last_date || d > w.last_date) w.last_date = d;
+    };
+    for (const r of log) {
+      const w = getW(r.well_name);
+      const h = num(r.hours);
+      w.by_asset[r.asset_id] = (w.by_asset[r.asset_id] || 0) + h;
+      w.total += h;
+      touch(w, r.report_date);
+    }
+    for (const r of reports) {
+      const w = getW(r.well_name);
+      touch(w, r.report_date);
+      if (r.run_hours_applied) continue;
+      const by = slotDailyHours(r.kpis);
+      const h = num(by[1]) + num(by[2]) + num(by[3]) + num(by[4]);
+      if (h <= 0) continue;
+      if (r.status === "Signed off") w.uncredited_hours += h;
+      else w.awaiting_hours += h;
+    }
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const list = Array.from(wells.values())
+      .map((w) => ({
+        ...w,
+        total: round(w.total),
+        awaiting_hours: round(w.awaiting_hours),
+        uncredited_hours: round(w.uncredited_hours),
+        by_asset: Object.fromEntries(Object.entries(w.by_asset).map(([k, v]) => [k, round(v)])),
+      }))
+      .filter((w) => w.total > 0 || w.awaiting_hours > 0 || w.uncredited_hours > 0 || assets.length > 0)
+      // Most recent well first.
+      .sort((a, b) => String(b.last_date ?? "").localeCompare(String(a.last_date ?? "")));
+    res.json({ ready, assets, wells: list });
+  });
+
   app.get("/api/jobs/:id", requireAuth, async (req: Request, res: Response) => {
     const { data, error } = await supabaseAnon
       .from("jobs")
