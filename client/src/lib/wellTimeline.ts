@@ -158,26 +158,31 @@ export function buildWellTimeline(
 
   const totalReportDays = dated.length;
   const distinctWells = wells.filter((w) => w.wellKnown).length;
-  // Current well = the well on the MOST RECENTLY SUBMITTED report, ordered by
-  // submission time (created_at, falling back to received_at) — NOT by the
-  // report's own calendar date. A crew can submit an older-dated report after a
-  // newer one, and a report can arrive with a missing/late report_date; in both
-  // cases the latest-dated report is the wrong signal for "where the crew is
-  // now." Submission time answers "what did we most recently hear," which is the
-  // job's current well. The chronological stints above still use report_date.
+  // Current well = the well on the LATEST-DATED report (report date, then day
+  // number, then submission time). This matches the job page's pads & wells,
+  // Job activity and day rate, which all go by report date. Submission time is
+  // the wrong signal when a crew sends several wells' workbooks at once (e.g.
+  // batch drilling a pad): whichever file happened to arrive last would win.
+  // Reports with no usable date only count when no report has a date.
   const submittedSort = (r: DailyReportWithLinks): string =>
     String(r.created_at || r.received_at || "");
+  const byDateDesc = [...dated].sort((a, b) => {
+    if (a.day !== b.day) return a.day < b.day ? 1 : -1; // newest date first
+    const an = a.r.report_day ?? 0;
+    const bn = b.r.report_day ?? 0;
+    if (an !== bn) return bn - an;
+    const sa = submittedSort(a.r);
+    const sb = submittedSort(b.r);
+    if (sa !== sb) return sa < sb ? 1 : -1;
+    return a.r.id < b.r.id ? 1 : -1;
+  });
   const bySubmission = [...reports].sort((a, b) => {
     const sa = submittedSort(a);
     const sb = submittedSort(b);
-    if (sa !== sb) return sa < sb ? 1 : -1; // newest submission first
-    // Stable tiebreak: higher report_day, then id, so the ordering is deterministic.
-    const an = a.report_day ?? 0;
-    const bn = b.report_day ?? 0;
-    if (an !== bn) return bn - an;
+    if (sa !== sb) return sa < sb ? 1 : -1;
     return a.id < b.id ? 1 : -1;
   });
-  const lastReport = bySubmission[0];
+  const lastReport = byDateDesc.length ? byDateDesc[0].r : bySubmission[0];
   const cur = lastReport ? normWell(lastReport.well_name) : { label: null, known: false };
 
   // ---- Honesty caveats -----------------------------------------------------

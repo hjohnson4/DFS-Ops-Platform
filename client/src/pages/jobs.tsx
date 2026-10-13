@@ -55,15 +55,16 @@ function useJobRollup(jobId: string, dayRate: number | null, reports?: DailyRepo
     ? timeline.wells.find((w) => w.well === timeline.currentWell)
     : undefined;
 
-  // Most recent report naming the current well, by submission time then date.
+  // Most recent report naming the current well, by report date then day
+  // number (same order the job page uses for the well's accrued figure).
   const accruedFromWorkbook = (() => {
     if (!timeline.currentWell) return null;
     const wellReports = jobReports
       .filter((r) => (r.well_name ?? "").trim() === timeline.currentWell)
       .sort((a, b) => {
-        const sa = String(a.created_at || a.received_at || a.report_date || "");
-        const sb = String(b.created_at || b.received_at || b.report_date || "");
-        if (sa !== sb) return sa < sb ? 1 : -1; // newest first
+        const da = String(a.report_date || a.received_at || "");
+        const db = String(b.report_date || b.received_at || "");
+        if (da !== db) return da < db ? 1 : -1; // newest date first
         return (b.report_day ?? 0) - (a.report_day ?? 0);
       });
     for (const r of wellReports) {
