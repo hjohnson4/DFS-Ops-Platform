@@ -641,6 +641,9 @@ var JOB_STATUS = ["Active", "Rig Move", "On Hold", "Completed"];
 var isLiveJobStatus = (s) => s === "Active" || s === "Rig Move";
 var CREWING = ["Manned", "Unmanned"];
 var SCHEDULE_CADENCE = ["run_hours", "calendar_days"];
+var setStintStartSchema = z.object({
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date")
+});
 var createRentalChargeSchema = z.object({
   charge_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date"),
   description: z.string().trim().min(1, "Describe the charge").max(200),
@@ -1997,6 +2000,7 @@ function registerRentalRoutes(app) {
       summary: computeRental(a, st, ch),
       charges: ch,
       jobs: st.filter((s) => s.job_id).sort((x, y) => y.start_date.localeCompare(x.start_date)).map((s) => ({
+        id: s.id,
         job_id: s.job_id,
         job_number: s.job?.job_number ?? null,
         day_rate: num2(s.day_rate),
@@ -2033,6 +2037,36 @@ function registerRentalRoutes(app) {
       res.status(201).json(data);
     }
   );
+  app.patch("/api/asset-job-stints/:id", requireAuth, requireRole("admin", "area"), async (req, res) => {
+    const parsed = setStintStartSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const start = parsed.data.start_date;
+    const { data: st } = await db2().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
+    if (!st || !st.job_id) return res.status(404).json({ message: "Job record not found" });
+    const a = st.asset || {};
+    const scope = areaScopeOf(req.profile);
+    if (scope && a.area !== scope) return res.status(403).json({ message: "Outside your area" });
+    const today = todayCentral();
+    if (start > today) return res.status(400).json({ message: "The start date can't be in the future" });
+    if (st.end_date && start > st.end_date)
+      return res.status(400).json({ message: "The start date must be on or before the day it came off the job" });
+    if (a.is_rental && a.rental_start && start < a.rental_start)
+      return res.status(400).json({
+        message: `That's before this rental was received (${a.rental_start}). Change the received date on the asset first.`
+      });
+    const { data: others } = await db2().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
+    const thisEnd = st.end_date || "9999-12-31";
+    const clash = (others || []).find(
+      (o) => o.job_id !== st.job_id && o.start_date <= thisEnd && (o.end_date == null || o.end_date >= start)
+    );
+    if (clash)
+      return res.status(400).json({
+        message: `That overlaps the time this unit was on ${clash.job?.job_number ?? "another job"} (${clash.start_date} \u2192 ${clash.end_date ?? "now"}).`
+      });
+    const { error } = await db2().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true, start_date: start });
+  });
   app.delete("/api/rental-charges/:id", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const { data: c } = await db2().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
     if (!c) return res.status(404).json({ message: "Charge not found" });

@@ -12,7 +12,7 @@ import type { Express, Request, Response } from "express";
 import { supabaseAnon, supabaseAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf } from "./auth";
 import { todayCentral } from "./manualBilling";
-import { createRentalChargeSchema, type RentalSummary } from "@shared/schema";
+import { createRentalChargeSchema, setStintStartSchema, type RentalSummary } from "@shared/schema";
 
 const db = () => supabaseAdmin || supabaseAnon;
 
@@ -204,6 +204,7 @@ export function registerRentalRoutes(app: Express) {
         .filter((s: any) => s.job_id)
         .sort((x: any, y: any) => y.start_date.localeCompare(x.start_date))
         .map((s: any) => ({
+          id: s.id,
           job_id: s.job_id,
           job_number: s.job?.job_number ?? null,
           day_rate: num(s.day_rate),
@@ -245,6 +246,51 @@ export function registerRentalRoutes(app: Express) {
       res.status(201).json(data);
     },
   );
+
+  // Change the day a unit went onto a job (back-dating a unit that was entered
+  // after it was already working). Admins + Area Managers.
+  app.patch("/api/asset-job-stints/:id", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
+    const parsed = setStintStartSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const start = parsed.data.start_date;
+    const { data: st } = await db()
+      .from("asset_job_stints")
+      .select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)")
+      .eq("id", String(req.params.id))
+      .maybeSingle();
+    if (!st || !(st as any).job_id) return res.status(404).json({ message: "Job record not found" });
+    const a = (st as any).asset || {};
+    const scope = areaScopeOf(req.profile!);
+    if (scope && a.area !== scope) return res.status(403).json({ message: "Outside your area" });
+    const today = todayCentral();
+    if (start > today) return res.status(400).json({ message: "The start date can't be in the future" });
+    if ((st as any).end_date && start > (st as any).end_date)
+      return res.status(400).json({ message: "The start date must be on or before the day it came off the job" });
+    if (a.is_rental && a.rental_start && start < a.rental_start)
+      return res.status(400).json({
+        message: `That's before this rental was received (${a.rental_start}). Change the received date on the asset first.`,
+      });
+    // Don't let it overlap another job this unit was on.
+    const { data: others } = await db()
+      .from("asset_job_stints")
+      .select("id, job_id, start_date, end_date, job:jobs(job_number)")
+      .eq("asset_id", (st as any).asset_id)
+      .neq("id", (st as any).id)
+      .not("job_id", "is", null);
+    const thisEnd = (st as any).end_date || "9999-12-31";
+    const clash = (others || []).find(
+      (o: any) => o.job_id !== (st as any).job_id && o.start_date <= thisEnd && (o.end_date == null || o.end_date >= start),
+    );
+    if (clash)
+      return res.status(400).json({
+        message: `That overlaps the time this unit was on ${(clash as any).job?.job_number ?? "another job"} (${(clash as any).start_date} → ${
+          (clash as any).end_date ?? "now"
+        }).`,
+      });
+    const { error } = await db().from("asset_job_stints").update({ start_date: start }).eq("id", (st as any).id);
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true, start_date: start });
+  });
 
   app.delete("/api/rental-charges/:id", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
     const { data: c } = await db()

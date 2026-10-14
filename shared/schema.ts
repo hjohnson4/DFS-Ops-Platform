@@ -309,8 +309,13 @@ export interface RentalCharge {
 export interface RentalDetail {
   summary: RentalSummary;
   charges: RentalCharge[];
-  jobs: { job_id: string; job_number: string | null; day_rate: number | null; start_date: string; end_date: string | null }[];
+  jobs: { id: string; job_id: string; job_number: string | null; day_rate: number | null; start_date: string; end_date: string | null }[];
 }
+// Back-date (or correct) the day a unit went onto a job, e.g. a rental that
+// was entered in DFS Ops after it had already been working.
+export const setStintStartSchema = z.object({
+  start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date"),
+});
 export const createRentalChargeSchema = z.object({
   charge_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date"),
   description: z.string().trim().min(1, "Describe the charge").max(200),

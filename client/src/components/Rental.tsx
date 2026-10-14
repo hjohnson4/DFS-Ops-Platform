@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Loader2, Plus, Trash2 } from "lucide-react";
+import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 
 // ---- Visual identifier ------------------------------------------------------
 // Orange "RENTAL" pill shown next to the asset number wherever a rented unit
@@ -221,6 +221,21 @@ export function RentalPanel({ asset, canEdit }: { asset: any; canEdit: boolean }
     onError: (e: any) => toast({ title: "Could not remove the charge", description: e.message, variant: "destructive" }),
   });
 
+  const [editStint, setEditStint] = useState<string | null>(null);
+  const [stintStart, setStintStart] = useState("");
+  const setStart = useMutation({
+    mutationFn: async () => {
+      if (!stintStart) throw new Error("Pick a date");
+      await apiRequest("PATCH", `/api/asset-job-stints/${editStint}`, { start_date: stintStart });
+    },
+    onSuccess: () => {
+      refresh();
+      setEditStint(null);
+      toast({ title: "Start date updated", description: "Earned, days working and profit now count from that date." });
+    },
+    onError: (e: any) => toast({ title: "Could not change the date", description: e.message, variant: "destructive" }),
+  });
+
   const s: RentalSummary | undefined = data?.summary;
   return (
     <div className="rounded-lg border border-orange-300 bg-card p-4 text-sm dark:border-orange-500/40" data-testid="rental-panel">
@@ -312,12 +327,49 @@ export function RentalPanel({ asset, canEdit }: { asset: any; canEdit: boolean }
             ) : (
               <ul className="space-y-1 text-xs">
                 {data!.jobs.map((j, i) => (
-                  <li key={i} className="flex flex-wrap gap-x-3">
+                  <li key={j.id ?? i} className="flex flex-wrap items-center gap-x-3 gap-y-1" data-testid={`row-rental-job-${j.id}`}>
                     <span className="font-medium">{j.job_number ?? "—"}</span>
-                    <span className="text-muted-foreground">
-                      {fmtDay(j.start_date)} → {j.end_date ? fmtDay(j.end_date) : "now"}
-                    </span>
-                    <span className="text-muted-foreground">{j.day_rate == null ? "no day rate" : `${money(j.day_rate)}/day`}</span>
+                    {editStint === j.id ? (
+                      <span className="flex items-center gap-1.5">
+                        <span className="text-muted-foreground">On this job since</span>
+                        <Input
+                          type="date"
+                          className="h-7 w-[9.5rem] text-xs"
+                          value={stintStart}
+                          min={asset.rental_start ?? undefined}
+                          max={j.end_date ?? todayCentral()}
+                          onChange={(e) => setStintStart(e.target.value)}
+                          data-testid="input-stint-start"
+                        />
+                        <Button size="sm" className="h-7 px-2 text-xs" onClick={() => setStart.mutate()} disabled={setStart.isPending} data-testid="button-save-stint-start">
+                          {setStart.isPending && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}Save
+                        </Button>
+                        <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => setEditStint(null)}>
+                          Cancel
+                        </Button>
+                      </span>
+                    ) : (
+                      <>
+                        <span className="text-muted-foreground">
+                          {fmtDay(j.start_date)} → {j.end_date ? fmtDay(j.end_date) : "now"}
+                        </span>
+                        <span className="text-muted-foreground">{j.day_rate == null ? "no day rate" : `${money(j.day_rate)}/day`}</span>
+                        {canEdit && j.id && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 px-1.5 text-xs"
+                            onClick={() => {
+                              setEditStint(j.id);
+                              setStintStart(j.start_date);
+                            }}
+                            data-testid={`button-edit-stint-${j.id}`}
+                          >
+                            <Pencil className="mr-1 h-3 w-3" /> Change start date
+                          </Button>
+                        )}
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>
