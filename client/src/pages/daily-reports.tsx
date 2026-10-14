@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type {
@@ -18,6 +18,8 @@ import {
   Eye,
   Download,
   RefreshCw,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 import {
   Dialog,
@@ -374,6 +376,62 @@ export default function DailyReportsPage() {
     });
   }, [all, statusFilter, q]);
 
+  // Group the list by job so the page stays short: one header row per job,
+  // collapsible like the centrifuge schedule's categories. Jobs with anything
+  // still open (not signed off) start expanded; fully signed-off jobs start
+  // collapsed. Reports with no job come first. A search expands every group.
+  const groups = useMemo(() => {
+    const map = new Map<
+      string,
+      { key: string; job: string; customer: string | null; rows: DailyReportWithLinks[]; open: number; latest: string }
+    >();
+    for (const r of rows) {
+      const key = r.job_id || "__nojob";
+      let g = map.get(key);
+      if (!g) {
+        g = {
+          key,
+          job: r.job_id ? r.job_number || "Job" : "No job matched",
+          customer: r.job_id ? r.customer_name || null : null,
+          rows: [],
+          open: 0,
+          latest: "",
+        };
+        map.set(key, g);
+      }
+      g.rows.push(r);
+      if (r.status !== "Signed off") g.open += 1;
+      const d = String(r.report_date || r.received_at || "");
+      if (d > g.latest) g.latest = d;
+    }
+    return Array.from(map.values()).sort((a, b) => {
+      if (a.key === "__nojob") return -1;
+      if (b.key === "__nojob") return 1;
+      return a.latest < b.latest ? 1 : a.latest > b.latest ? -1 : 0;
+    });
+  }, [rows]);
+  const GROUPS_KEY = "daily-reports-groups";
+  const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(sessionStorage.getItem(GROUPS_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(GROUPS_KEY, JSON.stringify(groupOpen));
+    } catch {
+      /* ignore */
+    }
+  }, [groupOpen]);
+  const isGroupOpen = (g: { key: string; open: number }) =>
+    !!q || (groupOpen[g.key] ?? g.open > 0);
+  const toggleGroup = (g: { key: string; open: number }) =>
+    setGroupOpen((s) => ({ ...s, [g.key]: !isGroupOpen(g) }));
+  const setAllGroups = (open: boolean) =>
+    setGroupOpen(Object.fromEntries(groups.map((g) => [g.key, open])));
+
   // Bulk sign-off applies only to rows that are "Pending Review".
   const selectablePending = useMemo(
     () => rows.filter((r) => r.status === "Pending Review"),
@@ -510,7 +568,8 @@ export default function DailyReportsPage() {
   });
 
   const showSelectColumn = canReview && selectablePending.length > 0;
-  const colCount = showSelectColumn ? 7 : 6;
+  // Date, Job / Customer, Well, From, Area, Status, Document (+ checkbox).
+  const colCount = (showSelectColumn ? 1 : 0) + 7;
 
   return (
     <div className="p-4 md:p-6 max-w-5xl">
@@ -582,7 +641,15 @@ export default function DailyReportsPage() {
           <ToggleGroupItem value="signed" data-testid="filter-status-signed">Signed off</ToggleGroupItem>
         </ToggleGroup>
 
-        <div className="relative ml-auto w-full sm:w-64">
+        <div className="flex items-center gap-1 ml-auto">
+          <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setAllGroups(true)} disabled={!!q} data-testid="button-expand-all-jobs">
+            Expand all
+          </Button>
+          <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setAllGroups(false)} disabled={!!q} data-testid="button-collapse-all-jobs">
+            Collapse all
+          </Button>
+        </div>
+        <div className="relative w-full sm:w-64">
           <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             value={search}
@@ -679,9 +746,13 @@ export default function DailyReportsPage() {
       ) : (
         <>
         {/* Desktop table */}
-        <div className="hidden md:block rounded-lg border border-card-border overflow-hidden">
+        <div
+          className="hidden md:block rounded-lg border border-card-border overflow-auto"
+          style={{ maxHeight: "70vh" }}
+          data-testid="scroll-daily-reports"
+        >
           <table className="w-full text-sm">
-            <thead className="bg-muted/50 text-muted-foreground">
+            <thead className="sticky top-0 z-20 bg-muted text-muted-foreground">
               <tr className="text-left">
                 {showSelectColumn && (
                   <th className="px-3 py-2.5 w-9">
@@ -703,7 +774,39 @@ export default function DailyReportsPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => {
+              {groups.map((g) => [
+                <tr
+                  key={`group-${g.key}`}
+                  onClick={() => toggleGroup(g)}
+                  className="border-t border-card-border bg-muted/30 cursor-pointer hover:bg-muted/60"
+                  data-testid={`group-row-${g.key}`}
+                >
+                  <td colSpan={colCount} className="px-3 py-2">
+                    <div className="flex items-center gap-2 text-sm">
+                      {isGroupOpen(g) ? (
+                        <ChevronDown className="h-4 w-4 text-muted-foreground" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      )}
+                      <span className="font-medium">{g.job}</span>
+                      {g.customer && (
+                        <span className="text-muted-foreground truncate max-w-[220px]">· {g.customer}</span>
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        · {g.rows.length} report{g.rows.length === 1 ? "" : "s"}
+                      </span>
+                      {g.open > 0 && (
+                        <span className="inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-700 dark:text-amber-400">
+                          {g.open} open
+                        </span>
+                      )}
+                      <span className="ml-auto text-xs text-muted-foreground">
+                        Latest {g.latest ? fmt(g.latest) : "—"}
+                      </span>
+                    </div>
+                  </td>
+                </tr>,
+                ...(isGroupOpen(g) ? g.rows : []).map((r) => {
                 const isPending = r.status === "Pending Review";
                 const isSelected = selected.has(r.id);
                 return (
@@ -800,14 +903,36 @@ export default function DailyReportsPage() {
                     </td>
                   </tr>
                 );
-              })}
+              }),
+              ])}
             </tbody>
           </table>
         </div>
 
         {/* Mobile card list */}
         <div className="md:hidden space-y-2">
-          {rows.map((r) => {
+          {groups.map((g) => [
+            <button
+              key={`mgroup-${g.key}`}
+              type="button"
+              onClick={() => toggleGroup(g)}
+              className="w-full flex items-center gap-2 rounded-lg border border-card-border bg-muted/40 px-3 py-2 text-left text-sm"
+              data-testid={`group-card-${g.key}`}
+            >
+              {isGroupOpen(g) ? (
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+              )}
+              <span className="font-medium truncate">{g.job}</span>
+              <span className="text-xs text-muted-foreground shrink-0">{g.rows.length}</span>
+              {g.open > 0 && (
+                <span className="ml-auto shrink-0 inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-amber-500/15 text-amber-700 dark:text-amber-400">
+                  {g.open} open
+                </span>
+              )}
+            </button>,
+            ...(isGroupOpen(g) ? g.rows : []).map((r) => {
             const isPending = r.status === "Pending Review";
             const isSelected = selected.has(r.id);
             return (
@@ -903,7 +1028,8 @@ export default function DailyReportsPage() {
                 )}
               </div>
             );
-          })}
+          }),
+          ])}
         </div>
         </>
       )}
