@@ -382,10 +382,14 @@ export default function Service() {
           )}
         </div>
       ) : (
-        <div className="rounded-lg border border-card-border overflow-x-auto">
+        <div
+          className="rounded-lg border border-card-border overflow-auto"
+          style={{ maxHeight: "60vh" }}
+          data-testid="scroll-active-centrifuges"
+        >
           <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-card-border bg-muted/40 text-left text-xs text-muted-foreground">
+            <thead className="sticky top-0 z-10 bg-muted shadow-[0_1px_0_0_hsl(var(--card-border))]">
+              <tr className="text-left text-xs text-muted-foreground">
                 <th className="px-3 py-2 font-medium">Asset</th>
                 <th className="px-3 py-2 font-medium">Job / Area</th>
                 <th className="px-3 py-2 font-medium">Technician</th>
@@ -406,13 +410,13 @@ export default function Service() {
                   onClick={() => setAssetId(r.id)}
                   data-testid={`row-centrifuge-${r.tag}`}
                 >
-                  <td className="px-3 py-2.5">
+                  <td className="px-3 py-1.5">
                     <div className="flex items-center gap-1.5 font-medium">{r.tag}<RentalBadge asset={r} /></div>
                     <div className="text-xs text-muted-foreground">
                       {r.category}
                     </div>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="px-3 py-1.5">
                     <div className="font-medium">
                       {r.assigned ? (
                         r.job_number ?? r.job_or_well ?? "—"
@@ -422,12 +426,12 @@ export default function Service() {
                     </div>
                     <div className="text-xs text-muted-foreground">{r.area}</div>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="px-3 py-1.5">
                     {r.technician ?? (
                       <span className="text-muted-foreground">—</span>
                     )}
                   </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
+                  <td className="px-3 py-1.5 text-right tabular-nums">
                     {r.hours_since_service == null ? (
                       <span
                         className="text-muted-foreground"
@@ -458,14 +462,14 @@ export default function Service() {
                       </div>
                     )}
                   </td>
-                  <td className="px-3 py-2.5 text-right tabular-nums">
+                  <td className="px-3 py-1.5 text-right tabular-nums">
                     {r.current_job_hours == null ? (
                       <span className="text-muted-foreground">—</span>
                     ) : (
                       `${fmtHrs(r.current_job_hours)} hrs`
                     )}
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td className="px-3 py-1.5">
                     <StatusBadge state={r.service_state} />
                   </td>
                 </tr>
