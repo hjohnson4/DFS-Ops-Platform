@@ -295,6 +295,11 @@ function reportDaySheets(
   // from an earlier completed day is template junk (e.g. a stray depth typed
   // into tab 8 while the real latest day is tab 7) — never a worked day.
   let latestDate: string | null = null;
+  // Report Day 1's date (D3). Unused template tabs fall back to this exact
+  // date via formula, so a later tab whose D3 is AFTER it was really worked,
+  // even when the crew left measured depth (AI9) and remarks blank.
+  const day1Name = wb.SheetNames.find((n) => /^Report Day 1$/i.test(n.trim()));
+  const day1Date = day1Name ? toDateStr(rawCell(wb.Sheets[day1Name], DATE_CELL)) : null;
   for (const name of wb.SheetNames) {
     const t = name.trim();
     const isFirst = /^Report Day 1$/i.test(t);
@@ -303,6 +308,10 @@ function reportDaySheets(
     day += 1;
     const ws = wb.Sheets[name];
     let completed = sheetIsCompleted(ws);
+    if (!completed && !isFirst && ws && day1Date) {
+      const d = toDateStr(rawCell(ws, DATE_CELL));
+      if (d && d > day1Date) completed = true;
+    }
     if (completed) {
       const d = ws ? toDateStr(rawCell(ws, DATE_CELL)) : null;
       if (d && latestDate && d < latestDate) completed = false;

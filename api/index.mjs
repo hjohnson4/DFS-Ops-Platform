@@ -418,6 +418,8 @@ function reportDaySheets(wb) {
   const out = [];
   let day = 0;
   let latestDate = null;
+  const day1Name = wb.SheetNames.find((n) => /^Report Day 1$/i.test(n.trim()));
+  const day1Date = day1Name ? toDateStr(rawCell(wb.Sheets[day1Name], DATE_CELL)) : null;
   for (const name of wb.SheetNames) {
     const t = name.trim();
     const isFirst = /^Report Day 1$/i.test(t);
@@ -426,6 +428,10 @@ function reportDaySheets(wb) {
     day += 1;
     const ws2 = wb.Sheets[name];
     let completed = sheetIsCompleted(ws2);
+    if (!completed && !isFirst && ws2 && day1Date) {
+      const d = toDateStr(rawCell(ws2, DATE_CELL));
+      if (d && d > day1Date) completed = true;
+    }
     if (completed) {
       const d = ws2 ? toDateStr(rawCell(ws2, DATE_CELL)) : null;
       if (d && latestDate && d < latestDate) completed = false;
