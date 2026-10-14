@@ -917,6 +917,7 @@ function describe(action: string): string {
     case "correction_applied": return "applied the correction";
     case "correction_discarded": return "discarded the correction";
     case "workbook_replaced": return "replaced the workbook";
+    case "run_hours_credited": return "credited the run hours";
     case "needs_review": return "flagged missing data";
     case "email_sent": return "sent an email";
     default: return action;

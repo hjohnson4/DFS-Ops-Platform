@@ -1811,6 +1811,10 @@ export async function registerRoutes(
       w.total += h;
       touch(w, r.report_date);
     }
+    // A second copy of a day that's already counted isn't "not credited".
+    const dayKey = (r: any) => `${r.report_date ?? ""}|${wellKey(r.well_name)}`;
+    const countedDays = new Set(reports.filter((r) => r.run_hours_applied).map(dayKey));
+    const pendingSeen = new Set<string>();
     for (const r of reports) {
       const w = getW(r.well_name);
       touch(w, r.report_date);
@@ -1818,6 +1822,11 @@ export async function registerRoutes(
       const by = slotDailyHours(r.kpis);
       const h = num(by[1]) + num(by[2]) + num(by[3]) + num(by[4]);
       if (h <= 0) continue;
+      if (r.status === "Signed off") {
+        const k = dayKey(r);
+        if (countedDays.has(k) || pendingSeen.has(k)) continue;
+        pendingSeen.add(k);
+      }
       if (r.status === "Signed off") w.uncredited_hours += h;
       else w.awaiting_hours += h;
     }
@@ -1834,6 +1843,159 @@ export async function registerRoutes(
       // Most recent well first.
       .sort((a, b) => String(b.last_date ?? "").localeCompare(String(a.last_date ?? "")));
     res.json({ ready, assets, wells: list });
+  });
+
+  // ---- Credit not-credited run hours (job page button) -----------------------
+  // Signed-off reports on this job whose run hours were never added to a
+  // centrifuge (e.g. a workbook import while a slot wasn't mapped yet). Uses the
+  // same routing as sign-off, onto the centrifuges on the job NOW: one unit ->
+  // the whole day; 2+ units -> each unit's own Centrifuge 1-4 column (every
+  // unit must be mapped). Duplicate copies of a day that's already credited are
+  // skipped. GET = preview, POST = apply. Admins + Area Managers.
+  async function planJobCredit(client: any, jobId: string) {
+    const { data: cents } = await client
+      .from("assets")
+      .select("id, tag, run_hours, centrifuge_slot")
+      .eq("job_id", jobId)
+      .in("category", RUN_HOUR_CATEGORIES as unknown as string[])
+      .order("tag");
+    const centrifuges: any[] = cents || [];
+    const reports: any[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data } = await client
+        .from("daily_reports")
+        .select("id, well_name, report_date, status, run_hours_applied, kpis")
+        .eq("job_id", jobId)
+        .eq("status", "Signed off")
+        .order("report_date", { ascending: true })
+        .order("id", { ascending: true })
+        .range(from, from + 999);
+      reports.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    const wk = (r: any) => `${r.report_date ?? ""}|${String(r.well_name ?? "").trim().replace(/\s+/g, " ").toLowerCase()}`;
+    const creditedDays = new Set(reports.filter((r) => r.run_hours_applied).map(wk));
+    const seen = new Set<string>();
+    const unmapped = centrifuges.length >= 2 ? centrifuges.filter((c) => !isMappedSlot(c.centrifuge_slot)) : [];
+    let problem: string | null = null;
+    if (!centrifuges.length) problem = "There are no centrifuges on this job right now, so there's nothing to credit the hours to.";
+    else if (unmapped.length)
+      problem = `Set each centrifuge to its column (Centrifuge 1, 2, 3 or 4) first so hours go to the right unit. Needs a slot: ${unmapped
+        .map((c) => c.tag)
+        .join(", ")}`;
+
+    const plan: { report: any; alloc: { asset_id: string; tag: string; add: number }[] }[] = [];
+    let duplicates = 0;
+    let unrouted = 0; // reports with hours in a column no unit is set to
+    for (const r of reports) {
+      if (r.run_hours_applied) continue;
+      const by = slotDailyHours(r.kpis);
+      const d = Number((r.kpis as any)?.daily_run_hours);
+      const any = Object.values(by).some((h) => h != null && h > 0) || (Number.isFinite(d) && d > 0);
+      if (!any) continue;
+      const k = wk(r);
+      if (creditedDays.has(k) || seen.has(k)) {
+        duplicates++;
+        continue;
+      }
+      seen.add(k);
+      if (problem) continue;
+      let alloc: { asset_id: string; tag: string; add: number }[] = [];
+      if (centrifuges.length === 1) {
+        const c = centrifuges[0];
+        const h = soloCentrifugeHours(r.kpis, c.centrifuge_slot);
+        if (h > 0) alloc = [{ asset_id: c.id, tag: c.tag, add: h }];
+      } else {
+        alloc = centrifuges
+          .map((c) => ({ asset_id: c.id, tag: c.tag, add: Number(by[Number(c.centrifuge_slot)] ?? 0) || 0 }))
+          .filter((a) => a.add > 0);
+      }
+      if (alloc.length) plan.push({ report: r, alloc });
+      else unrouted++;
+    }
+    const perAsset = centrifuges.map((c) => {
+      const rows = plan.flatMap((p) => p.alloc.filter((a) => a.asset_id === c.id).map((a) => ({ a, d: p.report.report_date })));
+      const dates = rows.map((x) => x.d).filter(Boolean).sort();
+      return {
+        asset_id: c.id,
+        tag: c.tag,
+        centrifuge_slot: c.centrifuge_slot ?? null,
+        hours: Math.round(rows.reduce((t, x) => t + x.a.add, 0) * 100) / 100,
+        days: rows.length,
+        first_date: dates[0] ?? null,
+        last_date: dates[dates.length - 1] ?? null,
+        meter_now: Number(c.run_hours ?? 0) || 0,
+      };
+    });
+    return { centrifuges, plan, perAsset, problem, duplicates, unrouted };
+  }
+
+  async function creditJobGuard(req: Request, res: Response) {
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: job } = await client.from("jobs").select("id, area, job_number").eq("id", req.params.id).single();
+    if (!job) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    const scope = areaScopeOf(req.profile!);
+    if (scope && job.area !== scope) {
+      res.status(403).json({ message: "Outside your area" });
+      return null;
+    }
+    return { client, job };
+  }
+
+  app.get("/api/jobs/:id/credit-run-hours", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
+    const g = await creditJobGuard(req, res);
+    if (!g) return;
+    const p = await planJobCredit(g.client, g.job.id);
+    res.json({
+      problem: p.problem,
+      reports: p.plan.length,
+      hours: Math.round(p.perAsset.reduce((t, a) => t + a.hours, 0) * 100) / 100,
+      per_asset: p.perAsset,
+      duplicates: p.duplicates,
+      unrouted: p.unrouted,
+    });
+  });
+
+  app.post("/api/jobs/:id/credit-run-hours", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
+    const g = await creditJobGuard(req, res);
+    if (!g) return;
+    const { client, job } = g;
+    const p = await planJobCredit(client, job.id);
+    if (p.problem) return res.status(400).json({ message: p.problem });
+    if (!p.plan.length) return res.status(400).json({ message: "There are no run hours left to credit on this job." });
+    // 1) Meters: one update per centrifuge (fresh read so nothing is lost).
+    for (const a of p.perAsset.filter((x) => x.hours > 0)) {
+      const { data: cur } = await client.from("assets").select("run_hours").eq("id", a.asset_id).single();
+      const next = Math.round(((Number((cur as any)?.run_hours ?? 0) || 0) + a.hours) * 100) / 100;
+      const { error } = await client.from("assets").update({ run_hours: next }).eq("id", a.asset_id);
+      if (error) return res.status(400).json({ message: `Could not update run hours for ${a.tag}: ${error.message}` });
+    }
+    // 2) Log + 3) mark each report credited (never added twice).
+    const actor = req.profile!;
+    for (const { report, alloc } of p.plan) {
+      await logRunHours(
+        client,
+        { id: report.id, job_id: job.id, well_name: report.well_name ?? null, report_date: report.report_date ?? null },
+        alloc.map((x) => ({ asset_id: x.asset_id, add: x.add })),
+      );
+      await client.from("daily_reports").update({ run_hours_applied: true }).eq("id", report.id);
+      await client.from("daily_report_events").insert({
+        report_id: report.id,
+        actor_id: actor.id,
+        actor_name: actor.name,
+        actor_role: actor.role,
+        action: "run_hours_credited",
+        detail: `Run hours credited from the job page: ${alloc.map((x) => `${x.tag} +${x.add} hrs`).join(", ")}`,
+      });
+    }
+    res.json({
+      reports: p.plan.length,
+      hours: Math.round(p.perAsset.reduce((t, a) => t + a.hours, 0) * 100) / 100,
+      per_asset: p.perAsset.filter((a) => a.hours > 0),
+    });
   });
 
   app.get("/api/jobs/:id", requireAuth, async (req: Request, res: Response) => {

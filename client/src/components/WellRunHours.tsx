@@ -1,6 +1,37 @@
-import { useQuery } from "@tanstack/react-query";
-import { Gauge } from "lucide-react";
+import { useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Gauge, Loader2, PlusCircle } from "lucide-react";
 import { RentalBadge } from "@/components/Rental";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useAuth } from "@/lib/auth";
+import { useToast } from "@/hooks/use-toast";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+type CreditPreview = {
+  problem: string | null;
+  reports: number;
+  hours: number;
+  per_asset: {
+    asset_id: string;
+    tag: string;
+    centrifuge_slot: number | null;
+    hours: number;
+    days: number;
+    first_date: string | null;
+    last_date: string | null;
+    meter_now: number;
+  }[];
+  duplicates: number;
+  unrouted: number;
+};
 
 type WellRunHoursData = {
   ready: boolean;
@@ -39,6 +70,9 @@ export function WellRunHours({ jobId }: { jobId: string }) {
   const { data, isLoading } = useQuery<WellRunHoursData>({
     queryKey: [`/api/jobs/${jobId}/well-run-hours`],
   });
+  const { profile } = useAuth();
+  const canCredit = profile?.role === "admin" || profile?.role === "area";
+  const [crediting, setCrediting] = useState(false);
 
   const assets = data?.assets ?? [];
   const wells = (data?.wells ?? []).filter(
@@ -63,7 +97,13 @@ export function WellRunHours({ jobId }: { jobId: string }) {
           Run hours by well{" "}
           <span className="text-muted-foreground font-normal">({wells.length})</span>
         </h2>
+        {canCredit && showUncredited && (
+          <Button size="sm" variant="outline" onClick={() => setCrediting(true)} data-testid="button-credit-run-hours">
+            <PlusCircle className="mr-1.5 h-4 w-4" /> Credit these hours
+          </Button>
+        )}
       </div>
+      {crediting && <CreditHoursDialog jobId={jobId} onClose={() => setCrediting(false)} />}
       {isLoading ? (
         <div className="rounded-lg border border-card-border bg-card p-4 text-sm text-muted-foreground">Loading…</div>
       ) : data && !data.ready ? (
@@ -154,5 +194,107 @@ export function WellRunHours({ jobId }: { jobId: string }) {
         </p>
       )}
     </>
+  );
+}
+
+// Confirm-and-credit: shows exactly which centrifuge gets how many hours,
+// then adds them to the meters, the run-hours log, and marks the reports
+// credited so they're never added twice.
+function CreditHoursDialog({ jobId, onClose }: { jobId: string; onClose: () => void }) {
+  const { toast } = useToast();
+  const url = `/api/jobs/${jobId}/credit-run-hours`;
+  const { data, isLoading, error } = useQuery<CreditPreview>({ queryKey: [url], staleTime: 0, gcTime: 0 });
+  const go = useMutation({
+    mutationFn: async () => (await apiRequest("POST", url)).json(),
+    onSuccess: (r: any) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/jobs/${jobId}/well-run-hours`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
+      queryClient.invalidateQueries({ queryKey: [url] });
+      toast({
+        title: "Run hours credited",
+        description: (r?.per_asset || []).map((a: any) => `${a.tag} +${hrs(a.hours)} hrs`).join(" · "),
+      });
+      onClose();
+    },
+    onError: (e: any) => toast({ title: "Could not credit the hours", description: e.message, variant: "destructive" }),
+  });
+  const rows = (data?.per_asset || []).filter((a) => a.hours > 0);
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Credit these hours</DialogTitle>
+          <DialogDescription>
+            Adds the run hours from signed-off reports that were never credited to the centrifuges on this job now.
+          </DialogDescription>
+        </DialogHeader>
+        {isLoading ? (
+          <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" /> Checking reports…
+          </div>
+        ) : error ? (
+          <div className="py-2 text-sm text-rose-700 dark:text-rose-400">{(error as any).message}</div>
+        ) : data?.problem ? (
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm" data-testid="text-credit-problem">
+            {data.problem}
+          </div>
+        ) : !rows.length ? (
+          <div className="py-2 text-sm text-muted-foreground">There are no run hours left to credit on this job.</div>
+        ) : (
+          <div className="space-y-3 text-sm">
+            <div className="overflow-hidden rounded-md border border-card-border">
+              <table className="w-full">
+                <thead className="bg-muted/50 text-xs text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-1.5 text-left font-medium">Centrifuge</th>
+                    <th className="px-3 py-1.5 text-left font-medium">Report dates</th>
+                    <th className="px-3 py-1.5 text-right font-medium">Adds</th>
+                    <th className="px-3 py-1.5 text-right font-medium">Meter after</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((a) => (
+                    <tr key={a.asset_id} className="border-t border-card-border" data-testid={`credit-row-${a.tag}`}>
+                      <td className="px-3 py-1.5">
+                        <div className="font-medium">{a.tag}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {a.centrifuge_slot ? `Centrifuge ${a.centrifuge_slot}` : "Only unit on job"} · {a.days} day{a.days === 1 ? "" : "s"}
+                        </div>
+                      </td>
+                      <td className="px-3 py-1.5 text-xs text-muted-foreground whitespace-nowrap">
+                        {shortDate(a.first_date)}
+                        {a.last_date && a.last_date !== a.first_date ? ` – ${shortDate(a.last_date)}` : ""}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums font-semibold">+{hrs(a.hours)}</td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">{hrs(a.meter_now + a.hours)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {data!.reports} report{data!.reports === 1 ? "" : "s"}, {hrs(data!.hours)} hours in all. Check these are the units
+              that were on the job on those dates.
+              {data!.duplicates > 0 ? ` ${data!.duplicates} duplicate cop${data!.duplicates === 1 ? "y" : "ies"} of an already-counted day will be skipped.` : ""}
+              {data!.unrouted > 0
+                ? ` ${data!.unrouted} report${data!.unrouted === 1 ? " has" : "s have"} hours only in a centrifuge column no unit is set to, so ${data!.unrouted === 1 ? "it stays" : "they stay"} not credited.`
+                : ""}
+            </p>
+          </div>
+        )}
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => go.mutate()}
+            disabled={!rows.length || !!data?.problem || go.isPending}
+            data-testid="button-confirm-credit"
+          >
+            {go.isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}Credit {rows.length ? `${hrs(data!.hours)} hours` : "hours"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
