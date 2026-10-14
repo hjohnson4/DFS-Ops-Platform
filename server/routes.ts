@@ -273,45 +273,54 @@ async function resolveJobForWell(
   client: any,
   wellName: string | null | undefined,
   jobNumber?: string | null,
+  operator?: string | null,
 ): Promise<{ job_id: string | null; area: string | null; customer_id: string | null }> {
   const empty = { job_id: null, area: null, customer_id: null };
 
-  // (0) Job number from the report (V8). Highest priority when present.
+  // ARCHIVED JOBS NEVER RECEIVE REPORTS. Every match below only considers
+  // jobs that are not archived; a report whose only match is an archived job
+  // goes to "Needs job match" instead.
+  const { data: liveJobs } = await client
+    .from("jobs")
+    .select("id, area, customer_id, job_number, well_name, created_at, customer:customers(name)")
+    .is("archived_at", null);
+  const live = (liveJobs || []) as any[];
+  const pick = (j: any) => ({ job_id: j.id, area: j.area, customer_id: j.customer_id });
+  const normName = (v: any) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+  // (0) Job number from the report (V8). Highest priority when present. If
+  // more than one live job has that number (e.g. same rig in two areas),
+  // prefer the one whose customer matches the workbook's operator (H8).
   const jobTarget = normJobId(jobNumber);
   if (jobTarget) {
-    const { data: jobs } = await client
-      .from("jobs")
-      .select("id, area, customer_id, job_number");
-    const byNumber = (jobs || []).find(
-      (j: any) => normJobId(j.job_number) === jobTarget,
-    );
-    if (byNumber) {
-      return {
-        job_id: byNumber.id,
-        area: byNumber.area,
-        customer_id: byNumber.customer_id,
-      };
+    const byNumber = live.filter((j) => normJobId(j.job_number) === jobTarget);
+    if (byNumber.length === 1) return pick(byNumber[0]);
+    if (byNumber.length > 1) {
+      const op = normName(operator);
+      const byCustomer = op
+        ? byNumber.find((j) => {
+            const c = normName(j.customer?.name);
+            return !!c && (c === op || c.includes(op) || op.includes(c));
+          })
+        : null;
+      if (byCustomer) return pick(byCustomer);
+      // Still ambiguous: newest live job with that number.
+      byNumber.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+      return pick(byNumber[0]);
     }
   }
 
   const target = (wellName || "").trim().toLowerCase();
   if (!target) return empty;
 
-  // (1) Explicit job.well_name match.
-  const { data: jobs } = await client
-    .from("jobs")
-    .select("id, area, customer_id, well_name")
-    .not("well_name", "is", null);
-  const jobMatch = (jobs || []).find(
-    (j: any) => (j.well_name || "").trim().toLowerCase() === target,
-  );
-  if (jobMatch) {
-    return { job_id: jobMatch.id, area: jobMatch.area, customer_id: jobMatch.customer_id };
-  }
+  // (1) Explicit job.well_name match (live jobs only).
+  const jobMatch = live.find((j) => (j.well_name || "").trim().toLowerCase() === target);
+  if (jobMatch) return pick(jobMatch);
 
   // (2) Learn from a prior assigned report on the same well. We compare on the
   // trimmed/lowered well name in JS (not SQL) so it matches the same way the
   // explicit path does, tolerating case/spacing differences between workbooks.
+  // A prior report on an archived (or deleted) job is ignored.
   const { data: priorReports } = await client
     .from("daily_reports")
     .select("well_name, job_id, created_at, received_at, report_date")
@@ -319,25 +328,23 @@ async function resolveJobForWell(
     .not("well_name", "is", null)
     .order("created_at", { ascending: false })
     .limit(500);
+  const liveById = new Map(live.map((j) => [j.id, j]));
   const prior = (priorReports || []).find(
-    (r: any) => (r.well_name || "").trim().toLowerCase() === target,
+    (r: any) => (r.well_name || "").trim().toLowerCase() === target && liveById.has(r.job_id),
   );
-  if (prior?.job_id) {
-    // Pull the job's current area/customer so downstream area-scope checks and
-    // stored columns stay consistent with the job record itself.
-    const { data: job } = await client
-      .from("jobs")
-      .select("id, area, customer_id")
-      .eq("id", prior.job_id)
-      .maybeSingle();
-    if (job) {
-      return { job_id: job.id, area: job.area, customer_id: job.customer_id };
-    }
-    // Job row missing (deleted); fall through rather than attach to a dead id.
-  }
+  if (prior?.job_id) return pick(liveById.get(prior.job_id));
 
   return empty;
 }
+
+// True when the job exists and is archived. Archived jobs can't receive
+// reports, JSAs, assets or any other new records.
+async function jobIsArchived(client: any, jobId: string | null | undefined): Promise<boolean> {
+  if (!jobId) return false;
+  const { data } = await client.from("jobs").select("archived_at").eq("id", jobId).maybeSingle();
+  return !!data?.archived_at;
+}
+const ARCHIVED_JOB_MSG = "This job is archived. Nothing can be assigned to an archived job. Restore it first, or pick an active job.";
 
 // ---- Corrected re-send helpers (daily reports) ------------------------------
 // Data columns that come from the workbook / email. A correction replaces
@@ -552,6 +559,25 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express,
 ): Promise<Server> {
+  // ---- Archived jobs are read-only -------------------------------------------
+  // Any create/update under /api/jobs/<id>/... (field tickets, field reports,
+  // JSAs, services, pads, wells, ...) is refused while the job is archived.
+  // Archive / restore / delete themselves stay allowed.
+  app.use(async (req, res, next) => {
+    if (!["POST", "PUT", "PATCH"].includes(req.method)) return next();
+    const m = /^\/api\/jobs\/([0-9a-f-]{36})\/([^?]+)/i.exec(req.path);
+    if (!m) return next();
+    const sub = m[2].replace(/\/+$/, "");
+    if (sub === "archive" || sub === "unarchive" || sub === "delete") return next();
+    try {
+      if (await jobIsArchived(supabaseAdmin || supabaseAnon, m[1]))
+        return res.status(409).json({ message: ARCHIVED_JOB_MSG });
+    } catch {
+      /* fall through: the route itself will handle a missing job */
+    }
+    next();
+  });
+
   // ---- Health / config ----------------------------------------------------
   app.get("/api/health", (_req, res) => {
     // adminReady reflects whether SUPABASE_SERVICE_ROLE_KEY is configured — when
@@ -2195,6 +2221,136 @@ export async function registerRoutes(
     },
   );
 
+  // ---- Delete an archived job (admin only) ------------------------------
+  // Only archived jobs can be deleted. Its email-imported daily reports and
+  // intake JSAs are kept: they move to the active job you pick, or go back to
+  // "Needs job match". Everything else that belongs only to the job (pads,
+  // wells, field tickets, field reports, crew JSAs, services, rate history,
+  // assignments) is deleted with it. Assets, run-hour history and forecasts
+  // keep their rows and just lose the link.
+  const DELETE_COUNT_TABLES: [string, string][] = [
+    ["daily_reports", "Daily reports"],
+    ["jsa_reports", "Intake JSAs"],
+    ["pads", "Pads"],
+    ["wells", "Wells"],
+    ["field_tickets", "Field tickets"],
+    ["field_daily_reports", "Field daily reports"],
+    ["jsas", "Crew JSAs"],
+    ["service_reports", "Service reports"],
+    ["rig_up_reports", "Rig-up reports"],
+    ["job_services", "Job services"],
+  ];
+  async function jobDeleteCounts(client: any, jobId: string) {
+    const out: Record<string, number> = {};
+    for (const [t] of DELETE_COUNT_TABLES) {
+      const { count } = await client.from(t).select("id", { count: "exact", head: true }).eq("job_id", jobId);
+      out[t] = count ?? 0;
+    }
+    return out;
+  }
+  app.get(
+    "/api/jobs/:id/delete-preview",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client
+        .from("jobs")
+        .select("id, job_number, area, archived_at, customer_id")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      if (!job.archived_at) return res.status(409).json({ message: "Only archived jobs can be deleted. Archive it first." });
+      const counts = await jobDeleteCounts(client, job.id);
+      // Live jobs with the same number (likely where its reports belong).
+      const { data: live } = await client
+        .from("jobs")
+        .select("id, job_number, area, customer:customers(name)")
+        .is("archived_at", null)
+        .order("job_number");
+      res.json({
+        job,
+        counts: DELETE_COUNT_TABLES.map(([t, label]) => ({ table: t, label, count: counts[t] })),
+        move_targets: (live || []).map((j: any) => ({
+          id: j.id,
+          job_number: j.job_number,
+          area: j.area,
+          customer_name: j.customer?.name ?? null,
+          same_number: normJobId(j.job_number) === normJobId(job.job_number),
+        })),
+      });
+    },
+  );
+  app.post(
+    "/api/jobs/:id/delete",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const confirm = String(req.body?.confirm_job_number ?? "").trim();
+      const moveTo: string | null = req.body?.move_to_job_id ? String(req.body.move_to_job_id) : null;
+      const { data: job } = await client
+        .from("jobs")
+        .select("id, job_number, area, archived_at")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      if (!job.archived_at)
+        return res.status(409).json({ message: "Only archived jobs can be deleted. Archive it first." });
+      if (normJobId(confirm) !== normJobId(job.job_number))
+        return res.status(400).json({ message: `Type the job number (${job.job_number}) to confirm.` });
+      let target: any = null;
+      if (moveTo) {
+        if (moveTo === job.id) return res.status(400).json({ message: "Pick a different job to move the reports to." });
+        const { data: t } = await client
+          .from("jobs")
+          .select("id, job_number, area, customer_id, archived_at")
+          .eq("id", moveTo)
+          .maybeSingle();
+        if (!t) return res.status(404).json({ message: "The job to move reports to wasn't found" });
+        if (t.archived_at) return res.status(409).json({ message: ARCHIVED_JOB_MSG });
+        target = t;
+      }
+      const who = req.profile!;
+      const actor = { actor_id: who.id, actor_name: who.name ?? null, actor_role: who.role };
+
+      // 1) Daily reports: move (keep status) or unlink (back to Needs job match).
+      const { data: reps } = await client.from("daily_reports").select("id").eq("job_id", job.id);
+      const repIds = (reps || []).map((r: any) => r.id);
+      if (repIds.length) {
+        const patch = target
+          ? { job_id: target.id, area: target.area, customer_id: target.customer_id }
+          : { job_id: null, customer_id: null, status: "Needs job match" };
+        const { error } = await client.from("daily_reports").update(patch).in("id", repIds);
+        if (error) return res.status(400).json({ message: `Couldn't move the daily reports: ${error.message}` });
+        await client.from("daily_report_events").insert(
+          repIds.map((id: string) => ({
+            report_id: id,
+            ...actor,
+            action: "job_changed",
+            detail: target
+              ? `Moved from archived job ${job.job_number} (deleted) to ${target.job_number}.`
+              : `Archived job ${job.job_number} was deleted; report unlinked and back to Needs job match.`,
+          })),
+        );
+      }
+      // 2) Intake JSAs: same.
+      const { data: jsas } = await client.from("jsa_reports").select("id").eq("job_id", job.id);
+      const jsaIds = (jsas || []).map((r: any) => r.id);
+      if (jsaIds.length) {
+        const patch = target
+          ? { job_id: target.id, area: target.area, customer_id: target.customer_id }
+          : { job_id: null, customer_id: null, status: "Needs job match" };
+        const { error } = await client.from("jsa_reports").update(patch).in("id", jsaIds);
+        if (error) return res.status(400).json({ message: `Couldn't move the intake JSAs: ${error.message}` });
+      }
+      // 3) Delete the job (cascades its own records; others are unlinked).
+      const { error: dErr } = await client.from("jobs").delete().eq("id", job.id);
+      if (dErr) return res.status(400).json({ message: `Couldn't delete the job: ${dErr.message}` });
+      res.json({ ok: true, moved_reports: repIds.length, moved_jsas: jsaIds.length, moved_to: target?.job_number ?? null });
+    },
+  );
+
   // Restore an archived job. A Completed job comes back as Active (it was
   // completed by archiving); any other status is kept. Does not re-assign the
   // assets that were released when it was archived — those are picked again
@@ -3458,6 +3614,8 @@ export async function registerRoutes(
           .eq("id", patch.job_id)
           .single();
         if (!job) return res.status(404).json({ message: "Job not found" });
+        if (await jobIsArchived(client, patch.job_id))
+          return res.status(409).json({ message: ARCHIVED_JOB_MSG });
         if (job.area !== nextArea)
           return res
             .status(400)
@@ -4703,6 +4861,7 @@ export async function registerRoutes(
       client,
       excel.well_name,
       excel.job_number,
+      excel.well_context?.operator ?? null,
     );
     let job_id: string | null = resolved.job_id;
     let area: string | null = resolved.area;
@@ -4955,7 +5114,8 @@ export async function registerRoutes(
       // report for this well).
       const wellName = days.find((d) => d.well_name)?.well_name ?? null;
       const jobNumber = days.find((d) => d.job_number)?.job_number ?? null;
-      const resolved = await resolveJobForWell(client, wellName, jobNumber);
+      const operator = days.find((d) => d.well_context?.operator)?.well_context?.operator ?? null;
+      const resolved = await resolveJobForWell(client, wellName, jobNumber, operator);
       let job_id: string | null = resolved.job_id;
       let area: string | null = resolved.area;
       let customer_id: string | null = resolved.customer_id;
@@ -5381,6 +5541,8 @@ export async function registerRoutes(
         .single();
       if (jErr || !job)
         return res.status(404).json({ message: "Job not found" });
+      if (await jobIsArchived(client, job.id))
+        return res.status(409).json({ message: ARCHIVED_JOB_MSG });
 
       // Area managers/supervisors can only assign to jobs in their own area.
       const scope = areaScopeOf(req.profile!);
@@ -6332,7 +6494,8 @@ export async function registerRoutes(
     if (jobNumber) {
       const { data: jobs } = await client
         .from("jobs")
-        .select("id, area, customer_id, job_number");
+        .select("id, area, customer_id, job_number")
+        .is("archived_at", null);
       const target = normJobId(jobNumber);
       const match = (jobs || []).find(
         (j: any) => normJobId(j.job_number) === target,
@@ -6665,6 +6828,8 @@ export async function registerRoutes(
         .eq("id", parsed.data.job_id)
         .single();
       if (jobErr || !job) return res.status(404).json({ message: "Job not found" });
+      if (await jobIsArchived(client, job.id))
+        return res.status(409).json({ message: ARCHIVED_JOB_MSG });
 
       const scope = areaScopeOf(req.profile!);
       if (scope && job.area !== scope)

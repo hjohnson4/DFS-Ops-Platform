@@ -30,6 +30,7 @@ import { JsaFormDialog } from "@/components/JsaFormDialog";
 import { SignoffControls } from "@/components/SignoffControls";
 import { JobKpiTrend } from "@/components/JobKpiTrend";
 import { WellRunHours } from "@/components/WellRunHours";
+import { DeleteJobDialog } from "@/components/DeleteJobDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -289,6 +290,7 @@ export default function JobDetailPage() {
       toast({ title: "Could not archive job", description: e.message, variant: "destructive" }),
   });
 
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const unarchive = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/jobs/${id}/unarchive`, {});
@@ -378,6 +380,7 @@ export default function JobDetailPage() {
                 </Button>
               </>
             ) : job.archived_at ? (
+              <>
               <Button
                 variant="outline"
                 size="sm"
@@ -392,6 +395,21 @@ export default function JobDetailPage() {
                 )}
                 Restore
               </Button>
+              {profile?.role === "admin" && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => setDeleteOpen(true)}
+                  data-testid="button-delete-job"
+                >
+                  <Trash2 className="mr-1.5 h-4 w-4" /> Delete
+                </Button>
+              )}
+              {deleteOpen && (
+                <DeleteJobDialog jobId={job.id} jobNumber={job.job_number} open={deleteOpen} onOpenChange={setDeleteOpen} />
+              )}
+              </>
             ) : (
               <>
                 <Button variant="outline" size="sm" onClick={() => setEditing(true)} data-testid="button-edit-job">
