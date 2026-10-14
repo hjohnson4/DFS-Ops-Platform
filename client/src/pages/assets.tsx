@@ -1198,7 +1198,28 @@ export default function AssetsPage() {
   });
 
   // Returned rentals leave the active fleet (still listed under "Rentals").
-  const allAssets = assets ?? [];
+  const fleet = assets ?? [];
+  // Area filter (West Texas / South Texas / North Louisiana). Applied before
+  // everything else so the All / Assigned / Idle / Rentals counts follow it.
+  const [areaFilter, setAreaFilterState] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem("assets-area-filter") || "all";
+    } catch {
+      return "all";
+    }
+  });
+  const setAreaFilter = (v: string) => {
+    setAreaFilterState(v);
+    try {
+      sessionStorage.setItem("assets-area-filter", v);
+    } catch {}
+  };
+  const fleetAreas = AREAS.filter((ar) => fleet.some((a) => a.area === ar));
+  const showAreaFilter = isAdmin || fleetAreas.length > 1;
+  const activeArea = showAreaFilter && areaFilter !== "all" ? areaFilter : null;
+  const areaCount = (ar: string) =>
+    fleet.filter((a) => a.area === ar && !(a.is_rental && a.status === "Returned")).length;
+  const allAssets = activeArea ? fleet.filter((a) => a.area === activeArea) : fleet;
   const rows = allAssets.filter((a) => !(a.is_rental && a.status === "Returned"));
   const rentalRows = allAssets.filter((a) => a.is_rental);
   const scheduleList = schedules ?? [];
@@ -1327,7 +1348,7 @@ export default function AssetsPage() {
       )}
 
       {/* Assignment toggle + search */}
-      {rows.length > 0 && (
+      {(rows.length > 0 || activeArea) && (
         <div className="mb-4 flex flex-wrap items-center gap-3">
           {/* Assigned (active) vs unassigned (idle) segmented toggle */}
           <div
@@ -1363,6 +1384,23 @@ export default function AssetsPage() {
             ))}
           </div>
 
+          {showAreaFilter && (
+            <Select value={activeArea ?? "all"} onValueChange={setAreaFilter}>
+              <SelectTrigger className="h-9 w-[220px]" data-testid="select-assets-area">
+                <MapPin className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+                <SelectValue placeholder="All areas" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All areas</SelectItem>
+                {AREAS.map((ar) => (
+                  <SelectItem key={ar} value={ar}>
+                    {ar} ({areaCount(ar)})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
           <div className="relative flex-1 min-w-[16rem] max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
             <Input
@@ -1391,6 +1429,18 @@ export default function AssetsPage() {
         <div className="text-sm text-muted-foreground py-8 text-center">
           Loading…
         </div>
+      ) : rows.length === 0 && activeArea ? (
+        <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
+          <MapPin className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
+          <div className="text-sm text-muted-foreground">No assets in {activeArea}.</div>
+          <button
+            type="button"
+            onClick={() => setAreaFilter("all")}
+            className="text-xs text-primary hover:underline mt-1"
+          >
+            Show all areas
+          </button>
+        </div>
       ) : rows.length === 0 ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <Boxes className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
@@ -1410,19 +1460,20 @@ export default function AssetsPage() {
           <Search className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
           <div className="text-sm text-muted-foreground">
             {q
-              ? `No ${view === "assigned" ? "assigned" : view === "idle" ? "idle" : ""} assets match “${query}”.`
+              ? `No ${view === "assigned" ? "assigned" : view === "idle" ? "idle" : ""} assets${activeArea ? ` in ${activeArea}` : ""} match “${query}”.`
               : view === "assigned"
                 ? "No assets are currently assigned to a job."
                 : view === "idle"
                   ? "No idle assets — every asset is assigned to a job."
                   : "No assets to show."}
           </div>
-          {(q || view !== "all") && (
+          {(q || view !== "all" || activeArea) && (
             <button
               type="button"
               onClick={() => {
                 setQuery("");
                 setView("all");
+                setAreaFilter("all");
               }}
               className="text-xs text-primary hover:underline mt-1"
               data-testid="button-clear-search-empty"
@@ -1483,6 +1534,7 @@ export default function AssetsPage() {
           <p className="text-xs text-muted-foreground">
             Showing {filtered.length} of {rows.length} asset
             {rows.length > 1 ? "s" : ""}
+            {activeArea ? ` in ${activeArea}` : ""}
             {q ? ` matching “${query}”` : ""}.
           </p>
         )}
