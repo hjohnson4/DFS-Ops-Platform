@@ -2199,3 +2199,32 @@ export interface ForecastBoard {
   }[];
   forecasts: ForecastJob[];
 }
+
+// ---- Revenue projection ----------------------------------------------------
+// Six-month projected revenue: each live job and each open Upcoming work job
+// on its own row, grouped by area. Revenue = manually entered day rate x the
+// days the job runs in that month. Active jobs keep their projected rate in
+// jobs.projected_day_rate (separate from the billing rate); Upcoming work jobs
+// use forecast_jobs.day_rate, so editing it in either place keeps them in sync.
+export interface ProjectionRow {
+  kind: "job" | "forecast";
+  id: string;
+  name: string;
+  customer_name: string | null;
+  area: Area;
+  stage: "Active" | "Rig Move" | "Bid" | "Likely" | "Awarded";
+  odds: number | null;
+  start_on: string | null; // null = already running before the window
+  end_on: string | null; // null = indefinite
+  day_rate: number | null; // the projection rate (manual)
+  latest_report_rate: number | null; // newest AL57 rate on a daily report (hint only)
+}
+export interface RevenueProjection {
+  months: string[];
+  window_start: string;
+  window_end: string;
+  rows: ProjectionRow[];
+}
+export const setProjectedRateSchema = z.object({
+  projected_day_rate: z.number().nonnegative().max(1000000).nullable(),
+});

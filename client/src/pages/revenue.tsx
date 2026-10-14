@@ -26,6 +26,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import { getAccessToken } from "@/lib/queryClient";
+import { RevenueProjectionView } from "@/components/RevenueProjection";
 
 // ---- Types (shape of /api/revenue/summary) --------------------------------
 type JobRow = {
@@ -153,6 +154,22 @@ function Stat({
 export default function RevenuePage() {
   const { profile } = useAuth();
   const [downloading, setDownloading] = useState(false);
+  // Actuals (accrued from daily reports) vs. Projection (manual day rates).
+  const [tab, setTabState] = useState<"actuals" | "projection">(() => {
+    try {
+      return sessionStorage.getItem("revenue-tab") === "projection" ? "projection" : "actuals";
+    } catch {
+      return "actuals";
+    }
+  });
+  const setTab = (t: "actuals" | "projection") => {
+    setTabState(t);
+    try {
+      sessionStorage.setItem("revenue-tab", t);
+    } catch {
+      /* ignore */
+    }
+  };
   const { data, isLoading, error } = useQuery<Summary>({
     queryKey: ["/api/revenue/summary"],
   });
@@ -195,9 +212,13 @@ export default function RevenuePage() {
             Revenue
           </h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Accrued actuals (from the latest daily report per well) · {scopeLabel}
+            {tab === "projection"
+              ? "Projected revenue from manual day rates"
+              : "Accrued actuals (from the latest daily report per well)"}{" "}
+            · {scopeLabel}
           </p>
         </div>
+        {tab === "actuals" && (
         <button
           onClick={exportCsv}
           disabled={downloading || isLoading}
@@ -207,20 +228,44 @@ export default function RevenuePage() {
           <Download className="h-4 w-4" />
           {downloading ? "Exporting…" : "Export CSV"}
         </button>
+        )}
       </div>
 
-      {isLoading && (
+      <div className="inline-flex rounded-md bg-muted p-1 text-sm" role="tablist">
+        {([
+          ["actuals", "Actuals"],
+          ["projection", "Projection"],
+        ] as const).map(([k, label]) => (
+          <button
+            key={k}
+            type="button"
+            role="tab"
+            aria-selected={tab === k}
+            onClick={() => setTab(k)}
+            className={`rounded px-3 py-1.5 font-medium ${tab === k ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+            data-testid={`tab-revenue-${k}`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "projection" && (
+        <RevenueProjectionView canEdit={profile?.role === "admin" || profile?.role === "area"} />
+      )}
+
+      {tab === "actuals" && isLoading && (
         <div className="text-sm text-muted-foreground" data-testid="text-loading">
           Loading revenue…
         </div>
       )}
-      {error && (
+      {tab === "actuals" && error && (
         <div className="text-sm text-destructive" data-testid="text-error">
           Could not load revenue: {(error as Error).message}
         </div>
       )}
 
-      {data && (
+      {tab === "actuals" && data && (
         <>
           {/* Daily / month-to-date / year-to-date (day-rate basis) */}
           {data.periods && (

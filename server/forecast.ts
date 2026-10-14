@@ -11,6 +11,7 @@ import {
   convertForecastSchema,
   setJobReleaseSchema,
   uploadBidDocumentSchema,
+  setProjectedRateSchema,
 } from "@shared/schema";
 
 // Forecast: upcoming work + centrifuge planning.
@@ -71,6 +72,120 @@ function canTouchArea(req: Request, area: string) {
 }
 
 export function registerForecastRoutes(app: Express) {
+  // ---- Revenue projection -------------------------------------------------
+  // Live jobs + open Upcoming work jobs over the same 6-month window as the
+  // forecast. The client multiplies each row's manual day rate by the days it
+  // runs in each month and totals by area.
+  const PROJ_SETUP_MSG =
+    "The revenue projection needs one new column. Run the \"Revenue projection setup\" SQL in the Supabase SQL editor, then refresh.";
+  app.get(
+    "/api/revenue/projection",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const scope = areaScopeOf(req.profile!);
+      const win = forecastWindow();
+      const client = db();
+      let jq = client
+        .from("jobs")
+        .select("id, job_number, area, status, started_on, est_release_on, projected_day_rate, customer:customers(name)")
+        .is("archived_at", null)
+        .in("status", LIVE_STATUSES);
+      if (scope) jq = jq.eq("area", scope);
+      const { data: jRows, error: jErr } = await jq;
+      if (jErr) {
+        if (/projected_day_rate/.test(jErr.message))
+          return res.status(409).json({ message: PROJ_SETUP_MSG, setup_required: true });
+        if (missingTable(jErr.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
+        return res.status(500).json({ message: jErr.message });
+      }
+      const jobs = (jRows || []).filter((j: any) => !j.est_release_on || j.est_release_on >= win.window_start);
+      // Newest AL57 day rate on each job's daily reports (shown as a hint).
+      const latest = new Map<string, { d: string; day: number; rate: number }>();
+      if (jobs.length) {
+        const { data: reps } = await client
+          .from("daily_reports")
+          .select("job_id, report_date, report_day, day_rate:kpis->day_rate")
+          .in("job_id", jobs.map((j: any) => j.id));
+        for (const r of (reps || []) as any[]) {
+          const n = Number(r.day_rate);
+          const d = r.report_date ? String(r.report_date).slice(0, 10) : null;
+          if (!d || !Number.isFinite(n) || n <= 0) continue;
+          const day = Number(r.report_day ?? 0) || 0;
+          const cur = latest.get(r.job_id);
+          if (!cur || d > cur.d || (d === cur.d && day > cur.day)) latest.set(r.job_id, { d, day, rate: n });
+        }
+      }
+      let fq = client
+        .from("forecast_jobs")
+        .select("id, rig, customer_name, area, stage, odds, start_on, end_on, day_rate")
+        .in("stage", ["Bid", "Likely", "Awarded"])
+        .lte("start_on", win.window_end);
+      if (scope) fq = fq.eq("area", scope);
+      const { data: fRows, error: fErr } = await fq;
+      if (fErr) {
+        if (missingTable(fErr.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
+        return res.status(500).json({ message: fErr.message });
+      }
+      const num = (v: any) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v));
+      const rows = [
+        ...jobs.map((j: any) => ({
+          kind: "job" as const,
+          id: j.id,
+          name: j.job_number,
+          customer_name: j.customer?.name ?? null,
+          area: j.area,
+          stage: j.status,
+          odds: null,
+          start_on: j.started_on && j.started_on > win.window_start ? String(j.started_on).slice(0, 10) : null,
+          end_on: j.est_release_on ?? null,
+          day_rate: num(j.projected_day_rate),
+          latest_report_rate: latest.get(j.id)?.rate ?? null,
+        })),
+        ...(fRows || [])
+          .filter((f: any) => !f.end_on || f.end_on >= win.window_start)
+          .map((f: any) => ({
+            kind: "forecast" as const,
+            id: f.id,
+            name: f.rig,
+            customer_name: f.customer_name ?? null,
+            area: f.area,
+            stage: f.stage,
+            odds: num(f.odds),
+            start_on: f.start_on,
+            end_on: f.end_on ?? null,
+            day_rate: num(f.day_rate),
+            latest_report_rate: null,
+          })),
+      ];
+      res.json({ ...win, rows });
+    },
+  );
+
+  app.patch(
+    "/api/revenue/projection/jobs/:id",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const parsed = setProjectedRateSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+      const { data: job } = await db().from("jobs").select("id, area").eq("id", String(req.params.id)).maybeSingle();
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      if (!canTouchArea(req, (job as any).area))
+        return res.status(403).json({ message: "You can only edit jobs in your area" });
+      const { error } = await db()
+        .from("jobs")
+        .update({ projected_day_rate: parsed.data.projected_day_rate })
+        .eq("id", (job as any).id);
+      if (error) {
+        if (/projected_day_rate/.test(error.message))
+          return res.status(409).json({ message: PROJ_SETUP_MSG, setup_required: true });
+        return res.status(400).json({ message: error.message });
+      }
+      res.json({ ok: true });
+    },
+  );
+
   // ---- Board -------------------------------------------------------------
   app.get(
     "/api/forecast",

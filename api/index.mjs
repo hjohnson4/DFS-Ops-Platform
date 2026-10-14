@@ -1157,6 +1157,9 @@ var convertForecastSchema = z.object({
 var setJobReleaseSchema = z.object({
   est_release_on: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable()
 });
+var setProjectedRateSchema = z.object({
+  projected_day_rate: z.number().nonnegative().max(1e6).nullable()
+});
 
 // server/forecast.ts
 var db = () => supabaseAdmin || supabaseAnon;
@@ -1198,6 +1201,96 @@ function canTouchArea(req, area) {
   return !scope || scope === area;
 }
 function registerForecastRoutes(app) {
+  const PROJ_SETUP_MSG = 'The revenue projection needs one new column. Run the "Revenue projection setup" SQL in the Supabase SQL editor, then refresh.';
+  app.get(
+    "/api/revenue/projection",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const scope = areaScopeOf(req.profile);
+      const win = forecastWindow();
+      const client2 = db();
+      let jq = client2.from("jobs").select("id, job_number, area, status, started_on, est_release_on, projected_day_rate, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
+      if (scope) jq = jq.eq("area", scope);
+      const { data: jRows, error: jErr } = await jq;
+      if (jErr) {
+        if (/projected_day_rate/.test(jErr.message))
+          return res.status(409).json({ message: PROJ_SETUP_MSG, setup_required: true });
+        if (missingTable(jErr.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
+        return res.status(500).json({ message: jErr.message });
+      }
+      const jobs = (jRows || []).filter((j) => !j.est_release_on || j.est_release_on >= win.window_start);
+      const latest = /* @__PURE__ */ new Map();
+      if (jobs.length) {
+        const { data: reps } = await client2.from("daily_reports").select("job_id, report_date, report_day, day_rate:kpis->day_rate").in("job_id", jobs.map((j) => j.id));
+        for (const r of reps || []) {
+          const n = Number(r.day_rate);
+          const d = r.report_date ? String(r.report_date).slice(0, 10) : null;
+          if (!d || !Number.isFinite(n) || n <= 0) continue;
+          const day = Number(r.report_day ?? 0) || 0;
+          const cur = latest.get(r.job_id);
+          if (!cur || d > cur.d || d === cur.d && day > cur.day) latest.set(r.job_id, { d, day, rate: n });
+        }
+      }
+      let fq = client2.from("forecast_jobs").select("id, rig, customer_name, area, stage, odds, start_on, end_on, day_rate").in("stage", ["Bid", "Likely", "Awarded"]).lte("start_on", win.window_end);
+      if (scope) fq = fq.eq("area", scope);
+      const { data: fRows, error: fErr } = await fq;
+      if (fErr) {
+        if (missingTable(fErr.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
+        return res.status(500).json({ message: fErr.message });
+      }
+      const num3 = (v) => v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+      const rows = [
+        ...jobs.map((j) => ({
+          kind: "job",
+          id: j.id,
+          name: j.job_number,
+          customer_name: j.customer?.name ?? null,
+          area: j.area,
+          stage: j.status,
+          odds: null,
+          start_on: j.started_on && j.started_on > win.window_start ? String(j.started_on).slice(0, 10) : null,
+          end_on: j.est_release_on ?? null,
+          day_rate: num3(j.projected_day_rate),
+          latest_report_rate: latest.get(j.id)?.rate ?? null
+        })),
+        ...(fRows || []).filter((f) => !f.end_on || f.end_on >= win.window_start).map((f) => ({
+          kind: "forecast",
+          id: f.id,
+          name: f.rig,
+          customer_name: f.customer_name ?? null,
+          area: f.area,
+          stage: f.stage,
+          odds: num3(f.odds),
+          start_on: f.start_on,
+          end_on: f.end_on ?? null,
+          day_rate: num3(f.day_rate),
+          latest_report_rate: null
+        }))
+      ];
+      res.json({ ...win, rows });
+    }
+  );
+  app.patch(
+    "/api/revenue/projection/jobs/:id",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const parsed = setProjectedRateSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+      const { data: job } = await db().from("jobs").select("id, area").eq("id", String(req.params.id)).maybeSingle();
+      if (!job) return res.status(404).json({ message: "Job not found" });
+      if (!canTouchArea(req, job.area))
+        return res.status(403).json({ message: "You can only edit jobs in your area" });
+      const { error } = await db().from("jobs").update({ projected_day_rate: parsed.data.projected_day_rate }).eq("id", job.id);
+      if (error) {
+        if (/projected_day_rate/.test(error.message))
+          return res.status(409).json({ message: PROJ_SETUP_MSG, setup_required: true });
+        return res.status(400).json({ message: error.message });
+      }
+      res.json({ ok: true });
+    }
+  );
   app.get(
     "/api/forecast",
     requireAuth,
