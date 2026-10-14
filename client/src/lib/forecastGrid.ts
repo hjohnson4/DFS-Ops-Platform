@@ -68,7 +68,7 @@ interface Seg {
   tip: string;
 }
 
-const SHOP_RE = /shop|repair|down|out of service/i;
+export const SHOP_RE = /shop|repair|down|out of service/i;
 
 export function buildGrid(board: ForecastBoard, lvl: ForecastLevel, categories: readonly string[]): CategoryBlock[] {
   const ws = toMs(board.window_start);

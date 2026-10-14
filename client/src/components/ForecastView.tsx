@@ -18,6 +18,7 @@ import {
   revenueByMonth,
   monthLabel,
   shortDate,
+  SHOP_RE,
   type ForecastLevel,
   type Piece,
 } from "@/lib/forecastGrid";
@@ -131,6 +132,7 @@ export function ForecastView({ area }: { area: string }) {
   const [placing, setPlacing] = useState<ForecastJob | null>(null);
   const [converting, setConverting] = useState<ForecastJob | null>(null);
   const [docsFor, setDocsFor] = useState<ForecastJob | null>(null);
+  const [viewing, setViewing] = useState<ForecastJob | null>(null);
 
   const { data: board, isLoading, error, qArea } = useForecastBoard(area);
 
@@ -216,7 +218,13 @@ export function ForecastView({ area }: { area: string }) {
                   ).length;
                   const placedSB = (f.asset_ids || []).length - placedBB;
                   return (
-                    <tr key={f.id} className="border-t border-card-border" data-testid={`row-forecast-${f.id}`}>
+                    <tr
+                      key={f.id}
+                      className="border-t border-card-border cursor-pointer hover:bg-muted/40"
+                      onClick={() => setViewing(f)}
+                      title="Click for details"
+                      data-testid={`row-forecast-${f.id}`}
+                    >
                       <td className="px-3 py-2">
                         <div className="font-medium">{f.rig}</div>
                         <div className="text-xs text-muted-foreground">{f.customer_name || "—"}</div>
@@ -245,7 +253,7 @@ export function ForecastView({ area }: { area: string }) {
                       <td className="px-3 py-2 tabular-nums whitespace-nowrap">
                         {f.day_rate == null ? "—" : `$${f.day_rate.toLocaleString("en-US")}/day`}
                       </td>
-                      <td className="px-3 py-2">
+                      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                         <Button
                           size="sm"
                           variant="ghost"
@@ -257,7 +265,7 @@ export function ForecastView({ area }: { area: string }) {
                           {f.bid_doc_count ? `${f.bid_doc_count} PDF${f.bid_doc_count === 1 ? "" : "s"}` : canEdit ? "Add" : "—"}
                         </Button>
                       </td>
-                      <td className="px-3 py-2">
+                      <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                         {canEdit && (
                           <div className="flex justify-end gap-1.5">
                             <Button size="sm" variant="ghost" onClick={() => setEditing(f)} data-testid={`button-edit-forecast-${f.id}`}>
@@ -300,6 +308,30 @@ export function ForecastView({ area }: { area: string }) {
           lockArea={profile?.role !== "admin" ? (profile?.area ?? null) : null}
           board={board ?? null}
           onClose={() => setEditing(null)}
+        />
+      )}
+      {viewing && (
+        <ForecastDetailsDialog
+          forecast={board.forecasts.find((x) => x.id === viewing.id) ?? viewing}
+          board={board}
+          canEdit={canEdit}
+          onClose={() => setViewing(null)}
+          onEdit={(f) => {
+            setViewing(null);
+            setEditing(f);
+          }}
+          onUnits={(f) => {
+            setViewing(null);
+            setPlacing(f);
+          }}
+          onDocs={(f) => {
+            setViewing(null);
+            setDocsFor(f);
+          }}
+          onConvert={(f) => {
+            setViewing(null);
+            setConverting(f);
+          }}
         />
       )}
       {placing && <UnitsDialog forecast={placing} board={board} onClose={() => setPlacing(null)} />}
@@ -1212,6 +1244,209 @@ function ConvertDialog({ forecast, board, onClose }: { forecast: ForecastJob; bo
             {go.isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
             Create job
           </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---- Upcoming job details ---------------------------------------------------
+// Read-only summary that opens when you click an Upcoming work row: dates,
+// customer, job #, and which centrifuges are assigned (or still needed), with
+// where each assigned unit is right now.
+const longDate = (d: string | null) =>
+  d
+    ? new Date(`${d.slice(0, 10)}T00:00:00Z`).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        timeZone: "UTC",
+      })
+    : "—";
+const daysBetween = (a: string, b: string) =>
+  Math.round((Date.parse(`${b.slice(0, 10)}T00:00:00Z`) - Date.parse(`${a.slice(0, 10)}T00:00:00Z`)) / 86400000) + 1;
+
+function ForecastDetailsDialog({
+  forecast: f,
+  board,
+  canEdit,
+  onClose,
+  onEdit,
+  onUnits,
+  onDocs,
+  onConvert,
+}: {
+  forecast: ForecastJob;
+  board: ForecastBoard;
+  canEdit: boolean;
+  onClose: () => void;
+  onEdit: (f: ForecastJob) => void;
+  onUnits: (f: ForecastJob) => void;
+  onDocs: (f: ForecastJob) => void;
+  onConvert: (f: ForecastJob) => void;
+}) {
+  const placed = (f.asset_ids || [])
+    .map((id) => board.assets.find((a) => a.id === id))
+    .filter(Boolean) as ForecastBoard["assets"];
+  const groups = [
+    { category: "Big Bowl Centrifuge", needed: f.big_bowl_needed },
+    { category: "Small Bowl Centrifuge", needed: f.small_bowl_needed },
+  ];
+  // Units placed in a category the job didn't ask for still show up.
+  const extra = placed.filter((a) => !groups.some((g) => g.category === a.category));
+  const days = f.end_on ? daysBetween(f.start_on, f.end_on) : null;
+
+  function whereNow(a: ForecastBoard["assets"][number]) {
+    if (!a.job_id) {
+      const shop = SHOP_RE.test(a.status || "");
+      return { text: shop ? `In shop (${a.status})` : "Available now", warn: shop };
+    }
+    const j = board.jobs.find((x) => x.id === a.job_id);
+    if (!j) return { text: "On another job", warn: false };
+    const rel = j.est_release_on;
+    // Still out on another job when this one starts?
+    const busy = !rel || rel.slice(0, 10) >= f.start_on.slice(0, 10);
+    return {
+      text: `On ${j.job_number} now · ${rel ? `releases ${longDate(rel)}` : "no release date"}`,
+      warn: busy,
+    };
+  }
+
+  const UnitRow = ({ a }: { a: ForecastBoard["assets"][number] }) => {
+    const w = whereNow(a);
+    return (
+      <div className="flex items-center justify-between gap-3 px-3 py-2" data-testid={`detail-unit-${a.tag}`}>
+        <div className="flex items-center gap-1.5 font-medium">
+          {a.tag}
+          <RentalBadge asset={a as any} />
+        </div>
+        <div className={`text-xs text-right ${w.warn ? "text-amber-700 dark:text-amber-400" : "text-muted-foreground"}`}>
+          {w.text}
+          {w.warn && a.job_id ? " · still out when this job starts" : ""}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {f.rig}
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${STAGE_TONE[f.stage]}`}>{f.stage}</span>
+          </DialogTitle>
+          <DialogDescription>
+            Upcoming job · {f.area} · {f.odds}% odds
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 text-sm">
+          <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+            <div>
+              <div className="text-xs text-muted-foreground">Job #</div>
+              <div className="font-medium" data-testid="detail-job-number">{f.rig}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Customer</div>
+              <div className="font-medium" data-testid="detail-customer">{f.customer_name || "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Start date</div>
+              <div className="font-medium" data-testid="detail-start">{longDate(f.start_on)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Projected end date</div>
+              <div className="font-medium" data-testid="detail-end">
+                {f.end_on ? longDate(f.end_on) : "∞ Indefinite"}
+              </div>
+              {days != null && <div className="text-xs text-muted-foreground">{days} day{days === 1 ? "" : "s"}</div>}
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Day rate</div>
+              <div>{f.day_rate == null ? "—" : `$${f.day_rate.toLocaleString("en-US")}/day`}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Bid PDFs</div>
+              <div>{f.bid_doc_count ? `${f.bid_doc_count} on file` : "—"}</div>
+            </div>
+          </div>
+
+          <div>
+            <div className="mb-1.5 flex items-center gap-1.5 font-medium">
+              <Boxes className="h-4 w-4 text-muted-foreground" /> Assets
+            </div>
+            {groups.every((g) => g.needed === 0) && placed.length === 0 ? (
+              <div className="rounded-md border border-dashed border-card-border bg-muted/30 p-3 text-center text-xs text-muted-foreground">
+                No centrifuges requested for this job.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {groups
+                  .filter((g) => g.needed > 0 || placed.some((a) => a.category === g.category))
+                  .map((g) => {
+                    const units = placed.filter((a) => a.category === g.category);
+                    const missing = Math.max(0, g.needed - units.length);
+                    return (
+                      <div key={g.category} className="rounded-md border border-card-border" data-testid={`detail-group-${g.category}`}>
+                        <div className="flex items-center justify-between border-b border-card-border bg-muted/40 px-3 py-1.5 text-xs">
+                          <span className="font-medium">{g.category}</span>
+                          <span className={missing > 0 ? "font-medium text-rose-700 dark:text-rose-400" : "text-muted-foreground"}>
+                            {units.length} of {g.needed} assigned
+                          </span>
+                        </div>
+                        <div className="divide-y divide-card-border">
+                          {units.map((a) => (
+                            <UnitRow key={a.id} a={a} />
+                          ))}
+                          {Array.from({ length: missing }).map((_, i) => (
+                            <div key={`m${i}`} className="flex items-center justify-between px-3 py-2 text-xs">
+                              <span className="text-rose-700 dark:text-rose-400 font-medium">Not assigned</span>
+                              <span className="text-muted-foreground">needs a unit</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                {extra.length > 0 && (
+                  <div className="rounded-md border border-card-border divide-y divide-card-border">
+                    {extra.map((a) => (
+                      <UnitRow key={a.id} a={a} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {f.notes && (
+            <div>
+              <div className="text-xs text-muted-foreground">Notes</div>
+              <div className="whitespace-pre-line">{f.notes}</div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter className="flex-wrap gap-2 sm:gap-2">
+          <Button variant="ghost" size="sm" onClick={() => onDocs(f)} data-testid="button-detail-docs">
+            <FileText className="mr-1 h-3.5 w-3.5" /> Bid PDFs
+          </Button>
+          {canEdit && (
+            <>
+              <Button variant="outline" size="sm" onClick={() => onEdit(f)} data-testid="button-detail-edit">
+                <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => onUnits(f)} data-testid="button-detail-units">
+                <Boxes className="mr-1 h-3.5 w-3.5" /> Assign units
+              </Button>
+              {f.stage === "Awarded" && (
+                <Button size="sm" onClick={() => onConvert(f)} data-testid="button-detail-convert">
+                  <ArrowRightCircle className="mr-1 h-3.5 w-3.5" /> Convert to job
+                </Button>
+              )}
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
