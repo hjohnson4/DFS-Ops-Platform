@@ -1340,13 +1340,6 @@ export default function AssetsPage() {
         <CentrifugeScheduleView area={isAdmin ? areaFilter : profile?.area ?? "all"} />
       ) : (
       <>
-      {/* Rental centrifuges: cost vs. earnings (Admins + Area Managers) */}
-      {canManage && (
-        <div className="mb-4">
-          <RentalsSummary onOpen={setDetailId} />
-        </div>
-      )}
-
       {/* Assignment toggle + search */}
       {(rows.length > 0 || activeArea) && (
         <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -1422,6 +1415,13 @@ export default function AssetsPage() {
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Rental centrifuges: cost vs. earnings — only on the Rentals view (Admins + Area Managers) */}
+      {canManage && view === "rentals" && (
+        <div className="mb-4" data-testid="rentals-summary-wrap">
+          <RentalsSummary onOpen={setDetailId} />
         </div>
       )}
 
