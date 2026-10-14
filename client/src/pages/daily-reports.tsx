@@ -694,9 +694,9 @@ export default function DailyReportsPage() {
                   </th>
                 )}
                 <th className="px-4 py-2.5 font-medium">Date</th>
-                <th className="px-4 py-2.5 font-medium">From</th>
-                <th className="px-4 py-2.5 font-medium">Well</th>
                 <th className="px-4 py-2.5 font-medium">Job / Customer</th>
+                <th className="px-4 py-2.5 font-medium">Well</th>
+                <th className="px-4 py-2.5 font-medium">From</th>
                 <th className="px-4 py-2.5 font-medium">Area</th>
                 <th className="px-4 py-2.5 font-medium">Status</th>
                 <th className="px-4 py-2.5 font-medium">Document</th>
@@ -732,9 +732,10 @@ export default function DailyReportsPage() {
                       {fmt(r.report_date || r.received_at)}
                     </td>
                     <td className="px-4 py-2.5">
-                      <span className="truncate max-w-[180px] inline-block align-middle">
-                        {r.sender_name || r.sender_email || "—"}
-                      </span>
+                      <div className="font-medium">{r.job_number || "—"}</div>
+                      <div className="text-xs text-muted-foreground truncate max-w-[200px]">
+                        {r.customer_name || "Unlinked"}
+                      </div>
                     </td>
                     <td className="px-4 py-2.5">
                       <div className="truncate max-w-[160px]">{r.well_name || "—"}</div>
@@ -743,10 +744,9 @@ export default function DailyReportsPage() {
                       )}
                     </td>
                     <td className="px-4 py-2.5">
-                      <div className="font-medium">{r.job_number || "—"}</div>
-                      <div className="text-xs text-muted-foreground truncate max-w-[200px]">
-                        {r.customer_name || "Unlinked"}
-                      </div>
+                      <span className="truncate max-w-[180px] inline-block align-middle">
+                        {r.sender_name || r.sender_email || "—"}
+                      </span>
                     </td>
                     <td className="px-4 py-2.5 text-muted-foreground">{r.area || "—"}</td>
                     <td className="px-4 py-2.5">
