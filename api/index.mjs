@@ -395,8 +395,8 @@ function toDateStr(v) {
   if (!isNaN(parsed.getTime())) return ymdLocal(parsed);
   return null;
 }
-function addDaysToDateStr(dateStr, days) {
-  const d = /* @__PURE__ */ new Date(`${dateStr}T00:00:00Z`);
+function addDaysToDateStr(dateStr2, days) {
+  const d = /* @__PURE__ */ new Date(`${dateStr2}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + days);
   return d.toISOString().slice(0, 10);
 }
@@ -1082,9 +1082,10 @@ var notifPrefsSchema = z.object({
   on_filed: z.boolean()
 });
 var WORK_ORDER_TYPES = [
-  "Preventive",
+  "Refurbishment",
   "Repair",
   "Inspection",
+  "Preventive",
   "Corrective"
 ];
 var WORK_ORDER_PRIORITIES = ["High", "Medium", "Low"];
@@ -1095,27 +1096,48 @@ var WORK_ORDER_STATUSES = [
   "Overdue",
   "Completed"
 ];
+var WORK_ORDER_OPEN_STATUSES = WORK_ORDER_STATUSES.filter(
+  (s) => s !== "Completed"
+);
 var WORK_ORDER_MANAGE_ROLES = ["admin", "area", "super"];
+var WORK_ORDER_INVOICE_MAX_BYTES = 3 * 1024 * 1024;
+var dateStr = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date");
 var createWorkOrderSchema = z.object({
   asset_id: z.string().uuid("Choose an asset"),
-  title: z.string().trim().min(1, "A task title is required"),
-  wo_type: z.enum(WORK_ORDER_TYPES),
+  title: z.string().trim().min(1, "Describe what the machine is going in for"),
+  vendor: z.string({ required_error: "Enter where the machine was sent" }).trim().min(1, "Enter where the machine was sent"),
+  sent_on: z.string({ required_error: "Enter the date the machine was sent" }).regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date"),
+  wo_type: z.enum(WORK_ORDER_TYPES).default("Refurbishment"),
   priority: z.enum(WORK_ORDER_PRIORITIES).default("Medium"),
-  status: z.enum(WORK_ORDER_STATUSES).default("Scheduled"),
-  assigned_to: z.string().uuid().nullable().optional(),
-  due_date: z.string().nullable().optional(),
-  est_hours: z.number().nonnegative().nullable().optional(),
+  status: z.enum(WORK_ORDER_OPEN_STATUSES).default("In Progress"),
+  due_date: dateStr.nullable().optional(),
   notes: z.string().nullable().optional()
 });
 var updateWorkOrderSchema = z.object({
   title: z.string().trim().min(1).optional(),
+  vendor: z.string().trim().min(1, "Enter where the machine was sent").optional(),
+  sent_on: dateStr.optional(),
   wo_type: z.enum(WORK_ORDER_TYPES).optional(),
   priority: z.enum(WORK_ORDER_PRIORITIES).optional(),
-  status: z.enum(WORK_ORDER_STATUSES).optional(),
-  assigned_to: z.string().uuid().nullable().optional(),
-  due_date: z.string().nullable().optional(),
-  est_hours: z.number().nonnegative().nullable().optional(),
-  notes: z.string().nullable().optional()
+  status: z.enum(WORK_ORDER_OPEN_STATUSES).optional(),
+  due_date: dateStr.nullable().optional(),
+  notes: z.string().nullable().optional(),
+  // Editable after close-out too (fix a typo on the invoice # or total).
+  returned_on: dateStr.optional(),
+  work_performed: z.string().trim().min(1).optional(),
+  invoice_number: z.string().nullable().optional(),
+  invoice_total: z.number().nonnegative().optional()
+});
+var closeWorkOrderSchema = z.object({
+  returned_on: z.string({ required_error: "Enter the date the machine came back" }).regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date"),
+  work_performed: z.string().trim().min(1, "Describe what was done to the machine"),
+  invoice_number: z.string().trim().nullable().optional(),
+  invoice_total: z.number({ required_error: "Enter the invoice total", invalid_type_error: "Enter the invoice total" }).nonnegative("Invoice total can't be negative"),
+  invoice_file: z.object({
+    name: z.string().min(1),
+    mime: z.string().min(1),
+    base64: z.string().min(1)
+  }).nullable().optional()
 });
 var FORECAST_DEFAULT_ODDS = {
   Bid: 25,
@@ -4966,42 +4988,6 @@ async function registerRoutes(httpServer, app) {
         action: "Filed"
       });
       const createdWorkOrders = [];
-      for (const f of flaggedItems) {
-        try {
-          const { data: seqData, error: seqErr } = await client2.rpc("nextval", {
-            seq: "work_order_seq"
-          });
-          let woNumber;
-          if (seqErr || seqData == null) {
-            const { count } = await client2.from("work_orders").select("id", { count: "exact", head: true });
-            woNumber = `WO-${5001 + (count || 0)}`;
-          } else {
-            woNumber = `WO-${seqData}`;
-          }
-          const title = `Service flag: ${f.label}`.slice(0, 200);
-          const woNote = [
-            `Auto-created from service report on ${input.report_date}.`,
-            f.note ? `Tech note: ${f.note}` : null
-          ].filter(Boolean).join(" ");
-          const { data: wo } = await client2.from("work_orders").insert({
-            wo_number: woNumber,
-            asset_id: asset.id,
-            area: asset.area,
-            title,
-            wo_type: "Repair",
-            priority: "High",
-            status: "Scheduled",
-            assigned_to: null,
-            due_date: null,
-            est_hours: null,
-            notes: woNote,
-            created_by: req.profile.id
-          }).select("id").single();
-          if (wo?.id) createdWorkOrders.push(wo.id);
-        } catch (e) {
-          console.error("[service-form] work order create failed", e);
-        }
-      }
       sendNotificationEmails("needs_signoff", { report, asset }).catch(
         (e) => console.error("[email] needs_signoff", e)
       );
@@ -5015,30 +5001,40 @@ async function registerRoutes(httpServer, app) {
     const { data } = await client2.from("assets").select("id, area").eq("id", assetId).single();
     return data ? data.area : null;
   }
-  const WORK_ORDER_SELECT = "id, wo_number, asset_id, area, title, wo_type, priority, status, assigned_to, due_date, est_hours, notes, created_by, completed_at, created_at, asset:assets(tag, category), assigned:profiles!work_orders_assigned_to_fkey(name), creator:profiles!work_orders_created_by_fkey(name)";
+  const WORK_ORDER_SELECT = "id, wo_number, asset_id, area, title, wo_type, priority, status, vendor, sent_on, due_date, est_hours, notes, created_by, completed_at, created_at, returned_on, work_performed, invoice_number, invoice_total, invoice_file_name, invoice_mime, invoice_size, asset:assets(tag, category), creator:profiles!work_orders_created_by_fkey(name), closer:profiles!work_orders_closed_by_fkey(name)";
+  const WO_SETUP_MSG = 'Work orders need a one-time database update. Run "Work order refurbishment setup.sql" in the Supabase SQL editor, then try again.';
+  const woSetupError = (msg) => !!msg && /(vendor|sent_on|returned_on|work_performed|invoice_|closed_by)/i.test(msg) && /(does not exist|could not find|relationship)/i.test(msg);
+  const woErr = (res, status, msg) => res.status(woSetupError(msg) ? 500 : status).json({ message: woSetupError(msg) ? WO_SETUP_MSG : msg });
   function flattenWorkOrder(row) {
-    const { asset, assigned, creator, ...rest } = row;
+    const { asset, creator, closer, ...rest } = row;
     return {
       ...rest,
+      invoice_total: rest.invoice_total != null ? Number(rest.invoice_total) : null,
       asset_tag: asset?.tag ?? null,
       asset_category: asset?.category ?? null,
-      assigned_to_name: assigned?.name ?? null,
-      created_by_name: creator?.name ?? null
+      created_by_name: creator?.name ?? null,
+      closed_by_name: closer?.name ?? null
     };
   }
-  app.get(
-    "/api/work-orders/assignees",
-    requireAuth,
-    requireRole(...WORK_ORDER_MANAGE_ROLES),
-    async (req, res) => {
-      const scope = areaScopeOf(req.profile);
-      let query = supabaseAnon.from("profiles").select("id, name, role, area").eq("active", true).order("name", { ascending: true });
-      if (scope) query = query.or(`area.eq.${scope},area.is.null`);
-      const { data, error } = await query;
-      if (error) return res.status(500).json({ message: error.message });
-      res.json(data || []);
-    }
-  );
+  function woForViewer(req, row) {
+    if (WORK_ORDER_MANAGE_ROLES.includes(req.profile.role)) return row;
+    return { ...row, invoice_total: null, invoice_number: null };
+  }
+  async function nextWorkOrderNumber(client2) {
+    const { data: seqData, error: seqErr } = await client2.rpc("nextval", {
+      seq: "work_order_seq"
+    });
+    if (!seqErr && seqData != null) return `WO-${seqData}`;
+    const { count } = await client2.from("work_orders").select("id", { count: "exact", head: true });
+    return `WO-${5001 + (count || 0)}`;
+  }
+  async function loadWorkOrderForWrite(req) {
+    const { data: existing } = await supabaseAnon.from("work_orders").select("id, area, status, completed_at").eq("id", req.params.id).single();
+    if (!existing) return null;
+    const scope = areaScopeOf(req.profile);
+    if (scope && existing.area !== scope) return null;
+    return existing;
+  }
   app.get(
     "/api/work-orders",
     requireAuth,
@@ -5047,11 +5043,11 @@ async function registerRoutes(httpServer, app) {
       let query = supabaseAnon.from("work_orders").select(WORK_ORDER_SELECT).order("created_at", { ascending: false });
       if (scope) query = query.eq("area", scope);
       const { data, error } = await query;
-      if (error) return res.status(500).json({ message: error.message });
+      if (error) return woErr(res, 500, error.message);
       let rows = (data || []).map(flattenWorkOrder);
       const fieldAssets = await fieldAssetIdsOf(req);
       if (fieldAssets) rows = rows.filter((r) => fieldAssets.has(r.asset_id));
-      res.json(rows);
+      res.json(rows.map((r) => woForViewer(req, r)));
     }
   );
   app.post(
@@ -5069,34 +5065,25 @@ async function registerRoutes(httpServer, app) {
       const scope = areaScopeOf(req.profile);
       if (scope && area !== scope)
         return res.status(404).json({ message: "Asset not found" });
+      if (input.due_date && input.due_date < input.sent_on)
+        return res.status(400).json({ message: "Expected back can't be before the date sent" });
       const client2 = supabaseAdmin || supabaseAnon;
-      const { data: seqData, error: seqErr } = await client2.rpc("nextval", {
-        seq: "work_order_seq"
-      });
-      let woNumber;
-      if (seqErr || seqData == null) {
-        const { count } = await client2.from("work_orders").select("id", { count: "exact", head: true });
-        woNumber = `WO-${5001 + (count || 0)}`;
-      } else {
-        woNumber = `WO-${seqData}`;
-      }
-      const isCompleted = input.status === "Completed";
+      const woNumber = await nextWorkOrderNumber(client2);
       const { data, error } = await client2.from("work_orders").insert({
         wo_number: woNumber,
         asset_id: input.asset_id,
         area,
         title: input.title,
-        wo_type: input.wo_type,
+        vendor: input.vendor,
+        sent_on: input.sent_on,
+        wo_type: input.wo_type ?? "Refurbishment",
         priority: input.priority ?? "Medium",
-        status: input.status ?? "Scheduled",
-        assigned_to: input.assigned_to ?? null,
+        status: input.status ?? "In Progress",
         due_date: input.due_date || null,
-        est_hours: input.est_hours ?? null,
         notes: input.notes || null,
-        created_by: req.profile.id,
-        completed_at: isCompleted ? (/* @__PURE__ */ new Date()).toISOString() : null
+        created_by: req.profile.id
       }).select(WORK_ORDER_SELECT).single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return woErr(res, 400, error.message);
       res.status(201).json(flattenWorkOrder(data));
     }
   );
@@ -5108,35 +5095,159 @@ async function registerRoutes(httpServer, app) {
       const parsed = updateWorkOrderSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0]?.message || "Invalid input" });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: existing } = await supabaseAnon.from("work_orders").select("id, area, status, completed_at").eq("id", req.params.id).single();
+      const existing = await loadWorkOrderForWrite(req);
       if (!existing)
         return res.status(404).json({ message: "Work order not found" });
-      const scope = areaScopeOf(req.profile);
-      if (scope && existing.area !== scope)
-        return res.status(404).json({ message: "Work order not found" });
+      const isClosed = existing.status === "Completed";
       const patch = {};
       const input = parsed.data;
       if (input.title !== void 0) patch.title = input.title;
+      if (input.vendor !== void 0) patch.vendor = input.vendor;
+      if (input.sent_on !== void 0) patch.sent_on = input.sent_on;
       if (input.wo_type !== void 0) patch.wo_type = input.wo_type;
       if (input.priority !== void 0) patch.priority = input.priority;
-      if (input.assigned_to !== void 0) patch.assigned_to = input.assigned_to;
       if (input.due_date !== void 0) patch.due_date = input.due_date || null;
-      if (input.est_hours !== void 0) patch.est_hours = input.est_hours;
       if (input.notes !== void 0) patch.notes = input.notes || null;
-      if (input.status !== void 0) {
-        patch.status = input.status;
-        if (input.status === "Completed" && !existing.completed_at) {
-          patch.completed_at = (/* @__PURE__ */ new Date()).toISOString();
-        } else if (input.status !== "Completed") {
-          patch.completed_at = null;
-        }
+      if (input.status !== void 0 && !isClosed) patch.status = input.status;
+      if (isClosed) {
+        if (input.returned_on !== void 0) patch.returned_on = input.returned_on;
+        if (input.work_performed !== void 0) patch.work_performed = input.work_performed;
+        if (input.invoice_number !== void 0) patch.invoice_number = input.invoice_number?.trim() || null;
+        if (input.invoice_total !== void 0) patch.invoice_total = input.invoice_total;
       }
       if (Object.keys(patch).length === 0)
         return res.status(400).json({ message: "No changes provided" });
+      const client2 = supabaseAdmin || supabaseAnon;
       const { data, error } = await client2.from("work_orders").update(patch).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return woErr(res, 400, error.message);
       res.json(flattenWorkOrder(data));
+    }
+  );
+  app.post(
+    "/api/work-orders/:id/close",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req, res) => {
+      const parsed = closeWorkOrderSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0]?.message || "Invalid input" });
+      const existing = await loadWorkOrderForWrite(req);
+      if (!existing)
+        return res.status(404).json({ message: "Work order not found" });
+      if (existing.status === "Completed")
+        return res.status(400).json({ message: "This work order is already closed out" });
+      const input = parsed.data;
+      const { data: wo } = await supabaseAnon.from("work_orders").select("sent_on").eq("id", req.params.id).single();
+      const sentOn = wo?.sent_on;
+      if (sentOn && input.returned_on < sentOn)
+        return res.status(400).json({ message: "Date returned can't be before the date sent" });
+      const patch = {
+        status: "Completed",
+        completed_at: (/* @__PURE__ */ new Date()).toISOString(),
+        closed_by: req.profile.id,
+        returned_on: input.returned_on,
+        work_performed: input.work_performed,
+        invoice_number: input.invoice_number?.trim() || null,
+        invoice_total: input.invoice_total
+      };
+      if (input.invoice_file) {
+        const bytes = Buffer.from(input.invoice_file.base64, "base64");
+        if (!bytes.length)
+          return res.status(400).json({ message: "The invoice file is empty" });
+        if (bytes.length > WORK_ORDER_INVOICE_MAX_BYTES)
+          return res.status(400).json({ message: "The invoice file is over 3 MB. Save a smaller PDF or photo and try again." });
+        patch.invoice_file_name = input.invoice_file.name.slice(0, 200);
+        patch.invoice_mime = input.invoice_file.mime.slice(0, 100);
+        patch.invoice_size = bytes.length;
+        patch.invoice_base64 = input.invoice_file.base64;
+      }
+      const client2 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client2.from("work_orders").update(patch).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
+      if (error) return woErr(res, 400, error.message);
+      res.json(flattenWorkOrder(data));
+    }
+  );
+  app.put(
+    "/api/work-orders/:id/invoice",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req, res) => {
+      const f = closeWorkOrderSchema.shape.invoice_file.unwrap().unwrap().safeParse(req.body);
+      if (!f.success) return res.status(400).json({ message: "Choose an invoice file" });
+      const existing = await loadWorkOrderForWrite(req);
+      if (!existing)
+        return res.status(404).json({ message: "Work order not found" });
+      const bytes = Buffer.from(f.data.base64, "base64");
+      if (!bytes.length) return res.status(400).json({ message: "The invoice file is empty" });
+      if (bytes.length > WORK_ORDER_INVOICE_MAX_BYTES)
+        return res.status(400).json({ message: "The invoice file is over 3 MB. Save a smaller PDF or photo and try again." });
+      const client2 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client2.from("work_orders").update({
+        invoice_file_name: f.data.name.slice(0, 200),
+        invoice_mime: f.data.mime.slice(0, 100),
+        invoice_size: bytes.length,
+        invoice_base64: f.data.base64
+      }).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
+      if (error) return woErr(res, 400, error.message);
+      res.json(flattenWorkOrder(data));
+    }
+  );
+  app.get(
+    "/api/work-orders/:id/invoice",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req, res) => {
+      const { data, error } = await supabaseAnon.from("work_orders").select("area, invoice_file_name, invoice_mime, invoice_base64").eq("id", req.params.id).maybeSingle();
+      if (error) return woErr(res, 500, error.message);
+      const scope = areaScopeOf(req.profile);
+      const d = data;
+      if (!d || scope && d.area !== scope || !d.invoice_base64)
+        return res.status(404).json({ message: "No invoice on file" });
+      res.setHeader("Content-Type", d.invoice_mime || "application/octet-stream");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${String(d.invoice_file_name || "invoice").replace(/"/g, "")}"`
+      );
+      res.send(Buffer.from(d.invoice_base64, "base64"));
+    }
+  );
+  app.get(
+    "/api/assets/:id/refurbishments",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req, res) => {
+      const area = await assetAreaOf(supabaseAnon, req.params.id);
+      if (area == null) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && area !== scope) return res.status(404).json({ message: "Asset not found" });
+      const { data, error } = await supabaseAnon.from("work_orders").select(
+        "id, wo_number, title, wo_type, status, vendor, sent_on, due_date, returned_on, work_performed, invoice_number, invoice_total, invoice_file_name, invoice_size, completed_at"
+      ).eq("asset_id", req.params.id).order("created_at", { ascending: false });
+      if (error) return woErr(res, 500, error.message);
+      const rows = data || [];
+      const dayMs = 864e5;
+      const history = rows.filter((r) => r.status === "Completed").map((r) => ({
+        id: r.id,
+        wo_number: r.wo_number,
+        title: r.title,
+        wo_type: r.wo_type,
+        vendor: r.vendor,
+        sent_on: r.sent_on,
+        returned_on: r.returned_on,
+        work_performed: r.work_performed,
+        invoice_number: r.invoice_number,
+        invoice_total: r.invoice_total != null ? Number(r.invoice_total) : null,
+        has_invoice: !!r.invoice_size,
+        invoice_file_name: r.invoice_file_name,
+        days_out: r.sent_on && r.returned_on ? Math.round((Date.parse(r.returned_on) - Date.parse(r.sent_on)) / dayMs) : null
+      })).sort((a, b) => String(b.returned_on || "").localeCompare(String(a.returned_on || "")));
+      const open = rows.filter((r) => r.status !== "Completed").map((r) => ({ id: r.id, wo_number: r.wo_number, vendor: r.vendor, sent_on: r.sent_on, due_date: r.due_date, status: r.status }));
+      res.json({
+        total_cost: history.reduce((s, h) => s + (h.invoice_total || 0), 0),
+        count: history.length,
+        open,
+        history
+      });
     }
   );
   app.delete(
@@ -5145,11 +5256,8 @@ async function registerRoutes(httpServer, app) {
     requireRole(...WORK_ORDER_MANAGE_ROLES),
     async (req, res) => {
       const client2 = supabaseAdmin || supabaseAnon;
-      const { data: existing } = await supabaseAnon.from("work_orders").select("id, area").eq("id", req.params.id).single();
+      const existing = await loadWorkOrderForWrite(req);
       if (!existing)
-        return res.status(404).json({ message: "Work order not found" });
-      const scope = areaScopeOf(req.profile);
-      if (scope && existing.area !== scope)
         return res.status(404).json({ message: "Work order not found" });
       const { error } = await client2.from("work_orders").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });

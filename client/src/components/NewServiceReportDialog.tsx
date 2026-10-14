@@ -56,7 +56,7 @@ interface PendingPhoto {
 // In-app digital centrifuge service report. Replaces the external Mitti /
 // SafetyCulture PDF: the supervisor fills the 13-item inspection here, records
 // the run-hours meter reading (which resets the service baseline), and any
-// "No" answer on a good/bad question is flagged and auto-opens a work order.
+// "No" answer on a good/bad question is flagged on the report.
 export function NewServiceReportDialog({
   trigger,
   onFiled,
@@ -197,18 +197,14 @@ export function NewServiceReportDialog({
       });
       return (await res.json()) as { work_orders_created?: number };
     },
-    onSuccess: (data) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/service-forms"] });
       queryClient.invalidateQueries({ queryKey: ["/api/service/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
       queryClient.invalidateQueries({ queryKey: ["/api/work-orders"] });
-      const woCount = data?.work_orders_created ?? 0;
       toast({
         title: "Service report filed",
-        description:
-          woCount > 0
-            ? `${woCount} work order${woCount === 1 ? "" : "s"} opened for flagged items.`
-            : "No flagged items. Service baseline updated.",
+        description: "Service baseline updated.",
       });
       reset();
       setOpen(false);
@@ -239,8 +235,7 @@ export function NewServiceReportDialog({
           </DialogTitle>
           <DialogDescription>
             Fill out the inspection in the app. The run-hours reading resets the
-            service baseline, and any flagged item opens a work order
-            automatically.
+            service baseline, and any "No" answer is flagged on the report.
           </DialogDescription>
         </DialogHeader>
 

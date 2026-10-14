@@ -65,6 +65,8 @@ import {
   uploadMaintenanceFileSchema,
   createWorkOrderSchema,
   updateWorkOrderSchema,
+  closeWorkOrderSchema,
+  WORK_ORDER_INVOICE_MAX_BYTES,
   WORK_ORDER_MANAGE_ROLES,
   createJobServiceSchema,
   updateJobServiceSchema,
@@ -4338,7 +4340,7 @@ export async function registerRoutes(
 
   // File a structured service report. admin + area + super. The asset must be
   // in the filer's area scope. Sets the service baseline (run_hours_at_service)
-  // like a maintenance report, and opens a work order for each flagged item.
+  // like a maintenance report. Flagged items are recorded on the report.
   app.post(
     "/api/service-forms",
     requireAuth,
@@ -4441,52 +4443,10 @@ export async function registerRoutes(
         action: "Filed",
       });
 
-      // Auto-open a work order for each flagged item so nothing falls through.
+      // Flagged items stay on the service report itself. Work orders are now
+      // only for machines sent to a third party for refurbishment, so a flag
+      // no longer opens one automatically.
       const createdWorkOrders: string[] = [];
-      for (const f of flaggedItems) {
-        try {
-          const { data: seqData, error: seqErr } = await client.rpc("nextval", {
-            seq: "work_order_seq",
-          });
-          let woNumber: string;
-          if (seqErr || seqData == null) {
-            const { count } = await client
-              .from("work_orders")
-              .select("id", { count: "exact", head: true });
-            woNumber = `WO-${5001 + (count || 0)}`;
-          } else {
-            woNumber = `WO-${seqData}`;
-          }
-          const title = `Service flag: ${f.label}`.slice(0, 200);
-          const woNote = [
-            `Auto-created from service report on ${input.report_date}.`,
-            f.note ? `Tech note: ${f.note}` : null,
-          ]
-            .filter(Boolean)
-            .join(" ");
-          const { data: wo } = await client
-            .from("work_orders")
-            .insert({
-              wo_number: woNumber,
-              asset_id: asset.id,
-              area: asset.area,
-              title,
-              wo_type: "Repair",
-              priority: "High",
-              status: "Scheduled",
-              assigned_to: null,
-              due_date: null,
-              est_hours: null,
-              notes: woNote,
-              created_by: req.profile!.id,
-            })
-            .select("id")
-            .single();
-          if (wo?.id) createdWorkOrders.push(wo.id);
-        } catch (e) {
-          console.error("[service-form] work order create failed", e);
-        }
-      }
 
       // Notify area managers who want sign-off alerts (best effort).
       sendNotificationEmails("needs_signoff", { report, asset }).catch((e) =>
@@ -4514,41 +4474,59 @@ export async function registerRoutes(
   // -------------------------------------------------------------------------
   // Work Orders (moved to the Service module; endpoints unchanged)
   // -------------------------------------------------------------------------
+  // Third-party refurbishment: where the machine went, when, and the vendor
+  // invoice at close-out. The invoice file itself (invoice_base64) is never
+  // selected for lists — only streamed by the /invoice endpoint.
   const WORK_ORDER_SELECT =
-    "id, wo_number, asset_id, area, title, wo_type, priority, status, assigned_to, due_date, est_hours, notes, created_by, completed_at, created_at, asset:assets(tag, category), assigned:profiles!work_orders_assigned_to_fkey(name), creator:profiles!work_orders_created_by_fkey(name)";
+    "id, wo_number, asset_id, area, title, wo_type, priority, status, vendor, sent_on, due_date, est_hours, notes, created_by, completed_at, created_at, returned_on, work_performed, invoice_number, invoice_total, invoice_file_name, invoice_mime, invoice_size, asset:assets(tag, category), creator:profiles!work_orders_created_by_fkey(name), closer:profiles!work_orders_closed_by_fkey(name)";
+  const WO_SETUP_MSG =
+    "Work orders need a one-time database update. Run \"Work order refurbishment setup.sql\" in the Supabase SQL editor, then try again.";
+  const woSetupError = (msg: string | undefined) =>
+    !!msg && /(vendor|sent_on|returned_on|work_performed|invoice_|closed_by)/i.test(msg) &&
+    /(does not exist|could not find|relationship)/i.test(msg);
+  const woErr = (res: Response, status: number, msg: string | undefined) =>
+    res.status(woSetupError(msg) ? 500 : status).json({ message: woSetupError(msg) ? WO_SETUP_MSG : msg });
 
   function flattenWorkOrder(row: any) {
-    const { asset, assigned, creator, ...rest } = row;
+    const { asset, creator, closer, ...rest } = row;
     return {
       ...rest,
+      invoice_total: rest.invoice_total != null ? Number(rest.invoice_total) : null,
       asset_tag: asset?.tag ?? null,
       asset_category: asset?.category ?? null,
-      assigned_to_name: assigned?.name ?? null,
       created_by_name: creator?.name ?? null,
+      closed_by_name: closer?.name ?? null,
     };
   }
+  // Field techs never see refurbishment money.
+  function woForViewer(req: Request, row: any) {
+    if (WORK_ORDER_MANAGE_ROLES.includes(req.profile!.role)) return row;
+    return { ...row, invoice_total: null, invoice_number: null };
+  }
 
-  // People a work order can be assigned to. Area-scoped list of active
-  // profiles. Available to the manage roles (they build the assignee dropdown).
-  app.get(
-    "/api/work-orders/assignees",
-    requireAuth,
-    requireRole(...WORK_ORDER_MANAGE_ROLES),
-    async (req: Request, res: Response) => {
-      const scope = areaScopeOf(req.profile!);
-      let query = supabaseAnon
-        .from("profiles")
-        .select("id, name, role, area")
-        .eq("active", true)
-        .order("name", { ascending: true });
-      // Non-admins only see people in their own area (admins in an area column
-      // are null, so include those too for the scoped manager's convenience).
-      if (scope) query = query.or(`area.eq.${scope},area.is.null`);
-      const { data, error } = await query;
-      if (error) return res.status(500).json({ message: error.message });
-      res.json(data || []);
-    },
-  );
+  async function nextWorkOrderNumber(client: any): Promise<string> {
+    const { data: seqData, error: seqErr } = await client.rpc("nextval", {
+      seq: "work_order_seq",
+    });
+    if (!seqErr && seqData != null) return `WO-${seqData}`;
+    // Fallback: derive from count if the RPC helper isn't present.
+    const { count } = await client
+      .from("work_orders")
+      .select("id", { count: "exact", head: true });
+    return `WO-${5001 + (count || 0)}`;
+  }
+
+  async function loadWorkOrderForWrite(req: Request) {
+    const { data: existing } = await supabaseAnon
+      .from("work_orders")
+      .select("id, area, status, completed_at")
+      .eq("id", req.params.id)
+      .single();
+    if (!existing) return null;
+    const scope = areaScopeOf(req.profile!);
+    if (scope && (existing as any).area !== scope) return null;
+    return existing as any;
+  }
 
   // List work orders. Area-scoped: admins see all, everyone else only their area.
   app.get(
@@ -4562,17 +4540,17 @@ export async function registerRoutes(
         .order("created_at", { ascending: false });
       if (scope) query = query.eq("area", scope);
       const { data, error } = await query;
-      if (error) return res.status(500).json({ message: error.message });
+      if (error) return woErr(res, 500, error.message);
       let rows = (data || []).map(flattenWorkOrder);
       // Field techs: only work orders for assets on their assigned job(s).
       const fieldAssets = await fieldAssetIdsOf(req);
       if (fieldAssets) rows = rows.filter((r: any) => fieldAssets.has(r.asset_id));
-      res.json(rows);
+      res.json(rows.map((r: any) => woForViewer(req, r)));
     },
   );
 
-  // Create a work order. Admin + area + super; asset must be in the creator's
-  // area scope. Area is derived from the asset (never trusted from the body).
+  // Create a work order (machine sent out). Admin + area + super; asset must be
+  // in the creator's area scope. Area is derived from the asset.
   app.post(
     "/api/work-orders",
     requireAuth,
@@ -4590,24 +4568,11 @@ export async function registerRoutes(
       const scope = areaScopeOf(req.profile!);
       if (scope && area !== scope)
         return res.status(404).json({ message: "Asset not found" });
+      if (input.due_date && input.due_date < input.sent_on)
+        return res.status(400).json({ message: "Expected back can't be before the date sent" });
 
       const client = supabaseAdmin || supabaseAnon;
-      // Human-friendly sequential WO number (WO-5001, ...).
-      const { data: seqData, error: seqErr } = await client.rpc("nextval", {
-        seq: "work_order_seq",
-      });
-      let woNumber: string;
-      if (seqErr || seqData == null) {
-        // Fallback: derive from count if the RPC helper isn't present.
-        const { count } = await client
-          .from("work_orders")
-          .select("id", { count: "exact", head: true });
-        woNumber = `WO-${5001 + (count || 0)}`;
-      } else {
-        woNumber = `WO-${seqData}`;
-      }
-
-      const isCompleted = input.status === "Completed";
+      const woNumber = await nextWorkOrderNumber(client);
       const { data, error } = await client
         .from("work_orders")
         .insert({
@@ -4615,25 +4580,24 @@ export async function registerRoutes(
           asset_id: input.asset_id,
           area,
           title: input.title,
-          wo_type: input.wo_type,
+          vendor: input.vendor,
+          sent_on: input.sent_on,
+          wo_type: input.wo_type ?? "Refurbishment",
           priority: input.priority ?? "Medium",
-          status: input.status ?? "Scheduled",
-          assigned_to: input.assigned_to ?? null,
+          status: input.status ?? "In Progress",
           due_date: input.due_date || null,
-          est_hours: input.est_hours ?? null,
           notes: input.notes || null,
           created_by: req.profile!.id,
-          completed_at: isCompleted ? new Date().toISOString() : null,
         })
         .select(WORK_ORDER_SELECT)
         .single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return woErr(res, 400, error.message);
       res.status(201).json(flattenWorkOrder(data));
     },
   );
 
-  // Update a work order (edit fields, reassign, change status/close). Admin +
-  // area + super, within area scope.
+  // Edit a work order. Admin + area + super, within area scope. Completing
+  // goes through /close (needs the invoice + work performed).
   app.patch(
     "/api/work-orders/:id",
     requireAuth,
@@ -4644,47 +4608,210 @@ export async function registerRoutes(
         return res
           .status(400)
           .json({ message: parsed.error.errors[0]?.message || "Invalid input" });
-      const client = supabaseAdmin || supabaseAnon;
-      const { data: existing } = await supabaseAnon
-        .from("work_orders")
-        .select("id, area, status, completed_at")
-        .eq("id", req.params.id)
-        .single();
+      const existing = await loadWorkOrderForWrite(req);
       if (!existing)
         return res.status(404).json({ message: "Work order not found" });
-      const scope = areaScopeOf(req.profile!);
-      if (scope && (existing as any).area !== scope)
-        return res.status(404).json({ message: "Work order not found" });
+      const isClosed = existing.status === "Completed";
 
       const patch: Record<string, any> = {};
       const input = parsed.data;
       if (input.title !== undefined) patch.title = input.title;
+      if (input.vendor !== undefined) patch.vendor = input.vendor;
+      if (input.sent_on !== undefined) patch.sent_on = input.sent_on;
       if (input.wo_type !== undefined) patch.wo_type = input.wo_type;
       if (input.priority !== undefined) patch.priority = input.priority;
-      if (input.assigned_to !== undefined) patch.assigned_to = input.assigned_to;
       if (input.due_date !== undefined) patch.due_date = input.due_date || null;
-      if (input.est_hours !== undefined) patch.est_hours = input.est_hours;
       if (input.notes !== undefined) patch.notes = input.notes || null;
-      if (input.status !== undefined) {
-        patch.status = input.status;
-        // Stamp/clear completion time when crossing the Completed boundary.
-        if (input.status === "Completed" && !(existing as any).completed_at) {
-          patch.completed_at = new Date().toISOString();
-        } else if (input.status !== "Completed") {
-          patch.completed_at = null;
-        }
+      if (input.status !== undefined && !isClosed) patch.status = input.status;
+      if (isClosed) {
+        if (input.returned_on !== undefined) patch.returned_on = input.returned_on;
+        if (input.work_performed !== undefined) patch.work_performed = input.work_performed;
+        if (input.invoice_number !== undefined) patch.invoice_number = input.invoice_number?.trim() || null;
+        if (input.invoice_total !== undefined) patch.invoice_total = input.invoice_total;
       }
       if (Object.keys(patch).length === 0)
         return res.status(400).json({ message: "No changes provided" });
 
+      const client = supabaseAdmin || supabaseAnon;
       const { data, error } = await client
         .from("work_orders")
         .update(patch)
         .eq("id", req.params.id)
         .select(WORK_ORDER_SELECT)
         .single();
-      if (error) return res.status(400).json({ message: error.message });
+      if (error) return woErr(res, 400, error.message);
       res.json(flattenWorkOrder(data));
+    },
+  );
+
+  // Close out: the machine is back. Records the return date, what was done,
+  // the invoice total/number and (optionally) the invoice file, and marks the
+  // work order Completed. This feeds the asset's refurbishment history.
+  app.post(
+    "/api/work-orders/:id/close",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req: Request, res: Response) => {
+      const parsed = closeWorkOrderSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res
+          .status(400)
+          .json({ message: parsed.error.errors[0]?.message || "Invalid input" });
+      const existing = await loadWorkOrderForWrite(req);
+      if (!existing)
+        return res.status(404).json({ message: "Work order not found" });
+      if (existing.status === "Completed")
+        return res.status(400).json({ message: "This work order is already closed out" });
+      const input = parsed.data;
+      const { data: wo } = await supabaseAnon
+        .from("work_orders")
+        .select("sent_on")
+        .eq("id", req.params.id)
+        .single();
+      const sentOn = (wo as any)?.sent_on as string | null;
+      if (sentOn && input.returned_on < sentOn)
+        return res.status(400).json({ message: "Date returned can't be before the date sent" });
+
+      const patch: Record<string, any> = {
+        status: "Completed",
+        completed_at: new Date().toISOString(),
+        closed_by: req.profile!.id,
+        returned_on: input.returned_on,
+        work_performed: input.work_performed,
+        invoice_number: input.invoice_number?.trim() || null,
+        invoice_total: input.invoice_total,
+      };
+      if (input.invoice_file) {
+        const bytes = Buffer.from(input.invoice_file.base64, "base64");
+        if (!bytes.length)
+          return res.status(400).json({ message: "The invoice file is empty" });
+        if (bytes.length > WORK_ORDER_INVOICE_MAX_BYTES)
+          return res.status(400).json({ message: "The invoice file is over 3 MB. Save a smaller PDF or photo and try again." });
+        patch.invoice_file_name = input.invoice_file.name.slice(0, 200);
+        patch.invoice_mime = input.invoice_file.mime.slice(0, 100);
+        patch.invoice_size = bytes.length;
+        patch.invoice_base64 = input.invoice_file.base64;
+      }
+      const client = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client
+        .from("work_orders")
+        .update(patch)
+        .eq("id", req.params.id)
+        .select(WORK_ORDER_SELECT)
+        .single();
+      if (error) return woErr(res, 400, error.message);
+      res.json(flattenWorkOrder(data));
+    },
+  );
+
+  // Replace (or add) the invoice file on a closed work order.
+  app.put(
+    "/api/work-orders/:id/invoice",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req: Request, res: Response) => {
+      const f = closeWorkOrderSchema.shape.invoice_file.unwrap().unwrap().safeParse(req.body);
+      if (!f.success) return res.status(400).json({ message: "Choose an invoice file" });
+      const existing = await loadWorkOrderForWrite(req);
+      if (!existing)
+        return res.status(404).json({ message: "Work order not found" });
+      const bytes = Buffer.from(f.data.base64, "base64");
+      if (!bytes.length) return res.status(400).json({ message: "The invoice file is empty" });
+      if (bytes.length > WORK_ORDER_INVOICE_MAX_BYTES)
+        return res.status(400).json({ message: "The invoice file is over 3 MB. Save a smaller PDF or photo and try again." });
+      const client = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client
+        .from("work_orders")
+        .update({
+          invoice_file_name: f.data.name.slice(0, 200),
+          invoice_mime: f.data.mime.slice(0, 100),
+          invoice_size: bytes.length,
+          invoice_base64: f.data.base64,
+        })
+        .eq("id", req.params.id)
+        .select(WORK_ORDER_SELECT)
+        .single();
+      if (error) return woErr(res, 400, error.message);
+      res.json(flattenWorkOrder(data));
+    },
+  );
+
+  // Stream the vendor invoice file. Manage roles only (it carries cost).
+  app.get(
+    "/api/work-orders/:id/invoice",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req: Request, res: Response) => {
+      const { data, error } = await supabaseAnon
+        .from("work_orders")
+        .select("area, invoice_file_name, invoice_mime, invoice_base64")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      if (error) return woErr(res, 500, error.message);
+      const scope = areaScopeOf(req.profile!);
+      const d: any = data;
+      if (!d || (scope && d.area !== scope) || !d.invoice_base64)
+        return res.status(404).json({ message: "No invoice on file" });
+      res.setHeader("Content-Type", d.invoice_mime || "application/octet-stream");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${String(d.invoice_file_name || "invoice").replace(/"/g, "")}"`,
+      );
+      res.send(Buffer.from(d.invoice_base64, "base64"));
+    },
+  );
+
+  // Refurbishment history + total cost for one asset (closed work orders,
+  // newest return first) and anything currently out at a vendor.
+  app.get(
+    "/api/assets/:id/refurbishments",
+    requireAuth,
+    requireRole(...WORK_ORDER_MANAGE_ROLES),
+    async (req: Request, res: Response) => {
+      const area = await assetAreaOf(supabaseAnon, req.params.id);
+      if (area == null) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && area !== scope) return res.status(404).json({ message: "Asset not found" });
+      const { data, error } = await supabaseAnon
+        .from("work_orders")
+        .select(
+          "id, wo_number, title, wo_type, status, vendor, sent_on, due_date, returned_on, work_performed, invoice_number, invoice_total, invoice_file_name, invoice_size, completed_at",
+        )
+        .eq("asset_id", req.params.id)
+        .order("created_at", { ascending: false });
+      if (error) return woErr(res, 500, error.message);
+      const rows = (data || []) as any[];
+      const dayMs = 86400000;
+      const history = rows
+        .filter((r) => r.status === "Completed")
+        .map((r) => ({
+          id: r.id,
+          wo_number: r.wo_number,
+          title: r.title,
+          wo_type: r.wo_type,
+          vendor: r.vendor,
+          sent_on: r.sent_on,
+          returned_on: r.returned_on,
+          work_performed: r.work_performed,
+          invoice_number: r.invoice_number,
+          invoice_total: r.invoice_total != null ? Number(r.invoice_total) : null,
+          has_invoice: !!r.invoice_size,
+          invoice_file_name: r.invoice_file_name,
+          days_out:
+            r.sent_on && r.returned_on
+              ? Math.round((Date.parse(r.returned_on) - Date.parse(r.sent_on)) / dayMs)
+              : null,
+        }))
+        .sort((a, b) => String(b.returned_on || "").localeCompare(String(a.returned_on || "")));
+      const open = rows
+        .filter((r) => r.status !== "Completed")
+        .map((r) => ({ id: r.id, wo_number: r.wo_number, vendor: r.vendor, sent_on: r.sent_on, due_date: r.due_date, status: r.status }));
+      res.json({
+        total_cost: history.reduce((s, h) => s + (h.invoice_total || 0), 0),
+        count: history.length,
+        open,
+        history,
+      });
     },
   );
 
@@ -4695,15 +4822,8 @@ export async function registerRoutes(
     requireRole(...WORK_ORDER_MANAGE_ROLES),
     async (req: Request, res: Response) => {
       const client = supabaseAdmin || supabaseAnon;
-      const { data: existing } = await supabaseAnon
-        .from("work_orders")
-        .select("id, area")
-        .eq("id", req.params.id)
-        .single();
+      const existing = await loadWorkOrderForWrite(req);
       if (!existing)
-        return res.status(404).json({ message: "Work order not found" });
-      const scope = areaScopeOf(req.profile!);
-      if (scope && (existing as any).area !== scope)
         return res.status(404).json({ message: "Work order not found" });
       const { error } = await client
         .from("work_orders")

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { RefurbishmentHistory } from "@/components/RefurbishmentHistory";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -894,6 +895,7 @@ function AssetDetailDialog({
 }) {
   const { profile } = useAuth();
   const canManage = profile?.role === "admin" || profile?.role === "area";
+  const canSeeRefurb = canManage || profile?.role === "super";
   const [editing, setEditing] = useState(false);
   const { data, isLoading } = useQuery<AssetDetail>({
     queryKey: ["/api/assets", assetId],
@@ -1043,6 +1045,8 @@ function AssetDetailDialog({
                 </div>
               )}
             </div>
+
+            {canSeeRefurb && <RefurbishmentHistory assetId={data.id} />}
           </div>
         )}
 

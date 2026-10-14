@@ -499,8 +499,7 @@ export default function Service() {
       </div>
       <p className="text-xs text-muted-foreground mb-3">
         Digital centrifuge inspections filed in the app. Each row shows the
-        inspection score and any flagged items (which open work orders
-        automatically).
+        inspection score and any flagged items.
       </p>
       {formsLoading ? (
         <div className="text-sm text-muted-foreground py-8 text-center">

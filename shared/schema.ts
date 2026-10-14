@@ -1994,16 +1994,18 @@ export const notifPrefsSchema = z.object({
 export type NotifPrefsInput = z.infer<typeof notifPrefsSchema>;
 
 // ---------------------------------------------------------------------------
-// Work Orders (Maintenance module)
-// A work order is a tracked maintenance task against a specific asset:
-// preventive service, a repair, an inspection, or corrective work. Admins,
-// area managers, and supervisors create/assign/close them; field users view
-// only. Viewing is area-scoped like the rest of the app.
+// Work Orders (Service module) — third-party refurbishment
+// A work order tracks a machine (usually a centrifuge) sent out to a third
+// party for refurbishment: where it went, when it was sent, and — when it is
+// closed out — the vendor's invoice, its total, and what was done to the
+// machine. Closed work orders form each asset's refurbishment history and
+// cost. Admins, area managers, and supervisors create/close them.
 // ---------------------------------------------------------------------------
 export const WORK_ORDER_TYPES = [
-  "Preventive",
+  "Refurbishment",
   "Repair",
   "Inspection",
+  "Preventive",
   "Corrective",
 ] as const;
 export type WorkOrderType = (typeof WORK_ORDER_TYPES)[number];
@@ -2019,9 +2021,16 @@ export const WORK_ORDER_STATUSES = [
   "Completed",
 ] as const;
 export type WorkOrderStatus = (typeof WORK_ORDER_STATUSES)[number];
+// Statuses you can pick while the machine is out (Completed only via close-out).
+export const WORK_ORDER_OPEN_STATUSES = WORK_ORDER_STATUSES.filter(
+  (s) => s !== "Completed",
+) as Exclude<WorkOrderStatus, "Completed">[];
 
-// Who may create, edit, assign, and close work orders.
+// Who may create, edit, and close work orders.
 export const WORK_ORDER_MANAGE_ROLES: Role[] = ["admin", "area", "super"];
+
+// Largest invoice file accepted at close-out (bytes).
+export const WORK_ORDER_INVOICE_MAX_BYTES = 3 * 1024 * 1024;
 
 export interface WorkOrder {
   id: string;
@@ -2032,48 +2041,108 @@ export interface WorkOrder {
   wo_type: WorkOrderType;
   priority: WorkOrderPriority;
   status: WorkOrderStatus;
-  assigned_to: string | null;
-  due_date: string | null;
+  vendor: string | null; // where the machine was sent
+  sent_on: string | null; // date the machine was sent
+  due_date: string | null; // expected back
   est_hours: number | null;
   notes: string | null;
   created_by: string | null;
   completed_at: string | null;
   created_at: string;
+  // Close-out
+  returned_on: string | null;
+  work_performed: string | null;
+  invoice_number: string | null;
+  invoice_total: number | null;
+  invoice_file_name: string | null;
+  invoice_mime: string | null;
+  invoice_size: number | null;
 }
 
-// Work order joined with asset + person names for list/table display.
+// Work order joined with asset + creator names for list/table display.
 export interface WorkOrderWithLinks extends WorkOrder {
   asset_tag: string | null;
   asset_category: Category | null;
-  assigned_to_name: string | null;
   created_by_name: string | null;
+  closed_by_name: string | null;
 }
+
+const dateStr = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date");
 
 export const createWorkOrderSchema = z.object({
   asset_id: z.string().uuid("Choose an asset"),
-  title: z.string().trim().min(1, "A task title is required"),
-  wo_type: z.enum(WORK_ORDER_TYPES),
+  title: z.string().trim().min(1, "Describe what the machine is going in for"),
+  vendor: z.string({ required_error: "Enter where the machine was sent" }).trim().min(1, "Enter where the machine was sent"),
+  sent_on: z.string({ required_error: "Enter the date the machine was sent" }).regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date"),
+  wo_type: z.enum(WORK_ORDER_TYPES).default("Refurbishment"),
   priority: z.enum(WORK_ORDER_PRIORITIES).default("Medium"),
-  status: z.enum(WORK_ORDER_STATUSES).default("Scheduled"),
-  assigned_to: z.string().uuid().nullable().optional(),
-  due_date: z.string().nullable().optional(),
-  est_hours: z.number().nonnegative().nullable().optional(),
+  status: z.enum(WORK_ORDER_OPEN_STATUSES as [string, ...string[]]).default("In Progress"),
+  due_date: dateStr.nullable().optional(),
   notes: z.string().nullable().optional(),
 });
 export type CreateWorkOrderInput = z.infer<typeof createWorkOrderSchema>;
 
 // All fields optional on update; the route applies only what is provided.
+// Completing a work order goes through the close-out endpoint instead.
 export const updateWorkOrderSchema = z.object({
   title: z.string().trim().min(1).optional(),
+  vendor: z.string().trim().min(1, "Enter where the machine was sent").optional(),
+  sent_on: dateStr.optional(),
   wo_type: z.enum(WORK_ORDER_TYPES).optional(),
   priority: z.enum(WORK_ORDER_PRIORITIES).optional(),
-  status: z.enum(WORK_ORDER_STATUSES).optional(),
-  assigned_to: z.string().uuid().nullable().optional(),
-  due_date: z.string().nullable().optional(),
-  est_hours: z.number().nonnegative().nullable().optional(),
+  status: z.enum(WORK_ORDER_OPEN_STATUSES as [string, ...string[]]).optional(),
+  due_date: dateStr.nullable().optional(),
   notes: z.string().nullable().optional(),
+  // Editable after close-out too (fix a typo on the invoice # or total).
+  returned_on: dateStr.optional(),
+  work_performed: z.string().trim().min(1).optional(),
+  invoice_number: z.string().nullable().optional(),
+  invoice_total: z.number().nonnegative().optional(),
 });
 export type UpdateWorkOrderInput = z.infer<typeof updateWorkOrderSchema>;
+
+// Close out: the machine is back. Invoice file is optional only so a lost
+// invoice doesn't block closing; the total and work performed are required.
+export const closeWorkOrderSchema = z.object({
+  returned_on: z.string({ required_error: "Enter the date the machine came back" }).regex(/^\d{4}-\d{2}-\d{2}$/, "Use a valid date"),
+  work_performed: z.string().trim().min(1, "Describe what was done to the machine"),
+  invoice_number: z.string().trim().nullable().optional(),
+  invoice_total: z.number({ required_error: "Enter the invoice total", invalid_type_error: "Enter the invoice total" }).nonnegative("Invoice total can't be negative"),
+  invoice_file: z
+    .object({
+      name: z.string().min(1),
+      mime: z.string().min(1),
+      base64: z.string().min(1),
+    })
+    .nullable()
+    .optional(),
+});
+export type CloseWorkOrderInput = z.infer<typeof closeWorkOrderSchema>;
+
+// One completed refurbishment in an asset's history.
+export interface RefurbishmentEntry {
+  id: string;
+  wo_number: string;
+  title: string;
+  wo_type: WorkOrderType;
+  vendor: string | null;
+  sent_on: string | null;
+  returned_on: string | null;
+  work_performed: string | null;
+  invoice_number: string | null;
+  invoice_total: number | null;
+  has_invoice: boolean;
+  invoice_file_name: string | null;
+  days_out: number | null;
+}
+export interface AssetRefurbishments {
+  total_cost: number;
+  count: number;
+  open: { id: string; wo_number: string; vendor: string | null; sent_on: string | null; due_date: string | null; status: WorkOrderStatus }[];
+  history: RefurbishmentEntry[];
+}
 
 // ---- Forecast (upcoming work + centrifuge planning) -----------------------
 // Admins and Area Managers plan upcoming jobs month by month. Each forecast
