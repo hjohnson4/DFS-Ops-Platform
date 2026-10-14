@@ -12,6 +12,7 @@ import {
   scheduleSummary,
   tracksRunHours,
   assetLocation,
+  assetStatusLabel,
 } from "@shared/schema";
 import type {
   AssetWithSchedule,
@@ -943,7 +944,7 @@ function AssetDetailDialog({
             <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
               <div>
                 <div className="text-xs text-muted-foreground mb-0.5">Status</div>
-                <StatusBadge status={data.status} />
+                <StatusBadge status={assetStatusLabel(data)} />
               </div>
               <div>
                 <div className="text-xs text-muted-foreground mb-0.5 flex items-center gap-1">
@@ -1250,7 +1251,7 @@ export default function AssetsPage() {
           a.tag,
           a.category,
           a.area,
-          a.status,
+          assetStatusLabel(a),
           a.description,
           a.maintenance_schedule?.name,
           a.is_rental ? `rental ${a.rental_vendor ?? ""}` : null,
@@ -1506,7 +1507,7 @@ export default function AssetsPage() {
                   </td>
                   <td className="px-3 py-2.5">{a.category}</td>
                   <td className="px-3 py-2.5">
-                    <StatusBadge status={a.status} />
+                    <StatusBadge status={assetStatusLabel(a)} />
                   </td>
                   <td className="px-3 py-2.5">
                     <span className="flex items-center gap-1.5">

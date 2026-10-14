@@ -14,7 +14,7 @@ import {
 import * as XLSX from "xlsx";
 import { registerForecastRoutes } from "./forecast";
 import { registerRentalRoutes, stripRentalMoney } from "./rentals";
-import { AREAS, isLiveJobStatus } from "@shared/schema";
+import { AREAS, isLiveJobStatus, assetStatusFor } from "@shared/schema";
 import { computeManualBilling, publicBilling, recordRateChange } from "./manualBilling";
 import {
   createUserSchema,
@@ -3551,6 +3551,8 @@ export async function registerRoutes(
       const insert: any = { ...parsed.data, run_hours: runHours };
       const rentalErr = applyRentalRules(insert, null);
       if (rentalErr) return res.status(400).json({ message: rentalErr });
+      // Only "On Job" / "Available" (new assets aren't on a job yet).
+      insert.status = assetStatusFor(insert.job_id ?? null, insert.status);
       // Interval only applies to run-hour assets; otherwise let the DB default stand.
       if (!tracksRunHours(parsed.data.category)) delete insert.service_hours_interval;
       const { data, error } = await client
@@ -3633,6 +3635,13 @@ export async function registerRoutes(
       // Rental rules (return date releases the unit and marks it Returned).
       const rentalErr = applyRentalRules(patch, asset);
       if (rentalErr) return res.status(400).json({ message: rentalErr });
+
+      // Status always follows the job link: "On Job" or "Available"
+      // (or "Returned" for a rental sent back to its vendor).
+      const nextJobId = "job_id" in patch ? patch.job_id : asset.job_id;
+      const statusBase = patch.status !== undefined ? patch.status : asset.status;
+      if ("job_id" in patch || patch.status !== undefined || asset.status !== assetStatusFor(nextJobId, statusBase))
+        patch.status = assetStatusFor(nextJobId, statusBase);
 
       const { data, error } = await client
         .from("assets")

@@ -1,6 +1,6 @@
 import { useAuth } from "@/lib/auth";
 import { RentalBadge } from "@/components/Rental";
-import { ROLE_LABELS, AREAS, tracksRunHours, isLiveJobStatus } from "@shared/schema";
+import { ROLE_LABELS, AREAS, tracksRunHours, isLiveJobStatus, assetStatusLabel } from "@shared/schema";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import type {
@@ -381,7 +381,7 @@ function FieldTechDashboard({ profile }: { profile: Profile }) {
                       <td className="px-4 py-2 text-muted-foreground">
                         {a.category}
                       </td>
-                      <td className="px-4 py-2">{a.status}</td>
+                      <td className="px-4 py-2">{assetStatusLabel(a)}</td>
                     </tr>
                   ))}
                 </tbody>

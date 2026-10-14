@@ -714,6 +714,12 @@ var centrifugeSlotField = z.union([
     message: "Centrifuge slot must be 1, 2, 3, or 4"
   })
 ]).optional();
+var RETURNED_RENTAL_STATUS = "Returned";
+function assetStatusFor(jobId, current) {
+  if (jobId) return "On Job";
+  if (current === RETURNED_RENTAL_STATUS) return RETURNED_RENTAL_STATUS;
+  return "Available";
+}
 var createAssetSchema = z.object({
   tag: z.string().min(1),
   category: z.enum(CATEGORIES),
@@ -4386,6 +4392,7 @@ async function registerRoutes(httpServer, app) {
       const insert = { ...parsed.data, run_hours: runHours };
       const rentalErr = applyRentalRules(insert, null);
       if (rentalErr) return res.status(400).json({ message: rentalErr });
+      insert.status = assetStatusFor(insert.job_id ?? null, insert.status);
       if (!tracksRunHours(parsed.data.category)) delete insert.service_hours_interval;
       const { data, error } = await client2.from("assets").insert(insert).select().single();
       if (error) return res.status(400).json({ message: error.message });
@@ -4425,6 +4432,10 @@ async function registerRoutes(httpServer, app) {
       if (!tracksRunHours(effectiveCategory)) delete patch.service_hours_interval;
       const rentalErr = applyRentalRules(patch, asset);
       if (rentalErr) return res.status(400).json({ message: rentalErr });
+      const nextJobId = "job_id" in patch ? patch.job_id : asset.job_id;
+      const statusBase = patch.status !== void 0 ? patch.status : asset.status;
+      if ("job_id" in patch || patch.status !== void 0 || asset.status !== assetStatusFor(nextJobId, statusBase))
+        patch.status = assetStatusFor(nextJobId, statusBase);
       const { data, error } = await client2.from("assets").update(patch).eq("id", req.params.id).select().single();
       if (error) {
         const dup = /duplicate|unique/i.test(error.message) && /tag/i.test(error.message);

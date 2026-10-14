@@ -229,7 +229,7 @@ export default function JobDetailPage() {
     mutationFn: async (assetId: string) => {
       const res = await apiRequest("PATCH", `/api/assets/${assetId}`, {
         job_id: id,
-        status: "Deployed",
+        status: "On Job",
         job_or_well: job?.job_number ?? null,
       });
       return res.json();

@@ -1151,6 +1151,19 @@ const centrifugeSlotField = z
   ])
   .optional();
 
+// Asset status is derived from the job link: on a job = "On Job", otherwise
+// "Available". The one exception is a rental unit sent back to its vendor,
+// which stays "Returned" so it drops out of the fleet lists.
+export const ASSET_STATUSES = ["On Job", "Available"] as const;
+export const RETURNED_RENTAL_STATUS = "Returned";
+export function assetStatusFor(jobId: string | null | undefined, current?: string | null): string {
+  if (jobId) return "On Job";
+  if (current === RETURNED_RENTAL_STATUS) return RETURNED_RENTAL_STATUS;
+  return "Available";
+}
+export const assetStatusLabel = (a: { job_id?: string | null; status?: string | null }) =>
+  assetStatusFor(a.job_id, a.status);
+
 export const createAssetSchema = z.object({
   tag: z.string().min(1),
   category: z.enum(CATEGORIES),
