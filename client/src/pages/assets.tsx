@@ -1188,7 +1188,6 @@ export default function AssetsPage() {
   };
   const showingSchedule = tab === "schedule" && canSchedule;
   // Admins see every area, so the schedule gets an area filter for them.
-  const [scheduleArea, setScheduleArea] = useState<string>("all");
 
   const { data: assets, isLoading } = useQuery<AssetWithSchedule[]>({
     queryKey: ["/api/assets"],
@@ -1318,8 +1317,8 @@ export default function AssetsPage() {
             </button>
           </div>
           {showingSchedule && isAdmin && (
-            <Select value={scheduleArea} onValueChange={setScheduleArea}>
-              <SelectTrigger className="h-9 w-[210px]" data-testid="select-schedule-area">
+            <Select value={areaFilter} onValueChange={setAreaFilter}>
+              <SelectTrigger className="h-9 w-[220px]" data-testid="select-schedule-area">
                 <MapPin className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
                 <SelectValue placeholder="All areas" />
               </SelectTrigger>
@@ -1337,7 +1336,7 @@ export default function AssetsPage() {
       )}
 
       {showingSchedule ? (
-        <CentrifugeScheduleView area={isAdmin ? scheduleArea : profile?.area ?? "all"} />
+        <CentrifugeScheduleView area={isAdmin ? areaFilter : profile?.area ?? "all"} />
       ) : (
       <>
       {/* Rental centrifuges: cost vs. earnings (Admins + Area Managers) */}

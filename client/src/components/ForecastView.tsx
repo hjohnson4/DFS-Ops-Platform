@@ -465,7 +465,7 @@ function ScheduleCard({
                   {b.category}
                 </span>
                 <span className="text-xs font-normal text-muted-foreground">
-                  {searching ? `${rows.length} of ${b.rows.length} units` : `${b.rows.length} units`}
+                  {searching ? `${rows.length} of ${b.rows.length} units` : `${b.rows.length} unit${b.rows.length === 1 ? "" : "s"}`}
                   {!isOpen && " · click to show"}
                 </span>
               </button>
