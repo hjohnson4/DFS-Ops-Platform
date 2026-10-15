@@ -628,6 +628,71 @@ export interface LineItem {
   quantity: number;
   unit_cost: number;
   total: number; // quantity * unit_cost
+  // Optional per-line context (added with the ticket workflow). Older tickets
+  // have none of these and still render as plain lines.
+  start_date?: string | null; // first day this line covers (yyyy-mm-dd)
+  end_date?: string | null; // last day; null/same = one day
+  well_name?: string | null; // well this line is billed to
+  section?: string | null; // section heading the line is grouped under
+}
+
+// Field ticket lifecycle: an Area Manager/Admin builds it while Open, closes it
+// when the work is all on it, and an Admin approves it.
+export const FIELD_TICKET_STATUSES = ["open", "closed", "approved"] as const;
+export type FieldTicketStatus = (typeof FIELD_TICKET_STATUSES)[number];
+export const FIELD_TICKET_STATUS_LABEL: Record<FieldTicketStatus, string> = {
+  open: "Open",
+  closed: "Closed",
+  approved: "Approved",
+};
+export const FIELD_TICKET_TYPES = ["service", "delivery"] as const;
+export type FieldTicketType = (typeof FIELD_TICKET_TYPES)[number];
+export const FIELD_TICKET_TYPE_LABEL: Record<FieldTicketType, string> = {
+  service: "Service ticket",
+  delivery: "Delivery ticket",
+};
+
+// One entry in a ticket's history log.
+export interface TicketHistoryEntry {
+  at: string; // ISO timestamp
+  by: string | null; // actor name
+  role?: string | null;
+  action: string; // "Opened", "Saved", "Closed", "Reopened", "Approved", ...
+  note?: string | null;
+}
+
+// Number of calendar days a line covers (inclusive), or null without dates.
+export function lineDays(start?: string | null, end?: string | null): number | null {
+  const parse = (d?: string | null) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d ?? ""));
+    return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+  };
+  const a = parse(start);
+  if (a == null) return null;
+  const b = parse(end) ?? a;
+  if (b < a) return null;
+  return Math.round((b - a) / 86400000) + 1;
+}
+
+// Normalized well key for matching report wells to ticket lines.
+export function wellKey(w: string | null | undefined): string {
+  return String(w ?? "").toUpperCase().replace(/\s+/g, " ").trim();
+}
+
+// What's still missing before a ticket can be closed (empty = ready).
+export function ticketCloseProblems(t: {
+  ticket_type?: string | null;
+  well_name?: string | null;
+  line_items?: LineItem[] | null;
+}): string[] {
+  const out: string[] = [];
+  const items = t.line_items ?? [];
+  if (!t.ticket_type) out.push("Pick the ticket type (Service or Delivery).");
+  if (items.length === 0) out.push("Add at least one line.");
+  if (items.some((li) => !li.start_date)) out.push("Every line needs its dates.");
+  if (items.some((li) => !(li.well_name || t.well_name)))
+    out.push("Every line needs a well.");
+  return out;
 }
 
 // A field ticket records billable field work performed on a job.
@@ -647,6 +712,16 @@ export interface FieldTicket {
   comments: string | null;
   created_by: string | null;
   created_at: string;
+  // Workflow (db/field-ticket-workflow.sql). Missing on older databases; the
+  // server fills status = "open" and history = [] in that case.
+  status: FieldTicketStatus;
+  ticket_type: FieldTicketType | null;
+  ordered_by: string | null;
+  closed_at: string | null;
+  closed_by: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  history: TicketHistoryEntry[];
 }
 
 // Human label for a ticket's work dates: "Oct 1, 2026" for one day, or
@@ -673,6 +748,26 @@ export function workDatesLabel(
   return `${left} – ${full(b)} (${days} days)`;
 }
 
+// Ticket work dates. With dated lines the day count is the distinct days the
+// lines cover (gaps between sections aren't counted); otherwise it's the span.
+export function ticketDatesLabel(t: {
+  ticket_date: string | null | undefined;
+  ticket_end_date?: string | null;
+  line_items?: LineItem[] | null;
+}): string {
+  const dated = (t.line_items ?? []).filter((l) => l.start_date);
+  if (dated.length === 0) return workDatesLabel(t.ticket_date, t.ticket_end_date);
+  const days = new Set<string>();
+  for (const l of dated) {
+    const a = Date.UTC(+l.start_date!.slice(0, 4), +l.start_date!.slice(5, 7) - 1, +l.start_date!.slice(8, 10));
+    const n = lineDays(l.start_date, l.end_date) ?? 1;
+    for (let i = 0; i < n; i++) days.add(new Date(a + i * 86400000).toISOString().slice(0, 10));
+  }
+  const sorted = Array.from(days).sort();
+  const span = workDatesLabel(sorted[0], sorted[sorted.length - 1]).replace(/ \(\d+ days\)$/, "");
+  return sorted.length > 1 ? `${span} (${sorted.length} days)` : span;
+}
+
 // Sum of a set of line-item totals (the computed ticket subtotal).
 export function lineItemsTotal(items: LineItem[] | null | undefined): number {
   return (items ?? []).reduce((s, li) => s + (Number(li.total) || 0), 0);
@@ -691,6 +786,21 @@ export interface FieldTicketWithJob extends FieldTicket {
   customer_phone: string | null;
   customer_email: string | null;
   created_by_name: string | null;
+  closed_by_name?: string | null;
+  approved_by_name?: string | null;
+}
+
+// One signed-off report day on a job, and whether a ticket line covers it.
+export interface TicketCoverageDay {
+  well_name: string;
+  date: string; // yyyy-mm-dd
+  rate: number | null; // day rate from the report (AL57) or the job
+  tickets: number[]; // ticket numbers whose lines cover this day
+}
+export interface TicketCoverage {
+  days: TicketCoverageDay[];
+  uncovered: number; // report days on no ticket
+  doubled: number; // report days on more than one ticket
 }
 
 // ---- Field daily report + JSA shared bits ----------------------------------
@@ -1543,15 +1653,28 @@ const amountField = z
 
 // One line item as accepted from the client. Total is recomputed server-side
 // from quantity × unit_cost, so a client-sent total is advisory only.
+const ymd = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be yyyy-mm-dd")
+  .nullable()
+  .optional();
 export const lineItemSchema = z.object({
   description: z.string().min(1),
   quantity: z.coerce.number().nonnegative(),
   unit_cost: z.coerce.number().nonnegative(),
+  start_date: ymd,
+  end_date: ymd,
+  well_name: z.string().nullable().optional(),
+  section: z.string().nullable().optional(),
 });
 export type LineItemInput = z.infer<typeof lineItemSchema>;
 
 export const createFieldTicketSchema = z.object({
-  ticket_date: z.string().min(1), // start of work
+  // Optional hand-entered ticket number; blank = next automatic number.
+  ticket_number: z.coerce.number().int().positive().nullable().optional(),
+  ticket_type: z.enum(FIELD_TICKET_TYPES).nullable().optional(),
+  ordered_by: z.string().nullable().optional(),
+  ticket_date: z.string().min(1), // start of work (derived from line dates when they have them)
   ticket_end_date: z.string().nullable().optional(), // end of work (null = one day)
   county: z.string().nullable().optional(),
   well_name: z.string().nullable().optional(),

@@ -670,6 +670,20 @@ function hoursServiceStatusFor(hoursSince, hasService, interval = SERVICE_INTERV
   else if (hoursSince >= interval * (1 - SERVICE_SOON_FRACTION)) state = "Soon";
   return { hoursSince, interval, state };
 }
+var FIELD_TICKET_TYPES = ["service", "delivery"];
+function wellKey(w) {
+  return String(w ?? "").toUpperCase().replace(/\s+/g, " ").trim();
+}
+function ticketCloseProblems(t) {
+  const out = [];
+  const items = t.line_items ?? [];
+  if (!t.ticket_type) out.push("Pick the ticket type (Service or Delivery).");
+  if (items.length === 0) out.push("Add at least one line.");
+  if (items.some((li) => !li.start_date)) out.push("Every line needs its dates.");
+  if (items.some((li) => !(li.well_name || t.well_name)))
+    out.push("Every line needs a well.");
+  return out;
+}
 var strongPassword = z.string().min(10, "Password must be at least 10 characters").regex(/[A-Za-z]/, "Password must include a letter").regex(/[0-9]/, "Password must include a number");
 var createUserSchema = z.object({
   email: z.string().email(),
@@ -914,14 +928,23 @@ var amountField = z.union([
   z.literal("").transform(() => null),
   z.coerce.number().nonnegative()
 ]).optional();
+var ymd = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Dates must be yyyy-mm-dd").nullable().optional();
 var lineItemSchema = z.object({
   description: z.string().min(1),
   quantity: z.coerce.number().nonnegative(),
-  unit_cost: z.coerce.number().nonnegative()
+  unit_cost: z.coerce.number().nonnegative(),
+  start_date: ymd,
+  end_date: ymd,
+  well_name: z.string().nullable().optional(),
+  section: z.string().nullable().optional()
 });
 var createFieldTicketSchema = z.object({
+  // Optional hand-entered ticket number; blank = next automatic number.
+  ticket_number: z.coerce.number().int().positive().nullable().optional(),
+  ticket_type: z.enum(FIELD_TICKET_TYPES).nullable().optional(),
+  ordered_by: z.string().nullable().optional(),
   ticket_date: z.string().min(1),
-  // start of work
+  // start of work (derived from line dates when they have them)
   ticket_end_date: z.string().nullable().optional(),
   // end of work (null = one day)
   county: z.string().nullable().optional(),
@@ -1671,6 +1694,378 @@ function registerForecastRoutes(app) {
   );
 }
 
+// server/fieldTickets.ts
+var db2 = () => supabaseAdmin || supabaseAnon;
+var MANAGE = ["admin", "area"];
+var VIEW = ["admin", "area", "super"];
+var TICKET_SELECT = "*, job:jobs!field_tickets_job_id_fkey(job_number,area,status,customer_id,customer:customers(name,primary_contact,phone,email)), creator:profiles!field_tickets_created_by_fkey(name)";
+var WORKFLOW_SQL_HINT = 'Field ticket workflow needs a one-time database update: run "Field ticket workflow.sql" in the Supabase SQL Editor.';
+function ticketDbError(msg) {
+  if (/ticket_end_date/.test(msg))
+    return "Date ranges need a one-time database update (db/field-ticket-date-range.sql).";
+  if (/(status|ticket_type|ordered_by|closed_at|closed_by|approved_at|approved_by|history)/.test(msg) && /(column|schema cache)/i.test(msg))
+    return WORKFLOW_SQL_HINT;
+  if (/field_tickets_ticket_number_key|duplicate key/.test(msg))
+    return "That ticket number is already used. Pick another number.";
+  if (/field_ticket_next_number|set_field_ticket_next_number/.test(msg) && /function/i.test(msg))
+    return WORKFLOW_SQL_HINT;
+  return msg;
+}
+var round2 = (n) => Math.round(n * 100) / 100;
+var clean = (s) => {
+  const t = String(s ?? "").trim();
+  return t === "" ? null : t;
+};
+function normalizeLines(lines) {
+  return (lines ?? []).map((li) => {
+    const start = clean(li.start_date);
+    let end = clean(li.end_date);
+    if (!start) end = null;
+    else if (end && end <= start) end = null;
+    return {
+      description: li.description.trim(),
+      quantity: li.quantity,
+      unit_cost: li.unit_cost,
+      total: round2(li.quantity * li.unit_cost),
+      start_date: start,
+      end_date: end,
+      well_name: clean(li.well_name),
+      section: clean(li.section)
+    };
+  });
+}
+function datesFromLines(lines) {
+  const starts = lines.map((l) => l.start_date).filter(Boolean);
+  if (starts.length === 0) return null;
+  const ends = lines.filter((l) => l.start_date).map((l) => l.end_date || l.start_date);
+  const start = starts.sort()[0];
+  const end = ends.sort()[ends.length - 1];
+  return { start, end: end > start ? end : null };
+}
+function wellsFromLines(lines) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const l of lines) {
+    const k = wellKey(l.well_name);
+    if (k && !seen.has(k)) seen.set(k, String(l.well_name));
+  }
+  return seen.size ? Array.from(seen.values()).join(", ") : null;
+}
+function entry(req, action, note) {
+  return {
+    at: (/* @__PURE__ */ new Date()).toISOString(),
+    by: req.profile?.name ?? null,
+    role: req.profile?.role ?? null,
+    action,
+    note: note ?? null
+  };
+}
+async function namesFor(ids) {
+  const out = /* @__PURE__ */ new Map();
+  const uniq = Array.from(new Set(ids.filter(Boolean)));
+  if (uniq.length === 0) return out;
+  const { data } = await db2().from("profiles").select("id,name").in("id", uniq);
+  (data || []).forEach((p) => out.set(p.id, p.name));
+  return out;
+}
+async function flatten(rows) {
+  const names = await namesFor(
+    rows.flatMap((r) => [r.closed_by, r.approved_by]).filter(Boolean)
+  );
+  return rows.map((t) => {
+    const { job, creator, ...rest } = t;
+    return {
+      ...rest,
+      status: rest.status ?? "open",
+      ticket_type: rest.ticket_type ?? null,
+      ordered_by: rest.ordered_by ?? null,
+      closed_at: rest.closed_at ?? null,
+      closed_by: rest.closed_by ?? null,
+      approved_at: rest.approved_at ?? null,
+      approved_by: rest.approved_by ?? null,
+      history: Array.isArray(rest.history) ? rest.history : [],
+      line_items: Array.isArray(rest.line_items) ? rest.line_items : [],
+      job_number: job?.job_number ?? "",
+      area: job?.area ?? null,
+      job_status: job?.status ?? null,
+      customer_id: job?.customer_id ?? null,
+      customer_name: job?.customer?.name ?? "",
+      customer_contact: job?.customer?.primary_contact ?? null,
+      customer_phone: job?.customer?.phone ?? null,
+      customer_email: job?.customer?.email ?? null,
+      created_by_name: creator?.name ?? null,
+      closed_by_name: rest.closed_by ? names.get(rest.closed_by) ?? null : null,
+      approved_by_name: rest.approved_by ? names.get(rest.approved_by) ?? null : null
+    };
+  });
+}
+async function loadOne(id) {
+  const { data } = await db2().from("field_tickets").select(TICKET_SELECT).eq("id", id).single();
+  if (!data) return null;
+  return (await flatten([data]))[0];
+}
+async function loadForWrite(req, res, needLive) {
+  const { data: ticket } = await db2().from("field_tickets").select("*").eq("id", req.params.id).single();
+  if (!ticket) {
+    res.status(404).json({ message: "Field ticket not found" });
+    return null;
+  }
+  const { data: job } = await db2().from("jobs").select("id,area,status").eq("id", ticket.job_id).single();
+  if (!job) {
+    res.status(404).json({ message: "Job not found" });
+    return null;
+  }
+  if (req.profile.role !== "admin" && job.area !== req.profile.area) {
+    res.status(403).json({ message: "Outside your area" });
+    return null;
+  }
+  if (needLive && !isLiveJobStatus(job.status)) {
+    res.status(400).json({ message: "This job isn't active, so its tickets can't be changed." });
+    return null;
+  }
+  const status = ticket.status ?? "open";
+  const history = Array.isArray(ticket.history) ? ticket.history : [];
+  return { ticket, job, status, history };
+}
+async function insertTicket(row, explicitNumber) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const { data, error } = await db2().from("field_tickets").insert(row).select().single();
+    if (!error) return { data, error: null };
+    const dup = /field_tickets_ticket_number_key|duplicate key/.test(error.message);
+    if (!dup || explicitNumber != null) return { data: null, error };
+  }
+  return { data: null, error: { message: "Couldn't find a free ticket number. Try again." } };
+}
+function registerFieldTicketRoutes(app) {
+  app.get("/api/field-tickets", requireAuth, requireRole(...VIEW), async (req, res) => {
+    const scope = areaScopeOf(req.profile);
+    const { data, error } = await db2().from("field_tickets").select(TICKET_SELECT).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
+    if (error) return res.status(500).json({ message: error.message });
+    let rows = await flatten(data || []);
+    if (scope) rows = rows.filter((r) => r.area === scope);
+    const status = String(req.query.status || "").toLowerCase();
+    if (status === "active") rows = rows.filter((r) => isLiveJobStatus(r.job_status));
+    else if (status === "past") rows = rows.filter((r) => !isLiveJobStatus(r.job_status));
+    res.json(rows);
+  });
+  app.get("/api/field-tickets/next-number", requireAuth, requireRole(...MANAGE), async (_req, res) => {
+    const { data, error } = await db2().rpc("field_ticket_next_number");
+    if (error) {
+      const { data: top } = await db2().from("field_tickets").select("ticket_number").order("ticket_number", { ascending: false }).limit(1);
+      return res.json({ next: (top?.[0]?.ticket_number ?? 0) + 1, configurable: false });
+    }
+    res.json({ next: Number(data), configurable: true });
+  });
+  app.post("/api/field-tickets/next-number", requireAuth, requireRole("admin"), async (req, res) => {
+    const n = Number(req.body?.next);
+    if (!Number.isInteger(n) || n < 1)
+      return res.status(400).json({ message: "Enter a whole number of 1 or more." });
+    const { data, error } = await db2().rpc("set_field_ticket_next_number", { n });
+    if (error) return res.status(400).json({ message: ticketDbError(error.message) });
+    res.json({ next: Number(data) });
+  });
+  app.get("/api/jobs/:id/field-tickets", requireAuth, requireRole(...VIEW), async (req, res) => {
+    const scope = areaScopeOf(req.profile);
+    const { data: job } = await db2().from("jobs").select("area").eq("id", req.params.id).single();
+    if (!job || scope && job.area !== scope)
+      return res.status(404).json({ message: "Job not found" });
+    const { data, error } = await db2().from("field_tickets").select(TICKET_SELECT).eq("job_id", req.params.id).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
+    if (error) return res.status(500).json({ message: error.message });
+    res.json(await flatten(data || []));
+  });
+  app.get("/api/jobs/:id/ticket-coverage", requireAuth, requireRole(...VIEW), async (req, res) => {
+    const scope = areaScopeOf(req.profile);
+    const { data: job } = await db2().from("jobs").select("id,area,day_rate").eq("id", req.params.id).single();
+    if (!job || scope && job.area !== scope)
+      return res.status(404).json({ message: "Job not found" });
+    const [{ data: reports, error: rErr }, { data: tickets, error: tErr }] = await Promise.all([
+      db2().from("daily_reports").select("report_date,well_name,kpis,status").eq("job_id", job.id).eq("status", "Signed off"),
+      db2().from("field_tickets").select("ticket_number,well_name,line_items").eq("job_id", job.id)
+    ]);
+    if (rErr) return res.status(500).json({ message: rErr.message });
+    if (tErr) return res.status(500).json({ message: tErr.message });
+    const days = /* @__PURE__ */ new Map();
+    for (const r of reports || []) {
+      const date = String(r.report_date ?? "").slice(0, 10);
+      const well = String(r.well_name ?? "").trim();
+      if (!date || !well) continue;
+      const k = `${wellKey(well)}|${date}`;
+      const rateRaw = Number(r.kpis?.day_rate);
+      const rate = Number.isFinite(rateRaw) && rateRaw > 0 ? rateRaw : job.day_rate != null ? Number(job.day_rate) : null;
+      if (!days.has(k)) days.set(k, { well_name: well, date, rate, tickets: [] });
+    }
+    for (const t of tickets || []) {
+      const lines = Array.isArray(t.line_items) ? t.line_items : [];
+      for (const l of lines) {
+        if (!l.start_date) continue;
+        const wk = wellKey(l.well_name || t.well_name);
+        if (!wk) continue;
+        const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
+        days.forEach((d, key) => {
+          if (key.startsWith(wk + "|") && d.date >= l.start_date && d.date <= end) {
+            if (!d.tickets.includes(t.ticket_number)) d.tickets.push(t.ticket_number);
+          }
+        });
+      }
+    }
+    const list = Array.from(days.values()).sort(
+      (a, b) => a.date === b.date ? a.well_name.localeCompare(b.well_name) : a.date.localeCompare(b.date)
+    );
+    res.json({
+      days: list,
+      uncovered: list.filter((d) => d.tickets.length === 0).length,
+      doubled: list.filter((d) => d.tickets.length > 1).length
+    });
+  });
+  app.post("/api/jobs/:id/field-tickets", requireAuth, requireRole(...MANAGE), async (req, res) => {
+    const parsed = createFieldTicketSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const p = parsed.data;
+    const { data: job } = await db2().from("jobs").select("area,status").eq("id", req.params.id).single();
+    if (!job) return res.status(404).json({ message: "Job not found" });
+    if (req.profile.role !== "admin" && job.area !== req.profile.area)
+      return res.status(403).json({ message: "Outside your area" });
+    if (!isLiveJobStatus(job.status))
+      return res.status(400).json({ message: "Field tickets can only be created for active jobs." });
+    const lines = normalizeLines(p.line_items);
+    const lineSum = round2(lines.reduce((s, l) => s + l.total, 0));
+    const fromLines = datesFromLines(lines);
+    const start = fromLines?.start ?? p.ticket_date;
+    let end = fromLines ? fromLines.end : clean(p.ticket_end_date);
+    if (end && end < start) return res.status(400).json({ message: "End date can't be before the start date." });
+    if (end === start) end = null;
+    const row = {
+      job_id: req.params.id,
+      ticket_date: start,
+      ...end ? { ticket_end_date: end } : {},
+      county: clean(p.county),
+      well_name: wellsFromLines(lines) ?? clean(p.well_name),
+      po_afe: clean(p.po_afe),
+      description: clean(p.description),
+      line_items: lines,
+      asset_ids: p.asset_ids ?? [],
+      amount: p.amount != null ? p.amount : lines.length ? lineSum : null,
+      comments: clean(p.comments),
+      created_by: req.profile.id,
+      status: "open",
+      ticket_type: p.ticket_type ?? null,
+      ordered_by: clean(p.ordered_by),
+      history: [entry(req, "Opened")]
+    };
+    if (p.ticket_number != null) row.ticket_number = p.ticket_number;
+    const { data, error } = await insertTicket(row, p.ticket_number ?? null);
+    if (error) return res.status(400).json({ message: ticketDbError(error.message) });
+    res.status(201).json(await loadOne(data.id));
+  });
+  app.patch("/api/field-tickets/:id", requireAuth, requireRole(...MANAGE), async (req, res) => {
+    const parsed = updateFieldTicketSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const loaded = await loadForWrite(req, res, true);
+    if (!loaded) return;
+    if (loaded.status !== "open")
+      return res.status(400).json({ message: "This ticket is closed. Reopen it to make changes." });
+    const p = parsed.data;
+    const t = loaded.ticket;
+    const patch = {};
+    if (p.ticket_number != null && p.ticket_number !== t.ticket_number) patch.ticket_number = p.ticket_number;
+    if (p.ticket_type !== void 0) patch.ticket_type = p.ticket_type ?? null;
+    if (p.ordered_by !== void 0) patch.ordered_by = clean(p.ordered_by);
+    if (p.county !== void 0) patch.county = clean(p.county);
+    if (p.po_afe !== void 0) patch.po_afe = clean(p.po_afe);
+    if (p.description !== void 0) patch.description = clean(p.description);
+    if (p.comments !== void 0) patch.comments = clean(p.comments);
+    if (p.asset_ids !== void 0) patch.asset_ids = p.asset_ids ?? [];
+    let lines = null;
+    if (p.line_items !== void 0) {
+      lines = normalizeLines(p.line_items);
+      patch.line_items = lines;
+    }
+    const effLines = lines ?? (Array.isArray(t.line_items) ? t.line_items : []);
+    const fromLines = datesFromLines(effLines);
+    if (fromLines) {
+      patch.ticket_date = fromLines.start;
+      if ((t.ticket_end_date ?? null) !== fromLines.end) patch.ticket_end_date = fromLines.end;
+    } else if (p.ticket_date !== void 0 || p.ticket_end_date !== void 0) {
+      const start = p.ticket_date ?? t.ticket_date;
+      let end = p.ticket_end_date !== void 0 ? clean(p.ticket_end_date) : t.ticket_end_date ?? null;
+      if (end && end < start) return res.status(400).json({ message: "End date can't be before the start date." });
+      if (end === start) end = null;
+      patch.ticket_date = start;
+      if ((t.ticket_end_date ?? null) !== end) patch.ticket_end_date = end;
+    }
+    const lineWells = wellsFromLines(effLines);
+    if (lineWells) patch.well_name = lineWells;
+    else if (p.well_name !== void 0) patch.well_name = clean(p.well_name);
+    if (p.amount !== void 0) patch.amount = p.amount ?? null;
+    else if (lines) patch.amount = lines.length ? round2(lines.reduce((s, l) => s + l.total, 0)) : null;
+    patch.history = [...loaded.history, entry(req, "Saved")];
+    const { error } = await db2().from("field_tickets").update(patch).eq("id", t.id);
+    if (error) return res.status(400).json({ message: ticketDbError(error.message) });
+    res.json(await loadOne(t.id));
+  });
+  app.post("/api/field-tickets/:id/close", requireAuth, requireRole(...MANAGE), async (req, res) => {
+    const loaded = await loadForWrite(req, res, false);
+    if (!loaded) return;
+    if (loaded.status !== "open") return res.status(400).json({ message: "Only an open ticket can be closed." });
+    const problems = ticketCloseProblems({
+      ticket_type: loaded.ticket.ticket_type,
+      well_name: loaded.ticket.well_name,
+      line_items: loaded.ticket.line_items
+    });
+    if (problems.length) return res.status(400).json({ message: problems.join(" "), problems });
+    const { error } = await db2().from("field_tickets").update({
+      status: "closed",
+      closed_at: (/* @__PURE__ */ new Date()).toISOString(),
+      closed_by: req.profile.id,
+      history: [...loaded.history, entry(req, "Closed", clean(req.body?.note))]
+    }).eq("id", loaded.ticket.id);
+    if (error) return res.status(400).json({ message: ticketDbError(error.message) });
+    res.json(await loadOne(loaded.ticket.id));
+  });
+  app.post("/api/field-tickets/:id/approve", requireAuth, requireRole("admin"), async (req, res) => {
+    const loaded = await loadForWrite(req, res, false);
+    if (!loaded) return;
+    if (loaded.status !== "closed")
+      return res.status(400).json({ message: "Close the ticket before approving it." });
+    const { error } = await db2().from("field_tickets").update({
+      status: "approved",
+      approved_at: (/* @__PURE__ */ new Date()).toISOString(),
+      approved_by: req.profile.id,
+      history: [...loaded.history, entry(req, "Approved", clean(req.body?.note))]
+    }).eq("id", loaded.ticket.id);
+    if (error) return res.status(400).json({ message: ticketDbError(error.message) });
+    res.json(await loadOne(loaded.ticket.id));
+  });
+  app.post("/api/field-tickets/:id/reopen", requireAuth, requireRole(...MANAGE), async (req, res) => {
+    const loaded = await loadForWrite(req, res, true);
+    if (!loaded) return;
+    if (loaded.status === "open") return res.status(400).json({ message: "This ticket is already open." });
+    if (loaded.status === "approved" && req.profile.role !== "admin")
+      return res.status(403).json({ message: "Only an Admin can reopen an approved ticket." });
+    const { error } = await db2().from("field_tickets").update({
+      status: "open",
+      closed_at: null,
+      closed_by: null,
+      approved_at: null,
+      approved_by: null,
+      history: [
+        ...loaded.history,
+        entry(req, loaded.status === "approved" ? "Reopened (approval removed)" : "Reopened", clean(req.body?.note))
+      ]
+    }).eq("id", loaded.ticket.id);
+    if (error) return res.status(400).json({ message: ticketDbError(error.message) });
+    res.json(await loadOne(loaded.ticket.id));
+  });
+  app.delete("/api/field-tickets/:id", requireAuth, requireRole(...MANAGE), async (req, res) => {
+    const loaded = await loadForWrite(req, res, true);
+    if (!loaded) return;
+    if (loaded.status === "approved" && req.profile.role !== "admin")
+      return res.status(403).json({ message: "Only an Admin can delete an approved ticket." });
+    const { error } = await db2().from("field_tickets").delete().eq("id", loaded.ticket.id);
+    if (error) return res.status(400).json({ message: error.message });
+    res.status(204).end();
+  });
+}
+
 // server/manualBilling.ts
 var client = () => supabaseAdmin || supabaseAnon;
 var BASE_EFFECTIVE_DATE = "2000-01-01";
@@ -1687,7 +2082,7 @@ function addDays(iso, n) {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
-function wellKey(s) {
+function wellKey2(s) {
   const base = (s ?? "").trim().toLowerCase().replace(/[\s-]+/g, " ");
   const m = base.match(/(\d+\s?[a-z]?)\s*$/);
   if (m) return `#${m[1].replace(/\s+/g, "")}`;
@@ -1742,7 +2137,7 @@ async function computeManualBilling(jobs) {
     );
     const segMap = /* @__PURE__ */ new Map();
     reports.forEach((r, i) => {
-      const k = wellKey(r.well);
+      const k = wellKey2(r.well);
       const g2 = segMap.get(k);
       if (!g2) segMap.set(k, { key: k, name: r.well, first: r.day, order: i, spud: r.spud, start: r.day });
       else {
@@ -1774,7 +2169,7 @@ async function computeManualBilling(jobs) {
     let missingRateDays = 0;
     const counted = /* @__PURE__ */ new Set();
     for (const r of reports) {
-      const k = wellKey(r.well);
+      const k = wellKey2(r.well);
       const seg = segMap.get(k);
       const wellStart = seg.spud ?? seg.first;
       if (r.day < wellStart) continue;
@@ -1795,7 +2190,7 @@ async function computeManualBilling(jobs) {
     for (const g2 of segs) wellDisplay.set(g2.key, g2.name || g2.key);
     const todayState = stateOn(today);
     const lastWell = reports.length ? reports[reports.length - 1].well || null : null;
-    const curKey = lastWell != null ? wellKey(lastWell) : null;
+    const curKey = lastWell != null ? wellKey2(lastWell) : null;
     const curSeg = curKey != null ? segMap.get(curKey) : void 0;
     const currentWell = curSeg?.name || lastWell;
     out.set(j.id, {
@@ -1851,7 +2246,7 @@ async function recordRateChange(before, after, by) {
 }
 
 // server/rentals.ts
-var db2 = () => supabaseAdmin || supabaseAnon;
+var db3 = () => supabaseAdmin || supabaseAnon;
 var RENTAL_MONEY_ROLES = ["admin", "area"];
 var canSeeRentalMoney = (role) => !!role && RENTAL_MONEY_ROLES.includes(role);
 var MONEY_FIELDS = ["rental_monthly_rate", "rental_notes"];
@@ -1876,11 +2271,11 @@ var num2 = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
-var round2 = (n) => Math.round(n * 100) / 100;
+var round22 = (n) => Math.round(n * 100) / 100;
 function computeRental(asset, stints, charges, today = todayCentral()) {
   const start = asset.rental_start;
   const monthly = num2(asset.rental_monthly_rate);
-  const one_time = round2(charges.reduce((s, c) => s + (num2(c.amount) ?? 0), 0));
+  const one_time = round22(charges.reduce((s, c) => s + (num2(c.amount) ?? 0), 0));
   if (!start) {
     return {
       through: null,
@@ -1891,7 +2286,7 @@ function computeRental(asset, stints, charges, today = todayCentral()) {
       one_time_charges: one_time,
       total_cost: one_time,
       earned: 0,
-      profit: round2(-one_time),
+      profit: round22(-one_time),
       on_rent: false,
       monthly_rate: monthly
     };
@@ -1917,9 +2312,9 @@ function computeRental(asset, stints, charges, today = todayCentral()) {
     }
     if (days > 3660) break;
   }
-  rent = round2(rent);
-  earned = round2(earned);
-  const total = round2(rent + one_time);
+  rent = round22(rent);
+  earned = round22(earned);
+  const total = round22(rent + one_time);
   return {
     through: end < start ? null : end,
     days_on_rent: end < start ? 0 : days,
@@ -1929,7 +2324,7 @@ function computeRental(asset, stints, charges, today = todayCentral()) {
     one_time_charges: one_time,
     total_cost: total,
     earned,
-    profit: round2(earned - total),
+    profit: round22(earned - total),
     on_rent: !asset.rental_end || asset.rental_end >= today,
     monthly_rate: monthly
   };
@@ -1938,7 +2333,7 @@ var missingSetup = (msg) => !!msg && /rental_|asset_job_stints|is_rental/.test(m
 var SETUP_MSG2 = "Rental tracking isn't set up yet. Run the rental centrifuges SQL in the Supabase SQL editor, then refresh.";
 async function loadRentalBits(assetIds) {
   if (!assetIds.length) return { stints: /* @__PURE__ */ new Map(), charges: /* @__PURE__ */ new Map() };
-  const client2 = db2();
+  const client2 = db3();
   const [{ data: st }, { data: ch }] = await Promise.all([
     client2.from("asset_job_stints").select("id, asset_id, job_id, day_rate, start_date, end_date, created_at, job:jobs(job_number)").in("asset_id", assetIds),
     client2.from("rental_charges").select("id, asset_id, charge_date, description, amount, created_by_name, created_at").in("asset_id", assetIds).order("charge_date", { ascending: true })
@@ -1952,7 +2347,7 @@ async function loadRentalBits(assetIds) {
 function registerRentalRoutes(app) {
   app.get("/api/rentals", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    let q = db2().from("assets").select(
+    let q = db3().from("assets").select(
       "id, tag, category, area, status, job_id, day_rate, is_rental, rental_vendor, rental_ref, rental_monthly_rate, rental_start, rental_end, rental_notes, job:jobs(id, job_number)"
     ).eq("is_rental", true).order("tag", { ascending: true });
     if (scope) q = q.eq("area", scope);
@@ -1981,11 +2376,11 @@ function registerRentalRoutes(app) {
     res.json({
       today,
       rentals: out,
-      totals: { total_cost: round2(t.total_cost), earned: round2(t.earned), profit: round2(t.profit), on_rent: t.on_rent, count: out.length }
+      totals: { total_cost: round22(t.total_cost), earned: round22(t.earned), profit: round22(t.profit), on_rent: t.on_rent, count: out.length }
     });
   });
   app.get("/api/assets/:id/rental", requireAuth, requireRole("admin", "area"), async (req, res) => {
-    const { data: a, error } = await db2().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
+    const { data: a, error } = await db3().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
     if (error) {
       if (missingSetup(error.message)) return res.status(409).json({ message: SETUP_MSG2, setup_required: true });
       return res.status(500).json({ message: error.message });
@@ -2016,12 +2411,12 @@ function registerRentalRoutes(app) {
     async (req, res) => {
       const parsed = createRentalChargeSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
-      const { data: a } = await db2().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
+      const { data: a } = await db3().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
       if (!a) return res.status(404).json({ message: "Asset not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && a.area !== scope) return res.status(403).json({ message: "Outside your area" });
       if (!a.is_rental) return res.status(400).json({ message: "This asset isn't marked as a rental" });
-      const { data, error } = await db2().from("rental_charges").insert({
+      const { data, error } = await db3().from("rental_charges").insert({
         asset_id: a.id,
         charge_date: parsed.data.charge_date,
         description: parsed.data.description,
@@ -2041,7 +2436,7 @@ function registerRentalRoutes(app) {
     const parsed = setStintStartSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
     const start = parsed.data.start_date;
-    const { data: st } = await db2().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
+    const { data: st } = await db3().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
     if (!st || !st.job_id) return res.status(404).json({ message: "Job record not found" });
     const a = st.asset || {};
     const scope = areaScopeOf(req.profile);
@@ -2054,7 +2449,7 @@ function registerRentalRoutes(app) {
       return res.status(400).json({
         message: `That's before this rental was received (${a.rental_start}). Change the received date on the asset first.`
       });
-    const { data: others } = await db2().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
+    const { data: others } = await db3().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
     const thisEnd = st.end_date || "9999-12-31";
     const clash = (others || []).find(
       (o) => o.job_id !== st.job_id && o.start_date <= thisEnd && (o.end_date == null || o.end_date >= start)
@@ -2063,16 +2458,16 @@ function registerRentalRoutes(app) {
       return res.status(400).json({
         message: `That overlaps the time this unit was on ${clash.job?.job_number ?? "another job"} (${clash.start_date} \u2192 ${clash.end_date ?? "now"}).`
       });
-    const { error } = await db2().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
+    const { error } = await db3().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
     if (error) return res.status(400).json({ message: error.message });
     res.json({ ok: true, start_date: start });
   });
   app.delete("/api/rental-charges/:id", requireAuth, requireRole("admin", "area"), async (req, res) => {
-    const { data: c } = await db2().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
+    const { data: c } = await db3().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
     if (!c) return res.status(404).json({ message: "Charge not found" });
     const scope = areaScopeOf(req.profile);
     if (scope && c.asset?.area !== scope) return res.status(403).json({ message: "Outside your area" });
-    const { error } = await db2().from("rental_charges").delete().eq("id", c.id);
+    const { error } = await db3().from("rental_charges").delete().eq("id", c.id);
     if (error) return res.status(400).json({ message: error.message });
     res.status(204).end();
   });
@@ -2117,7 +2512,7 @@ function hoursAfter(rows, afterDate) {
   }
   return Math.round(t * 100) / 100;
 }
-var round22 = (n) => Math.round(n * 100) / 100;
+var round23 = (n) => Math.round(n * 100) / 100;
 async function hoursSinceServiceFor(client2, assets) {
   const ids = assets.map((a) => a.id);
   const out = /* @__PURE__ */ new Map();
@@ -2134,7 +2529,7 @@ async function hoursSinceServiceFor(client2, assets) {
     else {
       const meter = Number(a.run_hours ?? 0) || 0;
       const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-      since = round22(Math.max(0, meter - base));
+      since = round23(Math.max(0, meter - base));
     }
     const st = hoursServiceStatusFor(since, !!lastService);
     out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
@@ -3168,7 +3563,7 @@ async function registerRoutes(httpServer, app) {
     const jobIds = await jobScopeOf(req.profile);
     if (jobIds && !jobIds.includes(job.id)) return res.status(404).json({ message: "Job not found" });
     const num3 = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? 0 : Number(v);
-    const wellKey2 = (w) => String(w ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+    const wellKey3 = (w) => String(w ?? "").trim().replace(/\s+/g, " ").toLowerCase();
     const log2 = [];
     let ready = true;
     for (let from = 0; ; from += 1e3) {
@@ -3201,7 +3596,7 @@ async function registerRoutes(httpServer, app) {
     }));
     const wells = /* @__PURE__ */ new Map();
     const getW = (name) => {
-      const k = wellKey2(name) || "(no well name)";
+      const k = wellKey3(name) || "(no well name)";
       let w = wells.get(k);
       if (!w) {
         w = { well_name: String(name ?? "").trim() || "(no well name)", first_date: null, last_date: null, by_asset: {}, total: 0, awaiting_hours: 0, uncredited_hours: 0 };
@@ -3221,7 +3616,7 @@ async function registerRoutes(httpServer, app) {
       w.total += h;
       touch(w, r.report_date);
     }
-    const dayKey = (r) => `${r.report_date ?? ""}|${wellKey2(r.well_name)}`;
+    const dayKey = (r) => `${r.report_date ?? ""}|${wellKey3(r.well_name)}`;
     const countedDays = new Set(reports.filter((r) => r.run_hours_applied).map(dayKey));
     const pendingSeen = /* @__PURE__ */ new Set();
     for (const r of reports) {
@@ -3722,182 +4117,7 @@ async function registerRoutes(httpServer, app) {
       res.json(data);
     }
   );
-  const flattenTicket = (t) => {
-    const { job, creator, ...rest } = t;
-    return {
-      ...rest,
-      line_items: Array.isArray(rest.line_items) ? rest.line_items : [],
-      job_number: job?.job_number ?? "",
-      area: job?.area ?? null,
-      job_status: job?.status ?? null,
-      customer_id: job?.customer_id ?? null,
-      customer_name: job?.customer?.name ?? "",
-      customer_contact: job?.customer?.primary_contact ?? null,
-      customer_phone: job?.customer?.phone ?? null,
-      customer_email: job?.customer?.email ?? null,
-      created_by_name: creator?.name ?? null
-    };
-  };
-  const TICKET_SELECT = "*, job:jobs!field_tickets_job_id_fkey(job_number,area,status,customer_id,customer:customers(name,primary_contact,phone,email)), creator:profiles!field_tickets_created_by_fkey(name)";
-  app.get("/api/field-tickets", requireAuth, async (req, res) => {
-    const scope = areaScopeOf(req.profile);
-    const jobIds = await jobScopeOf(req.profile);
-    const { data, error } = await supabaseAnon.from("field_tickets").select(TICKET_SELECT).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
-    if (error) return res.status(500).json({ message: error.message });
-    let rows = (data || []).map(flattenTicket);
-    if (scope) rows = rows.filter((r) => r.area === scope);
-    if (jobIds) rows = rows.filter((r) => jobIds.includes(r.job_id));
-    const status = String(req.query.status || "").toLowerCase();
-    if (status === "active") rows = rows.filter((r) => isLiveJobStatus(r.job_status));
-    else if (status === "past") rows = rows.filter((r) => !isLiveJobStatus(r.job_status));
-    res.json(rows);
-  });
-  app.get(
-    "/api/jobs/:id/field-tickets",
-    requireAuth,
-    async (req, res) => {
-      const scope = areaScopeOf(req.profile);
-      const { data: job } = await supabaseAnon.from("jobs").select("area").eq("id", req.params.id).single();
-      if (!job) return res.status(404).json({ message: "Job not found" });
-      if (scope && job.area !== scope)
-        return res.status(404).json({ message: "Job not found" });
-      const jobIds = await jobScopeOf(req.profile);
-      if (jobIds && !jobIds.includes(String(req.params.id)))
-        return res.status(404).json({ message: "Job not found" });
-      const { data, error } = await supabaseAnon.from("field_tickets").select(TICKET_SELECT).eq("job_id", req.params.id).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
-      if (error) return res.status(500).json({ message: error.message });
-      res.json((data || []).map(flattenTicket));
-    }
-  );
-  app.post(
-    "/api/jobs/:id/field-tickets",
-    requireAuth,
-    requireRole("admin", "area", "super"),
-    async (req, res) => {
-      const parsed = createFieldTicketSchema.safeParse(req.body);
-      if (!parsed.success)
-        return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("area,status").eq("id", req.params.id).single();
-      if (!job) return res.status(404).json({ message: "Job not found" });
-      if (req.profile.role !== "admin" && job.area !== req.profile.area)
-        return res.status(403).json({ message: "Outside your area" });
-      if (!isLiveJobStatus(job.status))
-        return res.status(400).json({ message: "Field tickets can only be created for active jobs." });
-      const lineItems = (parsed.data.line_items ?? []).map((li) => ({
-        description: li.description,
-        quantity: li.quantity,
-        unit_cost: li.unit_cost,
-        total: Math.round(li.quantity * li.unit_cost * 100) / 100
-      }));
-      const lineTotal = lineItems.reduce((s, li) => s + li.total, 0);
-      const amount = parsed.data.amount != null ? parsed.data.amount : lineItems.length > 0 ? Math.round(lineTotal * 100) / 100 : null;
-      const endDate = parsed.data.ticket_end_date || null;
-      if (endDate && endDate < parsed.data.ticket_date)
-        return res.status(400).json({ message: "End date can't be before the start date." });
-      const { data, error } = await client2.from("field_tickets").insert({
-        job_id: req.params.id,
-        ticket_date: parsed.data.ticket_date,
-        ...endDate && endDate !== parsed.data.ticket_date ? { ticket_end_date: endDate } : {},
-        county: parsed.data.county || null,
-        well_name: parsed.data.well_name || null,
-        po_afe: parsed.data.po_afe || null,
-        description: parsed.data.description || null,
-        line_items: lineItems,
-        asset_ids: parsed.data.asset_ids ?? [],
-        amount,
-        comments: parsed.data.comments || null,
-        created_by: req.profile.id
-      }).select().single();
-      if (error) return res.status(400).json({ message: ticketDbError(error.message) });
-      res.status(201).json(data);
-    }
-  );
-  function ticketDbError(msg) {
-    return /ticket_end_date/.test(msg) ? "Date ranges need a one-time database update (db/field-ticket-date-range.sql). One-day tickets still work." : msg;
-  }
-  const loadTicketForWrite = async (req, res) => {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: ticket } = await client2.from("field_tickets").select("*").eq("id", req.params.id).single();
-    if (!ticket) {
-      res.status(404).json({ message: "Field ticket not found" });
-      return null;
-    }
-    const { data: job } = await client2.from("jobs").select("area,status").eq("id", ticket.job_id).single();
-    if (!job) {
-      res.status(404).json({ message: "Job not found" });
-      return null;
-    }
-    if (req.profile.role !== "admin" && job.area !== req.profile.area) {
-      res.status(403).json({ message: "Outside your area" });
-      return null;
-    }
-    if (!isLiveJobStatus(job.status)) {
-      res.status(400).json({
-        message: "Field tickets can only be changed while the job is active."
-      });
-      return null;
-    }
-    return { ticket, job, client: client2 };
-  };
-  app.patch(
-    "/api/field-tickets/:id",
-    requireAuth,
-    requireRole("admin", "area", "super"),
-    async (req, res) => {
-      const parsed = updateFieldTicketSchema.safeParse(req.body);
-      if (!parsed.success)
-        return res.status(400).json({ message: parsed.error.errors[0].message });
-      const loaded = await loadTicketForWrite(req, res);
-      if (!loaded) return;
-      const p = parsed.data;
-      const patch = {};
-      if (p.ticket_date !== void 0) patch.ticket_date = p.ticket_date;
-      if (p.ticket_date !== void 0 || p.ticket_end_date !== void 0) {
-        const start = p.ticket_date ?? loaded.ticket.ticket_date;
-        const end = p.ticket_end_date !== void 0 ? p.ticket_end_date || null : loaded.ticket.ticket_end_date ?? null;
-        if (end && end < start)
-          return res.status(400).json({ message: "End date can't be before the start date." });
-        const newEnd = end && end !== start ? end : null;
-        if (newEnd !== (loaded.ticket.ticket_end_date ?? null))
-          patch.ticket_end_date = newEnd;
-      }
-      if (p.county !== void 0) patch.county = p.county || null;
-      if (p.well_name !== void 0) patch.well_name = p.well_name || null;
-      if (p.po_afe !== void 0) patch.po_afe = p.po_afe || null;
-      if (p.description !== void 0) patch.description = p.description || null;
-      if (p.comments !== void 0) patch.comments = p.comments || null;
-      if (p.asset_ids !== void 0) patch.asset_ids = p.asset_ids ?? [];
-      let newLineTotal = null;
-      if (p.line_items !== void 0) {
-        const lineItems = (p.line_items ?? []).map((li) => ({
-          description: li.description,
-          quantity: li.quantity,
-          unit_cost: li.unit_cost,
-          total: Math.round(li.quantity * li.unit_cost * 100) / 100
-        }));
-        patch.line_items = lineItems;
-        newLineTotal = lineItems.length > 0 ? Math.round(lineItems.reduce((s, li) => s + li.total, 0) * 100) / 100 : null;
-      }
-      if (p.amount !== void 0) patch.amount = p.amount ?? null;
-      else if (newLineTotal !== null) patch.amount = newLineTotal;
-      const { data, error } = await loaded.client.from("field_tickets").update(patch).eq("id", req.params.id).select().single();
-      if (error) return res.status(400).json({ message: ticketDbError(error.message) });
-      res.json(data);
-    }
-  );
-  app.delete(
-    "/api/field-tickets/:id",
-    requireAuth,
-    requireRole("admin", "area", "super"),
-    async (req, res) => {
-      const loaded = await loadTicketForWrite(req, res);
-      if (!loaded) return;
-      const { error } = await loaded.client.from("field_tickets").delete().eq("id", req.params.id);
-      if (error) return res.status(400).json({ message: error.message });
-      res.status(204).end();
-    }
-  );
+  registerFieldTicketRoutes(app);
   const FDR_TABLE = "daily_reports";
   const flattenFdr = (r) => {
     const { job, submitter, signer, ...rest } = r;
@@ -4687,10 +4907,10 @@ async function registerRoutes(httpServer, app) {
           } else {
             const meter = Number(a.run_hours ?? 0) || 0;
             const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-            since = round22(Math.max(0, meter - base));
+            since = round23(Math.max(0, meter - base));
           }
           const st = hoursServiceStatusFor(since, !!lastService);
-          const currentJobHours = assigned && log2.ready ? round22(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
+          const currentJobHours = assigned && log2.ready ? round23(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
@@ -4778,7 +4998,7 @@ async function registerRoutes(httpServer, app) {
       else {
         const meter = Number(a.run_hours ?? 0) || 0;
         const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-        since = round22(Math.max(0, meter - base));
+        since = round23(Math.max(0, meter - base));
       }
       const st = hoursServiceStatusFor(since, !!lastService);
       const jobsMap = /* @__PURE__ */ new Map();
@@ -4811,8 +5031,8 @@ async function registerRoutes(httpServer, app) {
       }
       const jobs = Array.from(jobsMap.values()).map(({ _wells, ...j }) => ({
         ...j,
-        hours: round22(j.hours),
-        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round22(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
+        hours: round23(j.hours),
+        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round23(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
       })).sort(
         (x, y) => Number(y.is_current) - Number(x.is_current) || String(y.wells[0]?.last_date ?? "").localeCompare(String(x.wells[0]?.last_date ?? ""))
       );
@@ -4833,7 +5053,7 @@ async function registerRoutes(httpServer, app) {
         last_service_date: lastService,
         last_service_supervisor: history[0]?.supervisor_name ?? null,
         current_job_hours: a.job_id ? log2.ready ? current?.hours ?? 0 : null : null,
-        total_logged_hours: round22(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
+        total_logged_hours: round23(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
         history,
         jobs,
         ledger_ready: log2.ready
@@ -7560,9 +7780,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const day = reportDay(r);
       const accrued = accruedOf(r);
       if (!day || accrued == null) continue;
-      const wellKey2 = normWellName(r.well_name ?? "");
+      const wellKey3 = normWellName(r.well_name ?? "");
       const rd = Number(r.report_day);
-      const key = jid + "\0" + wellKey2;
+      const key = jid + "\0" + wellKey3;
       const owner = latest.get(key);
       const isNewer = !owner || day > owner.day || day === owner.day && (Number.isFinite(rd) ? rd : 0) >= owner.reportDay;
       if (isNewer)

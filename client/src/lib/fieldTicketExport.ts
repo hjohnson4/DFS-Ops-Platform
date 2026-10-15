@@ -1,4 +1,4 @@
-import { type FieldTicketWithJob, workDatesLabel } from "@shared/schema";
+import { type FieldTicketWithJob, workDatesLabel, ticketDatesLabel } from "@shared/schema";
 import { DFS_LOGO_DATA_URI } from "./brandAssets";
 import { showPdfPreview } from "./pdfPreview";
 
@@ -50,43 +50,71 @@ function field(label: string, value: string): string {
   )}</div><div class="fld-value">${esc(value)}</div></div>`;
 }
 
+// "Aug 2 – Aug 4" / "Aug 4" for a line's dates.
+const lineDates = (a?: string | null, b?: string | null): string => {
+  if (!a) return "—";
+  const f = (d: string) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d);
+    return m
+      ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+      : d;
+  };
+  return b && b > a ? `${f(a)} – ${f(b)}` : f(a);
+};
+
 function lineItemsTable(t: FieldTicketWithJob): string {
   const items = t.line_items ?? [];
-  const bodyRows =
-    items.length === 0
-      ? `<tr><td colspan="4" class="empty">No line items on this ticket.</td></tr>`
-      : items
-          .map(
-            (li) => `<tr>
+  const hasDates = items.some((li) => li.start_date);
+  const wells = Array.from(new Set(items.map((li) => li.well_name).filter(Boolean)));
+  const cols = hasDates ? 5 : 4;
+  let lastKey = "";
+  let secNo = 0;
+  const rows: string[] = [];
+  for (const li of items) {
+    const key = `${li.section ?? ""}|${li.well_name ?? ""}`;
+    const showHead = (li.section || wells.length > 1) && key !== lastKey;
+    if (showHead) {
+      secNo++;
+      const label = [li.section || `Section ${secNo}`, wells.length > 1 ? li.well_name : null].filter(Boolean).join(" · ");
+      rows.push(`<tr class="sec"><td colspan="${cols}">${esc(label)}</td></tr>`);
+    }
+    lastKey = key;
+    rows.push(`<tr>
+        ${hasDates ? `<td class="dates">${esc(lineDates(li.start_date, li.end_date))}</td>` : ""}
         <td>${esc(li.description)}</td>
         <td class="num">${esc(fmtQty(li.quantity))}</td>
         <td class="num">${esc(fmtMoney(li.unit_cost))}</td>
         <td class="num">${esc(fmtMoney(li.total))}</td>
-      </tr>`,
-          )
-          .join("");
+      </tr>`);
+  }
+  const bodyRows =
+    items.length === 0
+      ? `<tr><td colspan="${cols}" class="empty">No line items on this ticket.</td></tr>`
+      : rows.join("");
   const lineSum = items.reduce((s, li) => s + (Number(li.total) || 0), 0);
   // The ticket amount can be a manual override; show it as the ticket total.
   const ticketTotal = t.amount != null ? t.amount : lineSum;
   const overridden = t.amount != null && Math.abs(t.amount - lineSum) > 0.005;
+  const span = cols - 1;
   return `
     <table class="tbl items">
       <thead><tr>
+        ${hasDates ? "<th>Dates</th>" : ""}
         <th>Description</th>
-        <th class="num">Quantity</th>
+        <th class="num">Qty</th>
         <th class="num">Unit cost</th>
         <th class="num">Total</th>
       </tr></thead>
       <tbody>${bodyRows}</tbody>
       <tfoot>
         ${
-          items.length > 0
-            ? `<tr class="subtotal"><td colspan="3" class="num">Line items subtotal</td><td class="num">${esc(
+          overridden
+            ? `<tr class="subtotal"><td colspan="${span}" class="num">Line items subtotal</td><td class="num">${esc(
                 fmtMoney(lineSum),
               )}</td></tr>`
             : ""
         }
-        <tr class="grand"><td colspan="3" class="num">Ticket total${
+        <tr class="grand"><td colspan="${span}" class="num">Ticket total${
           overridden ? " (adjusted)" : ""
         }</td><td class="num">${esc(fmtMoney(ticketTotal))}</td></tr>
       </tfoot>
@@ -95,7 +123,7 @@ function lineItemsTable(t: FieldTicketWithJob): string {
 
 export function buildFieldTicketHtml(
   t: FieldTicketWithJob,
-  opts: { generatedBy?: string } = {},
+  opts: { generatedBy?: string; units?: string[] } = {},
 ): string {
   const now = new Date();
   const title = `Field Ticket #${t.ticket_number}`;
@@ -138,6 +166,12 @@ export function buildFieldTicketHtml(
     color: #555; background: #eef2f8; padding: 7px 9px; border-bottom: 1px solid #d8dee8; }
   table.tbl td { padding: 7px 9px; border-bottom: 1px solid #eceff4; vertical-align: top; }
   .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tbl tr.sec td { background: #e6efeb; color: #01563E; font-weight: 800; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; padding: 6px 9px; }
+  .tbl td.dates { white-space: nowrap; width: 15%; }
+  .status { display: inline-block; margin-top: 4px; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+  .status.open { background: #fff4d6; color: #8a6400; }
+  .status.closed { background: #e0eefa; color: #245a93; }
+  .status.approved { background: #dff1e7; color: #01563E; }
   .tbl .empty { color: #888; font-style: italic; text-align: center; padding: 14px 0; }
   .tbl tfoot td { border-bottom: none; padding: 6px 9px; }
   .tbl tfoot .subtotal td { color: #555; }
@@ -166,6 +200,8 @@ export function buildFieldTicketHtml(
     <div class="ticket-num">
       <div class="lbl">Ticket No.</div>
       <div class="big">#${esc(t.ticket_number)}</div>
+      ${t.ticket_type ? `<div class="meta">${t.ticket_type === "delivery" ? "Delivery ticket" : "Service ticket"}</div>` : ""}
+      ${t.status ? `<div class="status ${esc(t.status)}">${esc(t.status === "open" ? "Open · not final" : t.status === "closed" ? "Closed · awaiting approval" : "Approved")}</div>` : ""}
     </div>
   </div>
 
@@ -181,10 +217,13 @@ export function buildFieldTicketHtml(
   <div class="grid">
     ${field("Job No.", t.job_number || "—")}
     ${field("Area", t.area || "—")}
-    ${field(t.ticket_end_date && t.ticket_end_date !== t.ticket_date ? "Work dates" : "Work date", workDatesLabel(t.ticket_date, t.ticket_end_date))}
+    ${field(t.ticket_end_date && t.ticket_end_date !== t.ticket_date ? "Work dates" : "Work date", ticketDatesLabel(t))}
     ${field("County", t.county || "—")}
     ${field("Well name", t.well_name || "—")}
     ${field("P.O. / A.F.E.", t.po_afe || "—")}
+    ${t.ordered_by ? field("Ordered by", t.ordered_by) : ""}
+    ${opts.units && opts.units.length ? field("Units", opts.units.join(", ")) : ""}
+    ${t.status === "approved" && t.approved_at ? field("Approved", `${fmtDate(String(t.approved_at).slice(0, 10))}${t.approved_by_name ? " · " + t.approved_by_name : ""}`) : ""}
   </div>
 
   <h2 class="section">Description &amp; line items</h2>

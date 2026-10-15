@@ -16,16 +16,19 @@ import {
   type Crewing,
   type Asset,
   type FieldTicket,
+  type FieldTicketStatus,
+  type TicketCoverage,
   type DailyReportWithLinks,
   type JsaWithJob,
   type PadWithDerivedWells,
   type UnassignedWell,
   workDatesLabel,
+  ticketDatesLabel,
   isLiveJobStatus,
   tracksRunHours,
   type BidDocument,
 } from "@shared/schema";
-import { FieldTicketFormDialog } from "@/components/FieldTicketFormDialog";
+import { FieldTicketDialog, StatusBadge } from "@/components/FieldTicketDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
 import { SignoffControls } from "@/components/SignoffControls";
 import { JobKpiTrend } from "@/components/JobKpiTrend";
@@ -138,11 +141,17 @@ export default function JobDetailPage() {
     (a) => !a.job_id && a.area === job?.area && a.status !== "Returned",
   );
 
-  // field tickets for this job
+  // field tickets for this job (Admin / Area Manager / Supervisor only)
+  const seesTickets = profile?.role === "admin" || profile?.role === "area" || profile?.role === "super";
   const { data: tickets } = useQuery<FieldTicket[]>({
     queryKey: ["/api/jobs", id, "field-tickets"],
-    enabled: !!id,
+    enabled: !!id && seesTickets,
   });
+  const { data: coverage } = useQuery<TicketCoverage>({
+    queryKey: ["/api/jobs", id, "ticket-coverage"],
+    enabled: !!id && seesTickets,
+  });
+  const [showUncovered, setShowUncovered] = useState(false);
   const assetTag = (aid: string) =>
     (allAssets || []).find((a) => a.id === aid)?.tag ?? "asset";
 
@@ -844,6 +853,7 @@ export default function JobDetailPage() {
       <WellRunHours jobId={job.id} />
 
       {/* Field tickets */}
+      {seesTickets && (<>
       <div className="mt-6 mb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold">
           Field tickets{" "}
@@ -859,9 +869,9 @@ export default function JobDetailPage() {
             </span>
           )}
         </h2>
-        {canEdit &&
+        {canManageAssets &&
           (isLiveJobStatus(job.status) ? (
-            <FieldTicketFormDialog
+            <FieldTicketDialog
               job={job}
               trigger={
                 <Button size="sm" data-testid="button-add-field-ticket">
@@ -875,13 +885,40 @@ export default function JobDetailPage() {
             </span>
           ))}
       </div>
+      {coverage && coverage.uncovered > 0 && (
+        <div className="mb-2 rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm" data-testid="job-ticket-coverage">
+          <button className="flex w-full items-center gap-2 text-left" onClick={() => setShowUncovered((v) => !v)}>
+            <ShieldAlert className="h-4 w-4 text-amber-600 shrink-0" />
+            <span>
+              <b>{coverage.uncovered}</b> signed-off report day{coverage.uncovered === 1 ? "" : "s"} not on a ticket yet
+              {coverage.doubled > 0 && <span> · <b>{coverage.doubled}</b> on more than one ticket</span>}
+            </span>
+            <ChevronDown className={`ml-auto h-4 w-4 transition-transform ${showUncovered ? "rotate-180" : ""}`} />
+          </button>
+          {showUncovered && (
+            <div className="mt-2 grid gap-x-6 gap-y-0.5 sm:grid-cols-2 text-xs">
+              {coverage.days
+                .filter((d) => d.tickets.length !== 1)
+                .map((d) => (
+                  <div key={d.well_name + d.date} className="flex gap-2">
+                    <span className="tabular-nums w-24">{workDatesLabel(d.date, null)}</span>
+                    <span className="truncate">{d.well_name}</span>
+                    <span className="ml-auto text-muted-foreground">
+                      {d.tickets.length === 0 ? "not on a ticket" : `on ${d.tickets.map((n) => "#" + n).join(", ")}`}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
       {!tickets || tickets.length === 0 ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-8 text-center">
           <Ticket className="h-5 w-5 mx-auto text-muted-foreground mb-1.5" />
           <div className="text-sm text-muted-foreground">
             No field tickets yet.
           </div>
-          {canEdit && isLiveJobStatus(job.status) && (
+          {canManageAssets && isLiveJobStatus(job.status) && (
             <div className="text-xs text-muted-foreground mt-1">
               Create one to log billable field work on this job.
             </div>
@@ -889,30 +926,42 @@ export default function JobDetailPage() {
         </div>
       ) : (
         <div className="rounded-lg border border-card-border bg-card divide-y divide-card-border">
-          {tickets.map((t) => (
+          {tickets.map((t) => {
+            const st = (t.status ?? "open") as FieldTicketStatus;
+            const canDelete =
+              isLiveJobStatus(job.status) &&
+              (profile?.role === "admin" || (profile?.role === "area" && st !== "approved"));
+            const sections = Array.from(
+              new Set((t.line_items ?? []).map((li) => [li.section, li.well_name].filter(Boolean).join(" · ")).filter(Boolean)),
+            );
+            return (
             <div key={t.id} className="px-4 py-3" data-testid={`field-ticket-${t.id}`}>
               <div className="flex items-center gap-2 text-sm">
                 <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
                 <span className="font-medium">Ticket #{t.ticket_number}</span>
-                <span className="text-muted-foreground">{workDatesLabel(t.ticket_date, t.ticket_end_date)}</span>
+                <StatusBadge status={st} />
+                <span className="text-muted-foreground">{ticketDatesLabel(t)}</span>
                 <span className="ml-auto font-medium tabular-nums">{money(t.amount)}</span>
-                {canEdit && isLiveJobStatus(job.status) && (
-                  <div className="flex items-center gap-0.5">
-                    <FieldTicketFormDialog
-                      job={job}
-                      ticket={t}
-                      trigger={
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted-foreground"
-                          data-testid={`button-edit-ticket-${t.id}`}
-                          aria-label="Edit ticket"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                      }
-                    />
+                <div className="flex items-center gap-0.5">
+                  <FieldTicketDialog
+                    job={job}
+                    ticket={t}
+                    trigger={
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        data-testid={`button-open-ticket-${t.id}`}
+                      >
+                        {canManageAssets && st === "open" && isLiveJobStatus(job.status) ? (
+                          <><Pencil className="mr-1 h-3 w-3" /> Open</>
+                        ) : (
+                          "View"
+                        )}
+                      </Button>
+                    }
+                  />
+                  {canDelete && (
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
                         <Button
@@ -945,17 +994,24 @@ export default function JobDetailPage() {
                         </AlertDialogFooter>
                       </AlertDialogContent>
                     </AlertDialog>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
               <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground pl-6">
                 {t.well_name && <span>Well: {t.well_name}</span>}
                 {t.po_afe && <span>PO/AFE: {t.po_afe}</span>}
+                {(t.line_items?.length ?? 0) > 0 && (
+                  <span>
+                    {t.line_items.length} line{t.line_items.length === 1 ? "" : "s"}
+                    {sections.length > 1 ? ` in ${sections.length} sections` : ""}
+                  </span>
+                )}
                 {t.asset_ids.length > 0 && (
                   <span>
                     Equipment: {t.asset_ids.map(assetTag).join(", ")}
                   </span>
                 )}
+                {st === "closed" && <span className="text-amber-700 dark:text-amber-300">Waiting for Admin approval</span>}
               </div>
               {t.description && (
                 <div className="mt-1.5 text-sm pl-6 whitespace-pre-wrap">{t.description}</div>
@@ -966,9 +1022,11 @@ export default function JobDetailPage() {
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
+      </>)}
 
       {/* Drive-by / call-out services — unmanned jobs only */}
       {(job.crewing ?? "Manned") === "Unmanned" && <ServicesSection job={job} />}
