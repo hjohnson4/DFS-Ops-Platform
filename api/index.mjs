@@ -101,6 +101,7 @@ async function jobScopeOf(p) {
 }
 
 // server/email.ts
+import nodemailer from "nodemailer";
 var RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 var FROM = process.env.EMAIL_FROM || "DFS Ops <onboarding@resend.dev>";
 async function deliver(to, subject, html) {
@@ -180,17 +181,81 @@ async function sendPasswordResetEmail(ctx) {
     </div>`;
   return deliver(ctx.to, "Reset your DFS Ops password", html);
 }
+var GMAIL_USER = (process.env.GMAIL_USER || "").trim();
+var GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+var gmailTransport = null;
+function gmailConfigured() {
+  return !!(GMAIL_USER && GMAIL_APP_PASSWORD);
+}
+async function deliverChangeRequest(to, subject, html, text) {
+  if (gmailConfigured()) {
+    try {
+      if (!gmailTransport) {
+        gmailTransport = nodemailer.createTransport({
+          host: "smtp.gmail.com",
+          port: 465,
+          secure: true,
+          auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD }
+        });
+      }
+      await gmailTransport.sendMail({
+        from: `DFS Daily Reports <${GMAIL_USER}>`,
+        to,
+        subject,
+        html,
+        text
+      });
+      return { ok: true, via: "gmail" };
+    } catch (e) {
+      const msg = String(e?.message || e);
+      console.error("[email:gmail] send failed", msg);
+      const friendly = /Invalid login|535|BadCredentials|Username and Password/i.test(msg) ? "Gmail didn't accept the app password. Check GMAIL_USER and GMAIL_APP_PASSWORD in Vercel." : /recipient|550|553|No recipients/i.test(msg) ? "Gmail couldn't deliver to that address." : /limit|quota|421|454/i.test(msg) ? "Gmail's sending limit was reached. Try again later." : `Gmail couldn't send it (${msg.slice(0, 160)}).`;
+      return { ok: false, via: "gmail", error: friendly };
+    }
+  }
+  const ok = await deliver(to, subject, html);
+  return ok ? { ok: true, via: "resend" } : { ok: false, via: RESEND_API_KEY ? "resend" : "none", error: RESEND_API_KEY ? "The email service rejected the message." : "Email sending isn't set up yet." };
+}
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
 async function sendDailyReportChanges(ctx) {
+  const to = (ctx.to || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    return { ok: false, via: "none", error: "This report has no valid sender email address." };
+  }
   const who = ctx.senderName ? `${ctx.senderName}` : "there";
   const re = ctx.subject ? `Re: ${ctx.subject}` : "Re: your daily report";
-  const dateLine = ctx.reportDate ? ` (${ctx.reportDate})` : "";
+  const bits = [
+    ctx.jobNumber ? `Job ${ctx.jobNumber}` : "",
+    ctx.wellName ? ctx.wellName : "",
+    ctx.sheet ? `${ctx.sheet} tab` : "",
+    ctx.reportDate ? ctx.reportDate : ""
+  ].filter(Boolean);
+  const which = bits.length ? ` (${bits.join(" \xB7 ")})` : "";
+  const tabText = ctx.sheet ? `the ${ctx.sheet} tab in ` : "";
+  const keepWell = /Well name \(V9\)/i.test(ctx.changeNotes) ? "" : ", keep the same well name";
   const html = `
-    <p>Hi ${who},</p>
-    <p><b>${ctx.reviewerName}</b> reviewed your daily report${dateLine} and is requesting some changes:</p>
-    <blockquote style="border-left:3px solid #ccc;margin:0;padding:8px 12px;color:#333;white-space:pre-wrap;">${ctx.changeNotes}</blockquote>
-    <p>Please fix ${ctx.sheet ? `the <b>${ctx.sheet}</b> tab in ` : ""}the same workbook and email it again the way you normally send it (to dfsdailyreports@gmail.com). DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix. Thanks.</p>
-    <p style="color:#888;font-size:12px;">Sent by DFS Ops</p>`;
-  return deliver(ctx.to, `Changes requested \u2014 ${re}`, html);
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#28251D;line-height:1.5;">
+    <p>Hi ${escapeHtml(who)},</p>
+    <p><b>${escapeHtml(ctx.reviewerName)}</b> reviewed your daily report${escapeHtml(which)} and is requesting some changes:</p>
+    <blockquote style="border-left:3px solid #01573E;margin:0;padding:8px 12px;color:#333;white-space:pre-wrap;background:#F7F6F2;">${escapeHtml(ctx.changeNotes)}</blockquote>
+    <p>Please fix ${ctx.sheet ? `the <b>${escapeHtml(ctx.sheet)}</b> tab in ` : ""}the same workbook${keepWell}, and send it as a <b>new email</b> (not a reply) to dfsdailyreports@gmail.com with the workbook attached. DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix.</p>
+    <p>Thanks.</p>
+    <p style="color:#888;font-size:12px;">Sent by DFS Ops</p>
+    </div>`;
+  const text = `Hi ${who},
+
+${ctx.reviewerName} reviewed your daily report${which} and is requesting some changes:
+
+${ctx.changeNotes}
+
+Please fix ${tabText}the same workbook${keepWell}, and send it as a NEW email (not a reply) to dfsdailyreports@gmail.com with the workbook attached. DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix.
+
+Thanks.
+
+Sent by DFS Ops`;
+  return deliverChangeRequest(to, `Changes requested \u2014 ${re}`, html, text);
 }
 async function sendNotificationEmails(kind, ctx) {
   const client2 = supabaseAdmin || supabaseAnon;
@@ -2794,6 +2859,7 @@ async function registerRoutes(httpServer, app) {
       ok: true,
       adminReady: hasAdmin(),
       emailReady: emailConfigured(),
+      changeEmailReady: gmailConfigured(),
       time: (/* @__PURE__ */ new Date()).toISOString()
     });
   });
@@ -6420,6 +6486,24 @@ async function registerRoutes(httpServer, app) {
       });
     }
   );
+  async function emailChangeRequest(client2, report, reviewerName, notes) {
+    let jobNumber = null;
+    if (report.job_id) {
+      const { data: job } = await client2.from("jobs").select("job_number").eq("id", report.job_id).maybeSingle();
+      jobNumber = job?.job_number ?? null;
+    }
+    return sendDailyReportChanges({
+      to: report.sender_email,
+      senderName: report.sender_name,
+      subject: report.subject,
+      reviewerName,
+      changeNotes: notes,
+      reportDate: report.report_date,
+      sheet: report.source_sheet,
+      wellName: report.well_name,
+      jobNumber
+    });
+  }
   app.post(
     "/api/daily-reports/:id/review",
     requireAuth,
@@ -6529,25 +6613,20 @@ async function registerRoutes(httpServer, app) {
 ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         typed
       ].filter(Boolean).join("\n\n");
-      const delivered = await sendDailyReportChanges({
-        to: report.sender_email,
-        senderName: report.sender_name,
-        subject: report.subject,
-        reviewerName: reviewer.name,
-        changeNotes: fullNotes,
-        reportDate: report.report_date,
-        sheet: report.source_sheet
-      });
-      const emailStatus = delivered ? "Sent" : "Pending send";
+      const sent = await emailChangeRequest(client2, report, reviewer.name, fullNotes);
       const { data, error } = await client2.from("daily_reports").update({
         status: "Changes requested",
         reviewed_by: reviewer.id,
         reviewed_by_name: reviewer.name,
         reviewed_at: now,
         change_notes: fullNotes,
-        analysis: { ...report.analysis || {}, requested_fields: fields },
-        email_out_status: emailStatus,
-        email_out_at: delivered ? now : null
+        analysis: {
+          ...report.analysis || {},
+          requested_fields: fields,
+          email_out_error: sent.ok ? null : sent.error ?? null
+        },
+        email_out_status: sent.ok ? "Sent" : "Not sent",
+        email_out_at: sent.ok ? now : null
       }).eq("id", report.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       await client2.from("daily_report_events").insert({
@@ -6556,9 +6635,42 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         actor_name: reviewer.name,
         actor_role: reviewer.role,
         action: "changes_requested",
-        detail: delivered ? `Suggested changes emailed to ${report.sender_email}` : `Suggested changes recorded; email queued for ${report.sender_email}`
+        detail: sent.ok ? `Suggested changes emailed to ${report.sender_email}` : `Suggested changes recorded, but the email to ${report.sender_email} was NOT sent (${sent.error ?? "unknown error"})`
       });
-      res.json(data);
+      res.json({ ...data, email_sent: sent.ok, email_error: sent.ok ? null : sent.error ?? null });
+    }
+  );
+  app.post(
+    "/api/daily-reports/:id/resend-changes",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const client2 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client2.from("daily_reports").select("*").eq("id", req.params.id).single();
+      if (rErr || !report) return res.status(404).json({ message: "Report not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && report.area !== scope) return res.status(404).json({ message: "Report not found" });
+      if (report.status !== "Changes requested" || !report.change_notes)
+        return res.status(400).json({ message: "Only reports with changes requested can be re-sent." });
+      const reviewerName = report.reviewed_by_name || req.profile.name;
+      const sent = await emailChangeRequest(client2, report, reviewerName, report.change_notes);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const { data, error } = await client2.from("daily_reports").update({
+        analysis: { ...report.analysis || {}, email_out_error: sent.ok ? null : sent.error ?? null },
+        email_out_status: sent.ok ? "Sent" : "Not sent",
+        email_out_at: sent.ok ? now : report.email_out_at
+      }).eq("id", report.id).select().single();
+      if (error) return res.status(400).json({ message: error.message });
+      await client2.from("daily_report_events").insert({
+        report_id: report.id,
+        actor_id: req.profile.id,
+        actor_name: req.profile.name,
+        actor_role: req.profile.role,
+        action: "changes_resent",
+        detail: sent.ok ? `Change request re-sent to ${report.sender_email}` : `Tried to re-send the change request to ${report.sender_email}, but it was NOT sent (${sent.error ?? "unknown error"})`
+      });
+      if (!sent.ok) return res.status(502).json({ message: `The email wasn't sent: ${sent.error ?? "unknown error"}` });
+      res.json({ ...data, email_sent: true });
     }
   );
   const replaceWorkbookSchema = z2.object({
@@ -6819,7 +6931,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (_req, res) => {
       const { data, error } = await supabaseAnon.from("daily_report_config").select("*").eq("id", 1).single();
       if (error) return res.status(500).json({ message: error.message });
-      res.json({ ...data, email_out_ready: emailConfigured(), ingest_ready: !!INGEST_TOKEN });
+      res.json({ ...data, email_out_ready: emailConfigured() || gmailConfigured(), ingest_ready: !!INGEST_TOKEN });
     }
   );
   app.put(

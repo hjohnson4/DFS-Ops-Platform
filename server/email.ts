@@ -1,4 +1,5 @@
 import { supabaseAdmin, supabaseAnon } from "./supabase";
+import nodemailer from "nodemailer";
 
 /**
  * Email notifications. Real delivery is wired at the notifications milestone
@@ -115,6 +116,64 @@ export async function sendPasswordResetEmail(ctx: {
  * Email suggested changes on a daily report back to the sender.
  * Returns true if actually delivered (Resend keyed), false if stubbed.
  */
+// ---- Change requests go out from the reports Gmail inbox -----------------
+// Crews email their workbooks to dfsdailyreports@gmail.com, so change requests
+// are sent back FROM that same inbox (through Gmail, using a Google app
+// password) — the crew sees a reply from the address they already send to.
+// Set GMAIL_USER (e.g. dfsdailyreports@gmail.com) and GMAIL_APP_PASSWORD in
+// Vercel. Without them this falls back to the Resend path above.
+const GMAIL_USER = (process.env.GMAIL_USER || "").trim();
+const GMAIL_APP_PASSWORD = (process.env.GMAIL_APP_PASSWORD || "").replace(/\s+/g, "");
+let gmailTransport: nodemailer.Transporter | null = null;
+
+export function gmailConfigured(): boolean {
+  return !!(GMAIL_USER && GMAIL_APP_PASSWORD);
+}
+
+export type SendResult = { ok: boolean; via: "gmail" | "resend" | "none"; error?: string };
+
+async function deliverChangeRequest(to: string, subject: string, html: string, text: string): Promise<SendResult> {
+  if (gmailConfigured()) {
+    try {
+      if (!gmailTransport) {
+        gmailTransport = nodemailer.createTransport({
+          host: "smtp.gmail.com",
+          port: 465,
+          secure: true,
+          auth: { user: GMAIL_USER, pass: GMAIL_APP_PASSWORD },
+        });
+      }
+      await gmailTransport.sendMail({
+        from: `DFS Daily Reports <${GMAIL_USER}>`,
+        to,
+        subject,
+        html,
+        text,
+      });
+      return { ok: true, via: "gmail" };
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      console.error("[email:gmail] send failed", msg);
+      const friendly = /Invalid login|535|BadCredentials|Username and Password/i.test(msg)
+        ? "Gmail didn't accept the app password. Check GMAIL_USER and GMAIL_APP_PASSWORD in Vercel."
+        : /recipient|550|553|No recipients/i.test(msg)
+          ? "Gmail couldn't deliver to that address."
+          : /limit|quota|421|454/i.test(msg)
+            ? "Gmail's sending limit was reached. Try again later."
+            : `Gmail couldn't send it (${msg.slice(0, 160)}).`;
+      return { ok: false, via: "gmail", error: friendly };
+    }
+  }
+  const ok = await deliver(to, subject, html);
+  return ok
+    ? { ok: true, via: "resend" }
+    : { ok: false, via: RESEND_API_KEY ? "resend" : "none", error: RESEND_API_KEY ? "The email service rejected the message." : "Email sending isn't set up yet." };
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 export async function sendDailyReportChanges(ctx: {
   to: string;
   senderName?: string | null;
@@ -123,17 +182,40 @@ export async function sendDailyReportChanges(ctx: {
   changeNotes: string;
   reportDate?: string | null;
   sheet?: string | null;
-}): Promise<boolean> {
+  wellName?: string | null;
+  jobNumber?: string | null;
+}): Promise<SendResult> {
+  const to = (ctx.to || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+    return { ok: false, via: "none", error: "This report has no valid sender email address." };
+  }
   const who = ctx.senderName ? `${ctx.senderName}` : "there";
   const re = ctx.subject ? `Re: ${ctx.subject}` : "Re: your daily report";
-  const dateLine = ctx.reportDate ? ` (${ctx.reportDate})` : "";
+  const bits = [
+    ctx.jobNumber ? `Job ${ctx.jobNumber}` : "",
+    ctx.wellName ? ctx.wellName : "",
+    ctx.sheet ? `${ctx.sheet} tab` : "",
+    ctx.reportDate ? ctx.reportDate : "",
+  ].filter(Boolean);
+  const which = bits.length ? ` (${bits.join(" · ")})` : "";
+  const tabText = ctx.sheet ? `the ${ctx.sheet} tab in ` : "";
+  // If the well name itself is what's wrong, don't tell them to keep it.
+  const keepWell = /Well name \(V9\)/i.test(ctx.changeNotes) ? "" : ", keep the same well name";
   const html = `
-    <p>Hi ${who},</p>
-    <p><b>${ctx.reviewerName}</b> reviewed your daily report${dateLine} and is requesting some changes:</p>
-    <blockquote style="border-left:3px solid #ccc;margin:0;padding:8px 12px;color:#333;white-space:pre-wrap;">${ctx.changeNotes}</blockquote>
-    <p>Please fix ${ctx.sheet ? `the <b>${ctx.sheet}</b> tab in ` : ""}the same workbook and email it again the way you normally send it (to dfsdailyreports@gmail.com). DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix. Thanks.</p>
-    <p style="color:#888;font-size:12px;">Sent by DFS Ops</p>`;
-  return deliver(ctx.to, `Changes requested — ${re}`, html);
+    <div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#28251D;line-height:1.5;">
+    <p>Hi ${escapeHtml(who)},</p>
+    <p><b>${escapeHtml(ctx.reviewerName)}</b> reviewed your daily report${escapeHtml(which)} and is requesting some changes:</p>
+    <blockquote style="border-left:3px solid #01573E;margin:0;padding:8px 12px;color:#333;white-space:pre-wrap;background:#F7F6F2;">${escapeHtml(ctx.changeNotes)}</blockquote>
+    <p>Please fix ${ctx.sheet ? `the <b>${escapeHtml(ctx.sheet)}</b> tab in ` : ""}the same workbook${keepWell}, and send it as a <b>new email</b> (not a reply) to dfsdailyreports@gmail.com with the workbook attached. DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix.</p>
+    <p>Thanks.</p>
+    <p style="color:#888;font-size:12px;">Sent by DFS Ops</p>
+    </div>`;
+  const text =
+    `Hi ${who},\n\n${ctx.reviewerName} reviewed your daily report${which} and is requesting some changes:\n\n` +
+    `${ctx.changeNotes}\n\n` +
+    `Please fix ${tabText}the same workbook${keepWell}, and send it as a NEW email (not a reply) to dfsdailyreports@gmail.com with the workbook attached. ` +
+    `DFS Ops will replace this report with the corrected one automatically, so please don't start a new day tab for the fix.\n\nThanks.\n\nSent by DFS Ops`;
+  return deliverChangeRequest(to, `Changes requested — ${re}`, html, text);
 }
 
 export async function sendNotificationEmails(

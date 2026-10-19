@@ -44,6 +44,7 @@ import {
   Activity,
   Ruler,
   StickyNote,
+  Send,
 } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
 
@@ -225,18 +226,25 @@ export default function DailyReportDetailPage() {
       const res = await apiRequest("POST", url, body);
       return res.json();
     },
-    onSuccess: (_data, vars) => {
+    onSuccess: (data: any, vars) => {
       queryClient.invalidateQueries({ queryKey: ["/api/daily-reports", id] });
       queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
       // Centrifuge run hours may have changed — refresh asset/service views.
       queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
       queryClient.invalidateQueries({ queryKey: ["/api/service"] });
+      const isField = report?.source === "field";
+      const emailFailed = vars.action === "request_changes" && !isField && data?.email_sent === false;
       toast({
-        title: vars.action === "sign_off" ? "Report signed off" : "Changes requested",
+        title: vars.action === "sign_off" ? "Report signed off" : emailFailed ? "Changes saved, but the email was NOT sent" : "Changes requested",
         description:
-          vars.action === "request_changes"
-            ? "Your suggestions were sent back to the sender."
-            : undefined,
+          vars.action !== "request_changes"
+            ? undefined
+            : isField
+              ? "The crew will see your notes in DFS Ops."
+              : emailFailed
+                ? `${data?.email_error ?? "The email couldn't be sent."} Use Resend email on the report, or call the crew.`
+                : `Your notes were emailed to ${report?.sender_email} from dfsdailyreports@gmail.com.`,
+        variant: emailFailed ? "destructive" : undefined,
       });
       setShowChanges(false);
       setChangeNotes("");
@@ -244,6 +252,23 @@ export default function DailyReportDetailPage() {
     },
     onError: (e: any) =>
       toast({ title: "Could not submit review", description: e.message, variant: "destructive" }),
+  });
+
+  // Re-send the change-request email (e.g. the first send failed).
+  const resendChanges = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/daily-reports/${id}/resend-changes`, {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/daily-reports", id] });
+      queryClient.invalidateQueries({ queryKey: ["/api/daily-reports"] });
+      toast({ title: "Email sent", description: `The change request was emailed to ${report?.sender_email}.` });
+    },
+    onError: (e: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/daily-reports", id] });
+      toast({ title: "Email NOT sent", description: e.message, variant: "destructive" });
+    },
   });
 
   // Corrections to a signed-off report (Admin / Area Manager).
@@ -698,10 +723,32 @@ export default function DailyReportDetailPage() {
                   : `Suggested changes sent to ${report.sender_email}:`}
               </div>
               <div className="whitespace-pre-wrap rounded bg-background/60 p-2 border border-card-border">{report.change_notes}</div>
-              {!isField && report.email_out_status && (
-                <div className="text-xs text-muted-foreground mt-1.5">
-                  Email: {report.email_out_status}
-                  {report.email_out_status === "Pending send" && " (delivers once Resend is connected)"}
+              {!isField && (
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                  {report.email_out_status === "Sent" ? (
+                    <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400" data-testid="text-email-status">
+                      <CheckCircle2 className="h-3.5 w-3.5" /> Emailed to {report.sender_email}
+                      {report.email_out_at ? ` · ${fmtDateTime(report.email_out_at)}` : ""}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 font-medium text-rose-700 dark:text-rose-400" data-testid="text-email-status">
+                      <FileWarning className="h-3.5 w-3.5" /> Email NOT sent to {report.sender_email}
+                      {(report.analysis as any)?.email_out_error ? ` — ${(report.analysis as any).email_out_error}` : ""}
+                    </span>
+                  )}
+                  {canReview && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      onClick={() => resendChanges.mutate()}
+                      disabled={resendChanges.isPending}
+                      data-testid="button-resend-changes"
+                    >
+                      {resendChanges.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Send className="mr-1.5 h-3.5 w-3.5" />}
+                      Resend email
+                    </Button>
+                  )}
                 </div>
               )}
             </div>
@@ -920,6 +967,7 @@ function describe(action: string): string {
     case "run_hours_credited": return "credited the run hours";
     case "needs_review": return "flagged missing data";
     case "email_sent": return "sent an email";
+    case "changes_resent": return "re-sent the change request email";
     default: return action;
   }
 }

@@ -4,7 +4,7 @@ import type { Server } from "node:http";
 import crypto from "node:crypto";
 import { supabaseAnon, supabaseAdmin, hasAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf, jobScopeOf } from "./auth";
-import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, sendInviteEmail, sendPasswordResetEmail } from "./email";
+import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, gmailConfigured, sendInviteEmail, sendPasswordResetEmail } from "./email";
 import {
   parseDailyReportWorkbook,
   parseAllCompletedDays,
@@ -588,6 +588,7 @@ export async function registerRoutes(
       ok: true,
       adminReady: hasAdmin(),
       emailReady: emailConfigured(),
+      changeEmailReady: gmailConfigured(),
       time: new Date().toISOString(),
     });
   });
@@ -5859,6 +5860,27 @@ export async function registerRoutes(
     },
   );
 
+  // Email a change request back to whoever sent the report, from the reports
+  // inbox. Looks up the job number so the crew knows exactly which report.
+  async function emailChangeRequest(client: any, report: any, reviewerName: string, notes: string) {
+    let jobNumber: string | null = null;
+    if (report.job_id) {
+      const { data: job } = await client.from("jobs").select("job_number").eq("id", report.job_id).maybeSingle();
+      jobNumber = job?.job_number ?? null;
+    }
+    return sendDailyReportChanges({
+      to: report.sender_email,
+      senderName: report.sender_name,
+      subject: report.subject,
+      reviewerName,
+      changeNotes: notes,
+      reportDate: report.report_date,
+      sheet: report.source_sheet,
+      wellName: report.well_name,
+      jobNumber,
+    });
+  }
+
   // Review: sign off OR request changes (area managers + supervisors)
   app.post(
     "/api/daily-reports/:id/review",
@@ -6028,16 +6050,7 @@ export async function registerRoutes(
       ]
         .filter(Boolean)
         .join("\n\n");
-      const delivered = await sendDailyReportChanges({
-        to: report.sender_email,
-        senderName: report.sender_name,
-        subject: report.subject,
-        reviewerName: reviewer.name,
-        changeNotes: fullNotes,
-        reportDate: report.report_date,
-        sheet: report.source_sheet,
-      });
-      const emailStatus = delivered ? "Sent" : "Pending send";
+      const sent = await emailChangeRequest(client, report, reviewer.name, fullNotes);
       const { data, error } = await client
         .from("daily_reports")
         .update({
@@ -6046,9 +6059,13 @@ export async function registerRoutes(
           reviewed_by_name: reviewer.name,
           reviewed_at: now,
           change_notes: fullNotes,
-          analysis: { ...((report.analysis as any) || {}), requested_fields: fields },
-          email_out_status: emailStatus,
-          email_out_at: delivered ? now : null,
+          analysis: {
+            ...((report.analysis as any) || {}),
+            requested_fields: fields,
+            email_out_error: sent.ok ? null : sent.error ?? null,
+          },
+          email_out_status: sent.ok ? "Sent" : "Not sent",
+          email_out_at: sent.ok ? now : null,
         })
         .eq("id", report.id)
         .select()
@@ -6060,11 +6077,58 @@ export async function registerRoutes(
         actor_name: reviewer.name,
         actor_role: reviewer.role,
         action: "changes_requested",
-        detail: delivered
+        detail: sent.ok
           ? `Suggested changes emailed to ${report.sender_email}`
-          : `Suggested changes recorded; email queued for ${report.sender_email}`,
+          : `Suggested changes recorded, but the email to ${report.sender_email} was NOT sent (${sent.error ?? "unknown error"})`,
       });
-      res.json(data);
+      res.json({ ...data, email_sent: sent.ok, email_error: sent.ok ? null : sent.error ?? null });
+    },
+  );
+
+  // Re-send the change-request email for a report that's still in
+  // "Changes requested" (e.g. the first send failed, or the crew lost it).
+  app.post(
+    "/api/daily-reports/:id/resend-changes",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client
+        .from("daily_reports")
+        .select("*")
+        .eq("id", req.params.id)
+        .single();
+      if (rErr || !report) return res.status(404).json({ message: "Report not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && report.area !== scope) return res.status(404).json({ message: "Report not found" });
+      if (report.status !== "Changes requested" || !report.change_notes)
+        return res.status(400).json({ message: "Only reports with changes requested can be re-sent." });
+      const reviewerName = report.reviewed_by_name || req.profile!.name;
+      const sent = await emailChangeRequest(client, report, reviewerName, report.change_notes);
+      const now = new Date().toISOString();
+      const { data, error } = await client
+        .from("daily_reports")
+        .update({
+          analysis: { ...((report.analysis as any) || {}), email_out_error: sent.ok ? null : sent.error ?? null },
+          email_out_status: sent.ok ? "Sent" : "Not sent",
+          email_out_at: sent.ok ? now : report.email_out_at,
+        })
+        .eq("id", report.id)
+        .select()
+        .single();
+      if (error) return res.status(400).json({ message: error.message });
+      await client.from("daily_report_events").insert({
+        report_id: report.id,
+        actor_id: req.profile!.id,
+        actor_name: req.profile!.name,
+        actor_role: req.profile!.role,
+        action: "changes_resent",
+        detail: sent.ok
+          ? `Change request re-sent to ${report.sender_email}`
+          : `Tried to re-send the change request to ${report.sender_email}, but it was NOT sent (${sent.error ?? "unknown error"})`,
+      });
+      if (!sent.ok) return res.status(502).json({ message: `The email wasn't sent: ${sent.error ?? "unknown error"}` });
+      res.json({ ...data, email_sent: true });
     },
   );
 
@@ -6401,7 +6465,7 @@ export async function registerRoutes(
         .eq("id", 1)
         .single();
       if (error) return res.status(500).json({ message: error.message });
-      res.json({ ...data, email_out_ready: emailConfigured(), ingest_ready: !!INGEST_TOKEN });
+      res.json({ ...data, email_out_ready: emailConfigured() || gmailConfigured(), ingest_ready: !!INGEST_TOKEN });
     },
   );
 
