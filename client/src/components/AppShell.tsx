@@ -71,7 +71,6 @@ const ALL = ["admin", "area", "super", "field"];
 const NON_FIELD = ["admin", "area", "super"];
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, roles: ALL },
-  { href: "/customers", label: "Customers", icon: Building2, roles: NON_FIELD },
   { href: "/revenue", label: "Revenue", icon: TrendingUp, roles: ["admin", "area"] },
   { href: "/jobs", label: "Field Ops & Jobs", icon: Briefcase, roles: ALL },
   { href: "/daily-reports", label: "Daily Reports", icon: Mails, roles: ALL },
@@ -81,6 +80,7 @@ const NAV = [
   { href: "/assets", label: "Assets", icon: Boxes, roles: ALL },
   { href: "/service", label: "Service", icon: Wrench, roles: ALL },
   { href: "/field-tickets", label: "Field Tickets", icon: Ticket, roles: NON_FIELD },
+  { href: "/customers", label: "Customers", icon: Building2, roles: NON_FIELD },
   { href: "/audit-trail", label: "Audit Trail", icon: History, roles: ALL },
   { href: "/users", label: "Manage Users", icon: Users, roles: ["admin"] },
   { href: "/settings", label: "Settings", icon: Settings, roles: ALL },
