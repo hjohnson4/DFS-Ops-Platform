@@ -5547,6 +5547,38 @@ export async function registerRoutes(
             continue;
           }
 
+          // Skip a day the job ALREADY has for this well — whether it came in
+          // by email or from an earlier upload of a differently named file.
+          // Matches job + well name (any case) + report day (or report date
+          // when the tab has no day number).
+          const dayWell = String(excel.well_name ?? wellName ?? "").trim();
+          if (dayWell && (excel.report_day != null || excel.report_date)) {
+            const likeWell = dayWell.replace(/[\\%_]/g, (c) => `\\${c}`);
+            let q = client
+              .from("daily_reports")
+              .select("id, status, sender_name, email_message_id")
+              .ilike("well_name", likeWell);
+            q = excel.report_day != null ? q.eq("report_day", excel.report_day) : q.eq("report_date", excel.report_date as string);
+            q = job_id ? q.eq("job_id", job_id) : q.is("job_id", null);
+            const { data: same } = await q.limit(1);
+            const hit = (same || [])[0] as any;
+            if (hit) {
+              const via = String(hit.email_message_id ?? "").startsWith("backfill:") ? "an earlier upload" : "email";
+              results.push({
+                report_day: excel.report_day,
+                source_sheet: excel.source_sheet,
+                report_date: excel.report_date,
+                well_name: excel.well_name,
+                status: "duplicate",
+                daily_report_status: hit.status,
+                matched_job: !!job_id,
+                run_hours_applied: null,
+                message: `Already on this job (from ${via}${hit.sender_name ? `, ${hit.sender_name}` : ""}) — skipped.`,
+              });
+              continue;
+            }
+          }
+
           // Accrue this day's run hours onto the job's centrifuges, routed by
           // each unit's centrifuge_slot (Centrifuge 1-4 on the report). Single
           // centrifuge → whole day. 2+ → route each slot's own hours; if any

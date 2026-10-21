@@ -6386,6 +6386,30 @@ async function registerRoutes(httpServer, app) {
             });
             continue;
           }
+          const dayWell = String(excel.well_name ?? wellName ?? "").trim();
+          if (dayWell && (excel.report_day != null || excel.report_date)) {
+            const likeWell = dayWell.replace(/[\\%_]/g, (c) => `\\${c}`);
+            let q = client2.from("daily_reports").select("id, status, sender_name, email_message_id").ilike("well_name", likeWell);
+            q = excel.report_day != null ? q.eq("report_day", excel.report_day) : q.eq("report_date", excel.report_date);
+            q = job_id ? q.eq("job_id", job_id) : q.is("job_id", null);
+            const { data: same } = await q.limit(1);
+            const hit = (same || [])[0];
+            if (hit) {
+              const via = String(hit.email_message_id ?? "").startsWith("backfill:") ? "an earlier upload" : "email";
+              results.push({
+                report_day: excel.report_day,
+                source_sheet: excel.source_sheet,
+                report_date: excel.report_date,
+                well_name: excel.well_name,
+                status: "duplicate",
+                daily_report_status: hit.status,
+                matched_job: !!job_id,
+                run_hours_applied: null,
+                message: `Already on this job (from ${via}${hit.sender_name ? `, ${hit.sender_name}` : ""}) \u2014 skipped.`
+              });
+              continue;
+            }
+          }
           let runHourDetail = null;
           const numOrNull = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
           const dk = excel.kpis || {};
