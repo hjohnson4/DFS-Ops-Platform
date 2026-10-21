@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { RentalBadge } from "@/components/Rental";
+import { MudPlantBilling, DailyCentrifugeHours } from "@/components/MudPlantCards";
 import { useRoute, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -162,7 +163,7 @@ export default function JobDetailPage() {
   const [endedOn, setEndedOn] = useState("");
   const [dayRate, setDayRate] = useState("");
   const [manualRate, setManualRate] = useState(false);
-  const [billMode, setBillMode] = useState<"report_days" | "spud_to_latest">("report_days");
+  const [billMode, setBillMode] = useState<"report_days" | "spud_to_latest" | "calendar">("report_days");
 
   // seed edit fields whenever the job loads / changes
   useEffect(() => {
@@ -173,7 +174,11 @@ export default function JobDetailPage() {
       setEndedOn(toDateInput(job.ended_on));
       setDayRate(job.day_rate === null || job.day_rate === undefined ? "" : String(job.day_rate));
       setManualRate(!!job.manual_day_rate);
-      setBillMode(job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
+      setBillMode(
+        job.manual_billing_mode === "spud_to_latest" || job.manual_billing_mode === "calendar"
+          ? job.manual_billing_mode
+          : "report_days",
+      );
     }
   }, [job]);
 
@@ -210,7 +215,11 @@ export default function JobDetailPage() {
       setEndedOn(toDateInput(job.ended_on));
       setDayRate(job.day_rate === null || job.day_rate === undefined ? "" : String(job.day_rate));
       setManualRate(!!job.manual_day_rate);
-      setBillMode(job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
+      setBillMode(
+        job.manual_billing_mode === "spud_to_latest" || job.manual_billing_mode === "calendar"
+          ? job.manual_billing_mode
+          : "report_days",
+      );
     }
     setEditing(false);
   };
@@ -614,6 +623,24 @@ export default function JobDetailPage() {
                         </span>
                       </span>
                     </label>
+                    <label className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="bill-mode"
+                        className="mt-1"
+                        checked={billMode === "calendar"}
+                        disabled={!canManageAssets}
+                        onChange={() => setBillMode("calendar")}
+                        data-testid="radio-mode-calendar"
+                      />
+                      <span>
+                        Every day on a billing calendar (no reports)
+                        <span className="block text-xs text-muted-foreground">
+                          For jobs like the Mud Plant: every day from the billing start date bills unless it's marked
+                          Not billing. Centrifuge hours are entered by hand each day.
+                        </span>
+                      </span>
+                    </label>
                   </div>
                 )}
                 {manualRate && dayRate.trim() === "" && (
@@ -642,7 +669,14 @@ export default function JobDetailPage() {
         )}
       </div>
 
-      {job.manual_day_rate && <SetRateBilling job={job} />}
+      {job.manual_day_rate && job.manual_billing_mode === "calendar" ? (
+        <>
+          <MudPlantBilling job={job} />
+          <DailyCentrifugeHours job={job} />
+        </>
+      ) : (
+        job.manual_day_rate && <SetRateBilling job={job} />
+      )}
       {canEdit && <JobBidDocs jobId={job.id} canEdit={canManageAssets} />}
 
       {job.description && (

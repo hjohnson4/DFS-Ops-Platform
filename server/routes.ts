@@ -16,7 +16,7 @@ import { registerForecastRoutes } from "./forecast";
 import { registerFieldTicketRoutes } from "./fieldTickets";
 import { registerRentalRoutes, stripRentalMoney } from "./rentals";
 import { AREAS, isLiveJobStatus, assetStatusFor } from "@shared/schema";
-import { computeManualBilling, publicBilling, recordRateChange } from "./manualBilling";
+import { computeManualBilling, publicBilling, recordRateChange, todayCentral } from "./manualBilling";
 import {
   createUserSchema,
   updateUserSchema,
@@ -1944,6 +1944,262 @@ export async function registerRoutes(
     }
     return { client, job };
   }
+
+  // ---- Mud Plant: billing calendar + hand-entered centrifuge hours ----------
+  // Only for jobs with manual_billing_mode = 'calendar' (no daily reports).
+  const ISO = /^\d{4}-\d{2}-\d{2}$/;
+  async function calendarJobGuard(req: Request, res: Response) {
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: job, error } = await client
+      .from("jobs")
+      .select("id, area, job_number, day_rate, status, manual_day_rate, manual_billing_mode, billing_start_date, started_on")
+      .eq("id", req.params.id)
+      .single();
+    if (error || !job) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    const scope = areaScopeOf(req.profile!);
+    if (scope && (job as any).area !== scope) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    const jobIds = await jobScopeOf(req.profile!);
+    if (jobIds && !jobIds.includes((job as any).id)) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    if ((job as any).manual_billing_mode !== "calendar") {
+      res.status(400).json({ message: "This job isn't on a billing calendar." });
+      return null;
+    }
+    return { client, job: job as any };
+  }
+  const canEditCalendar = (req: Request) => ["admin", "area"].includes(String(req.profile!.role));
+
+  app.get("/api/jobs/:id/billing-calendar", requireAuth, async (req: Request, res: Response) => {
+    const g = await calendarJobGuard(req, res);
+    if (!g) return;
+    const { client, job } = g;
+    const { data: days } = await client
+      .from("job_billing_days")
+      .select("day, billing, note, changed_by_name, changed_at")
+      .eq("job_id", job.id)
+      .order("day", { ascending: true });
+    const { data: events } = await client
+      .from("job_billing_events")
+      .select("kind, day, billing, start_date, note, changed_by_name, created_at")
+      .eq("job_id", job.id)
+      .order("created_at", { ascending: false })
+      .limit(15);
+    const billing = (await computeManualBilling([job])).get(job.id);
+    res.json({
+      start_date: job.billing_start_date ?? job.started_on ?? null,
+      day_rate: job.day_rate != null ? Number(job.day_rate) : null,
+      today: todayCentral(),
+      days: (days || []).map((d: any) => ({ ...d, day: String(d.day).slice(0, 10) })),
+      events: events || [],
+      summary: publicBilling(billing),
+      daily: billing ? Object.fromEntries(billing.daily) : {},
+      can_edit: canEditCalendar(req),
+    });
+  });
+
+  app.put("/api/jobs/:id/billing-calendar/day", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
+    const g = await calendarJobGuard(req, res);
+    if (!g) return;
+    const { client, job } = g;
+    const day = String(req.body?.day ?? "");
+    const billing = req.body?.billing;
+    const note = req.body?.note ? String(req.body.note).slice(0, 500) : null;
+    if (!ISO.test(day)) return res.status(400).json({ message: "Pick a valid day." });
+    if (typeof billing !== "boolean") return res.status(400).json({ message: "Choose Billing or Not billing." });
+    const actor = req.profile!;
+    const { error } = await client.from("job_billing_days").upsert(
+      { job_id: job.id, day, billing, note, changed_by: actor.id, changed_by_name: actor.name, changed_at: new Date().toISOString() },
+      { onConflict: "job_id,day" },
+    );
+    if (error) return res.status(400).json({ message: `Could not save: ${error.message}` });
+    await client.from("job_billing_events").insert({
+      job_id: job.id, kind: "day", day, billing, note, changed_by: actor.id, changed_by_name: actor.name,
+    });
+    res.json({ ok: true });
+  });
+
+  app.put("/api/jobs/:id/billing-calendar/start", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
+    const g = await calendarJobGuard(req, res);
+    if (!g) return;
+    const { client, job } = g;
+    const start = String(req.body?.start_date ?? "");
+    if (!ISO.test(start)) return res.status(400).json({ message: "Pick a valid start date." });
+    if (start > todayCentral()) return res.status(400).json({ message: "The billing start date can't be in the future." });
+    const { error } = await client.from("jobs").update({ billing_start_date: start }).eq("id", job.id);
+    if (error) return res.status(400).json({ message: `Could not save: ${error.message}` });
+    const actor = req.profile!;
+    await client.from("job_billing_events").insert({
+      job_id: job.id, kind: "start", start_date: start, changed_by: actor.id, changed_by_name: actor.name,
+    });
+    res.json({ ok: true });
+  });
+
+  // Centrifuges on the job + hand-entered hours for a date range.
+  app.get("/api/jobs/:id/manual-hours", requireAuth, async (req: Request, res: Response) => {
+    const g = await calendarJobGuard(req, res);
+    if (!g) return;
+    const { client, job } = g;
+    const today = todayCentral();
+    const to = ISO.test(String(req.query.to ?? "")) ? String(req.query.to) : today;
+    const from = ISO.test(String(req.query.from ?? "")) ? String(req.query.from) : (() => {
+      const d = new Date(to + "T12:00:00Z");
+      d.setUTCDate(d.getUTCDate() - 6);
+      return d.toISOString().slice(0, 10);
+    })();
+    const { data: assets } = await client
+      .from("assets")
+      .select("id, tag, category, run_hours, run_hours_at_service, service_hours_interval")
+      .eq("job_id", job.id)
+      .in("category", RUN_HOUR_CATEGORIES as unknown as string[])
+      .order("tag", { ascending: true });
+    const list = (assets || []) as any[];
+    const { data: rows } = await client
+      .from("asset_run_hours")
+      .select("asset_id, report_date, hours, entered_by_name, created_at")
+      .eq("job_id", job.id)
+      .is("daily_report_id", null)
+      .gte("report_date", from)
+      .lte("report_date", to)
+      .order("report_date", { ascending: false });
+    // Month-to-date totals per centrifuge (hand-entered on this job).
+    const monthStart = to.slice(0, 8) + "01";
+    const { data: mtdRows } = await client
+      .from("asset_run_hours")
+      .select("asset_id, hours")
+      .eq("job_id", job.id)
+      .is("daily_report_id", null)
+      .gte("report_date", monthStart)
+      .lte("report_date", to);
+    const mtd: Record<string, number> = {};
+    for (const r of (mtdRows || []) as any[]) mtd[r.asset_id] = round2((mtd[r.asset_id] ?? 0) + (Number(r.hours) || 0));
+    // Days (from the billing start, max 31 back) with no hours for any centrifuge.
+    const start = String(job.billing_start_date ?? job.started_on ?? "").slice(0, 10);
+    const lookFrom = (() => {
+      const d = new Date(today + "T12:00:00Z");
+      d.setUTCDate(d.getUTCDate() - 30);
+      const s = d.toISOString().slice(0, 10);
+      return ISO.test(start) && start > s ? start : s;
+    })();
+    const { data: seen } = await client
+      .from("asset_run_hours")
+      .select("report_date")
+      .eq("job_id", job.id)
+      .is("daily_report_id", null)
+      .gte("report_date", lookFrom)
+      .lte("report_date", today);
+    const have = new Set(((seen || []) as any[]).map((r) => String(r.report_date).slice(0, 10)));
+    const missing: string[] = [];
+    if (list.length) {
+      const d = new Date(lookFrom + "T12:00:00Z");
+      // today isn't "missing" yet — hours are usually entered at day end
+      while (d.toISOString().slice(0, 10) < today) {
+        const s = d.toISOString().slice(0, 10);
+        if (!have.has(s)) missing.push(s);
+        d.setUTCDate(d.getUTCDate() + 1);
+      }
+    }
+    const svc = await hoursSinceServiceFor(client, list);
+    res.json({
+      from,
+      to,
+      today,
+      assets: list.map((a) => ({
+        id: a.id,
+        tag: a.tag,
+        category: a.category,
+        hours_since_service: svc.get(a.id)?.hoursSince ?? null,
+        service_state: svc.get(a.id)?.state ?? null,
+        month_hours: mtd[a.id] ?? 0,
+      })),
+      entries: ((rows || []) as any[]).map((r) => ({ ...r, report_date: String(r.report_date).slice(0, 10) })),
+      missing_days: missing,
+      can_edit: canEditCalendar(req),
+    });
+  });
+
+  // Save one day's hours. entries: [{ asset_id, hours }] — hours null clears it.
+  app.put("/api/jobs/:id/manual-hours", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
+    const g = await calendarJobGuard(req, res);
+    if (!g) return;
+    const { client, job } = g;
+    const date = String(req.body?.date ?? "");
+    const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
+    if (!ISO.test(date)) return res.status(400).json({ message: "Pick a valid date." });
+    if (date > todayCentral()) return res.status(400).json({ message: "You can't enter hours for a future day." });
+    if (!entries.length) return res.status(400).json({ message: "Enter hours for at least one centrifuge." });
+    const { data: assets } = await client
+      .from("assets")
+      .select("id, tag, run_hours")
+      .eq("job_id", job.id)
+      .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
+    const byId = new Map(((assets || []) as any[]).map((a) => [a.id, a]));
+    const clean: { asset_id: string; hours: number | null; tag: string }[] = [];
+    for (const e of entries) {
+      const a = byId.get(String(e?.asset_id ?? ""));
+      if (!a) return res.status(400).json({ message: "One of those centrifuges isn't on this job." });
+      const raw = e?.hours;
+      if (raw === null || raw === "" || raw === undefined) {
+        clean.push({ asset_id: a.id, hours: null, tag: a.tag });
+        continue;
+      }
+      const h = Number(raw);
+      if (!Number.isFinite(h) || h < 0 || h > 24)
+        return res.status(400).json({ message: `${a.tag}: hours must be between 0 and 24.` });
+      clean.push({ asset_id: a.id, hours: round2(h), tag: a.tag });
+    }
+    const actor = req.profile!;
+    for (const e of clean) {
+      const { data: prev } = await client
+        .from("asset_run_hours")
+        .select("id, hours")
+        .eq("asset_id", e.asset_id)
+        .eq("job_id", job.id)
+        .eq("report_date", date)
+        .is("daily_report_id", null)
+        .maybeSingle();
+      const old = prev ? Number((prev as any).hours) || 0 : 0;
+      const next = e.hours ?? 0;
+      if (prev && e.hours == null) {
+        const { error } = await client.from("asset_run_hours").delete().eq("id", (prev as any).id);
+        if (error) return res.status(400).json({ message: `${e.tag}: ${error.message}` });
+      } else if (prev) {
+        const { error } = await client
+          .from("asset_run_hours")
+          .update({ hours: next, entered_by: actor.id, entered_by_name: actor.name })
+          .eq("id", (prev as any).id);
+        if (error) return res.status(400).json({ message: `${e.tag}: ${error.message}` });
+      } else if (e.hours != null) {
+        const { error } = await client.from("asset_run_hours").insert({
+          asset_id: e.asset_id,
+          daily_report_id: null,
+          job_id: job.id,
+          well_name: job.job_number || "Mud Plant",
+          report_date: date,
+          hours: next,
+          source: "manual",
+          entered_by: actor.id,
+          entered_by_name: actor.name,
+        });
+        if (error) return res.status(400).json({ message: `${e.tag}: ${error.message}` });
+      }
+      // Keep the centrifuge's hour meter in step with the change.
+      const delta = round2(next - old);
+      if (delta !== 0) {
+        const { data: cur } = await client.from("assets").select("run_hours").eq("id", e.asset_id).single();
+        const meter = round2(Math.max(0, (Number((cur as any)?.run_hours ?? 0) || 0) + delta));
+        await client.from("assets").update({ run_hours: meter }).eq("id", e.asset_id);
+      }
+    }
+    res.json({ ok: true, saved: clean.length });
+  });
 
   app.get("/api/jobs/:id/credit-run-hours", requireAuth, requireRole("admin", "area"), async (req: Request, res: Response) => {
     const g = await creditJobGuard(req, res);

@@ -66,7 +66,7 @@ export type ManualBillingFull = ManualBilling & {
   by_well_key: Map<string, number>; // wellKey -> revenue
 };
 
-export type ManualBillingMode = "report_days" | "spud_to_latest";
+export type ManualBillingMode = "report_days" | "spud_to_latest" | "calendar";
 
 type JobLite = {
   id: string;
@@ -76,14 +76,44 @@ type JobLite = {
   manual_billing_mode?: string | null;
 };
 
-// Read each job's billing mode (column may not exist yet -> report_days).
-async function loadModes(ids: string[]): Promise<Map<string, ManualBillingMode>> {
-  const out = new Map<string, ManualBillingMode>();
+// Read each job's billing mode (column may not exist yet -> report_days),
+// plus the calendar-mode start date (billing_start_date, else started_on).
+type ModeInfo = { mode: ManualBillingMode; start: string | null };
+const asMode = (v: any): ManualBillingMode =>
+  v === "spud_to_latest" ? "spud_to_latest" : v === "calendar" ? "calendar" : "report_days";
+async function loadModes(ids: string[]): Promise<Map<string, ModeInfo>> {
+  const out = new Map<string, ModeInfo>();
   if (!ids.length) return out;
-  const { data, error } = await client().from("jobs").select("id, manual_billing_mode").in("id", ids);
-  if (error) return out;
-  for (const r of (data ?? []) as any[])
-    out.set(String(r.id), r.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
+  let { data, error } = await client()
+    .from("jobs")
+    .select("id, manual_billing_mode, billing_start_date, started_on")
+    .in("id", ids);
+  if (error) {
+    const r = await client().from("jobs").select("id, manual_billing_mode, started_on").in("id", ids);
+    data = r.data as any;
+    if (r.error) return out;
+  }
+  for (const r of (data ?? []) as any[]) {
+    const st = String(r.billing_start_date ?? r.started_on ?? "").slice(0, 10);
+    out.set(String(r.id), { mode: asMode(r.manual_billing_mode), start: /^\d{4}-\d{2}-\d{2}$/.test(st) ? st : null });
+  }
+  return out;
+}
+
+// Calendar-mode (Mud Plant) day overrides: day -> billing true/false.
+export async function loadBillingDays(jobIds: string[]): Promise<Map<string, Map<string, boolean>>> {
+  const out = new Map<string, Map<string, boolean>>();
+  if (!jobIds.length) return out;
+  const { data, error } = await client()
+    .from("job_billing_days")
+    .select("job_id, day, billing")
+    .in("job_id", jobIds);
+  if (error) return out; // table not created yet
+  for (const r of (data ?? []) as any[]) {
+    const m = out.get(r.job_id) ?? new Map<string, boolean>();
+    m.set(String(r.day).slice(0, 10), !!r.billing);
+    out.set(r.job_id, m);
+  }
   return out;
 }
 
@@ -123,6 +153,8 @@ export async function computeManualBilling(
   const today = todayCentral();
   const events = await loadRateEvents(ids);
   const modes = await loadModes(ids);
+  const calIds = ids.filter((id) => modes.get(id)?.mode === "calendar");
+  const billingDays = await loadBillingDays(calIds);
   const { data: reps } = await client()
     .from("daily_reports")
     .select("job_id, well_name, report_date, report_day, well_context")
@@ -142,10 +174,8 @@ export async function computeManualBilling(
   }
 
   for (const j of manual) {
-    const mode: ManualBillingMode =
-      j.manual_billing_mode === "spud_to_latest" || modes.get(j.id) === "spud_to_latest"
-        ? "spud_to_latest"
-        : "report_days";
+    const info = modes.get(j.id);
+    const mode: ManualBillingMode = info?.mode ?? asMode(j.manual_billing_mode);
     const evs = events.get(j.id) ?? [];
     const jobRate = num(j.day_rate);
     const reports = (repsByJob.get(j.id) ?? []).sort((a, b) =>
@@ -205,6 +235,22 @@ export async function computeManualBilling(
       daily.set(day, (daily.get(day) ?? 0) + st.rate);
       byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
     };
+    let notBilledDays = 0;
+    const calStart = mode === "calendar" ? info?.start ?? null : null;
+    if (mode === "calendar") {
+      // Mud Plant: no daily reports. Every day from the billing start date
+      // through today bills, except days marked Not billing.
+      const offs = billingDays.get(j.id) ?? new Map<string, boolean>();
+      if (calStart && calStart <= today) {
+        let d = calStart;
+        let guard = 0;
+        while (d <= today && guard++ < 3700) {
+          if (offs.get(d) === false) notBilledDays++;
+          else bill(d, "__calendar__");
+          d = addDays(d, 1);
+        }
+      }
+    }
     if (mode === "spud_to_latest") {
       // Every calendar day from the first well's spud date through the latest
       // report date, credited to the well that had spudded by that day.
@@ -238,6 +284,32 @@ export async function computeManualBilling(
     const curKey = lastWell != null ? wellKey(lastWell) : null;
     const curSeg = curKey != null ? segMap.get(curKey) : undefined;
     const currentWell = curSeg?.name || lastWell;
+    if (mode === "calendar") {
+      const t = todayState;
+      out.set(j.id, {
+        start_date: calStart,
+        start_source: calStart ? "billing_start" : null,
+        current_well_spud_date: null,
+        mode,
+        through_date: today,
+        latest_report_date: latestReport,
+        billing_start_date: calStart,
+        not_billed_days: notBilledDays,
+        billable_days: billable,
+        missing_rate_days: missingRateDays,
+        total: calStart ? Math.round(total * 100) / 100 : null,
+        today_rate:
+          t.status === "Active" && t.rate != null && t.rate > 0 ? t.rate : t.status === "Active" ? null : 0,
+        today_status: t.status,
+        current_well: null,
+        current_well_revenue: null,
+        by_well: [],
+        events: evs,
+        daily,
+        by_well_key: byWell,
+      } as any);
+      continue;
+    }
     out.set(j.id, {
       start_date: start,
       start_source: !start ? null : segs[0].spud ? "spud_date" : "first_report",

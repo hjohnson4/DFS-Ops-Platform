@@ -104,6 +104,7 @@ export interface Job {
   manual_day_rate?: boolean;
   // "report_days" (Verdun) or "spud_to_latest" (Expand Energy). See manualBilling.ts.
   manual_billing_mode?: ManualBillingMode | null;
+  billing_start_date?: string | null; // calendar mode (Mud Plant)
   manual_billing?: ManualBilling | null;
 }
 
@@ -115,13 +116,15 @@ export interface ManualBillingEvent {
   created_at: string;
 }
 
-export type ManualBillingMode = "report_days" | "spud_to_latest";
+export type ManualBillingMode = "report_days" | "spud_to_latest" | "calendar";
 
 export interface ManualBilling {
   mode?: ManualBillingMode; // how days are counted
+  billing_start_date?: string | null; // calendar mode: first billed day
+  not_billed_days?: number; // calendar mode: days marked Not billing
   latest_report_date?: string | null; // newest report date on the job
   start_date: string | null; // first well's spud date (AU6), else oldest daily report date
-  start_source?: "spud_date" | "first_report" | null;
+  start_source?: "spud_date" | "first_report" | "billing_start" | null;
   current_well_spud_date?: string | null;
   through_date: string; // today (report_days) or the latest report date (spud_to_latest)
   billable_days: number; // report days on/after spud, or calendar days spud → latest report
@@ -1506,7 +1509,7 @@ export const updateJobSchema = z.object({
   ended_on: z.string().nullable().optional(),
   day_rate: dayRateField,
   manual_day_rate: z.boolean().optional(),
-  manual_billing_mode: z.enum(["report_days", "spud_to_latest"]).optional(),
+  manual_billing_mode: z.enum(["report_days", "spud_to_latest", "calendar"]).optional(),
   well_name: z.string().nullable().optional(),
   // when present, replaces the full set of field-tech assignments for the job
   field_tech_ids: z.array(z.string().uuid()).optional(),
