@@ -6906,6 +6906,51 @@ export async function registerRoutes(
     }
   };
 
+  // Word (.docx) JSAs — e.g. North Louisiana's "DFS JSA" form. There are no
+  // cells, so read the document text and pull the "Location:" (rig / job) and
+  // "Date:" lines from it. Returns nulls when the file isn't a readable .docx.
+  const isWordJsa = (name: string | null | undefined, mime: string | null | undefined) =>
+    /wordprocessingml|msword/i.test(String(mime ?? "")) || /\.docx?$/i.test(String(name ?? ""));
+  const readJsaFromWord = (
+    base64: string,
+  ): { location: string | null; date: string | null } => {
+    try {
+      const buf = Buffer.from(base64, "base64");
+      const cfb = (XLSX as any).CFB.read(buf, { type: "buffer" });
+      const i = (cfb.FullPaths as string[]).findIndex((p) => /word\/document\.xml$/i.test(p));
+      if (i < 0) return { location: null, date: null };
+      const xml = Buffer.from(cfb.FileIndex[i].content).toString("utf8");
+      const decode = (t: string) =>
+        t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+      const paras = (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || []).map((p) =>
+        decode((p.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || []).map((t) => t.replace(/<[^>]+>/g, "")).join("")),
+      );
+      const clean = (v: string) => v.replace(/_+/g, " ").replace(/\s+/g, " ").trim();
+      let location: string | null = null;
+      let date: string | null = null;
+      for (const para of paras) {
+        if (!location) {
+          const m = para.match(/Location\s*:\s*(.*?)(?=\s*(?:Date|Job Task|Supervisor|Work Activity)\s*:|$)/i);
+          if (m && clean(m[1])) location = clean(m[1]);
+        }
+        if (!date) {
+          const m = para.match(/Date\s*:\s*(.*?)(?=\s*(?:Location|Job Task|Supervisor)\s*:|$)/i);
+          const d = m ? clean(m[1]).match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/) : null;
+          if (d) {
+            const yy = d[3].length === 2 ? 2000 + Number(d[3]) : Number(d[3]);
+            const mm = Number(d[1]);
+            const dd = Number(d[2]);
+            if (yy >= 2000 && yy <= 2100 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31)
+              date = `${yy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+          }
+        }
+      }
+      return { location, date };
+    } catch {
+      return { location: null, date: null };
+    }
+  };
+
   // Ingest a JSA email. Auth via the shared x-ingest-token (same as reports).
   app.post("/api/jsa-intake/ingest", async (req: Request, res: Response) => {
     if (!INGEST_TOKEN)
@@ -6932,38 +6977,59 @@ export async function registerRoutes(
     //   3) a job number parsed from the email subject (fallback, e.g. PDFs)
     // Comparison against jobs.job_number is space/dash-insensitive so that
     // "H&P 266" (K4) matches "H&P 266", and "WT 3050" matches "WT-3050".
-    const rigFromWorkbook = readJsaRigNameFromWorkbook(
-      p.attachment_base64,
-      p.attachment_mime,
-    );
+    const word = isWordJsa(p.attachment_name, p.attachment_mime);
+    const rigFromWorkbook = word
+      ? null
+      : readJsaRigNameFromWorkbook(p.attachment_base64, p.attachment_mime);
+    const wordInfo = word ? readJsaFromWord(p.attachment_base64) : { location: null, date: null };
     const explicit = p.job_number && p.job_number.trim();
     const subjectNumber = parseJobNumber(p.subject);
-    // What we store as the human-readable "raw" identifier and what we match on.
-    const jobNumber = explicit || rigFromWorkbook || subjectNumber;
-    // Where the identifier came from, for the audit event.
-    const matchSource = explicit
-      ? "request"
-      : rigFromWorkbook
-        ? "workbook cell K4"
-        : subjectNumber
-          ? "email subject"
-          : null;
+    // Candidate job identifiers, strongest first:
+    //   request override → workbook K4 → Word "Location:" → (same-email daily
+    //   report's job, below) → email subject.
+    const candidates: { value: string; source: string }[] = [];
+    if (explicit) candidates.push({ value: explicit, source: "request" });
+    if (rigFromWorkbook) candidates.push({ value: rigFromWorkbook, source: "workbook cell K4" });
+    if (wordInfo.location) candidates.push({ value: wordInfo.location, source: "the JSA's Location line" });
     let job_id: string | null = null;
     let area: string | null = null;
     let customer_id: string | null = null;
-    if (jobNumber) {
-      const { data: jobs } = await client
-        .from("jobs")
-        .select("id, area, customer_id, job_number")
-        .is("archived_at", null);
-      const target = normJobId(jobNumber);
-      const match = (jobs || []).find(
-        (j: any) => normJobId(j.job_number) === target,
-      );
-      if (match) {
-        job_id = match.id;
-        area = match.area;
-        customer_id = match.customer_id;
+    let jobNumber: string | null = candidates[0]?.value ?? subjectNumber ?? null;
+    let matchSource: string | null = candidates[0]?.source ?? (subjectNumber ? "email subject" : null);
+    const { data: allJobs } = await client
+      .from("jobs")
+      .select("id, area, customer_id, job_number")
+      .is("archived_at", null);
+    const findJob = (v: string) => (allJobs || []).find((j: any) => normJobId(j.job_number) === normJobId(v)) as any;
+    for (const c of candidates) {
+      const m = findJob(c.value);
+      if (m) {
+        job_id = m.id; area = m.area; customer_id = m.customer_id;
+        jobNumber = c.value; matchSource = c.source;
+        break;
+      }
+    }
+    // Same email also carried a daily report (e.g. Dustin Dillard's crews send
+    // the report + JSA together): use that report's job.
+    if (!job_id) {
+      const { data: sib } = await client
+        .from("daily_reports")
+        .select("job_id, area, customer_id, job:jobs(job_number)")
+        .eq("email_message_id", p.email_message_id)
+        .not("job_id", "is", null)
+        .limit(1);
+      const r = (sib || [])[0] as any;
+      if (r?.job_id) {
+        job_id = r.job_id; area = r.area; customer_id = r.customer_id;
+        jobNumber = r.job?.job_number ?? jobNumber;
+        matchSource = "the daily report in the same email";
+      }
+    }
+    if (!job_id && subjectNumber) {
+      const m = findJob(subjectNumber);
+      if (m) {
+        job_id = m.id; area = m.area; customer_id = m.customer_id;
+        jobNumber = subjectNumber; matchSource = "email subject";
       }
     }
 
@@ -6975,10 +7041,12 @@ export async function registerRoutes(
       sender_name: p.sender_name ?? null,
       subject: p.subject ?? null,
       received_at: p.received_at ?? new Date().toISOString(),
-      jsa_date: p.jsa_date ?? null,
+      jsa_date: p.jsa_date ?? wordInfo.date ?? null,
       job_number_raw: jobNumber,
       attachment_name: p.attachment_name,
-      attachment_mime: p.attachment_mime ?? "application/pdf",
+      attachment_mime:
+        p.attachment_mime ??
+        (word ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf"),
       attachment_size: bytes.length,
       attachment_base64: p.attachment_base64,
       area,
@@ -7003,7 +7071,7 @@ export async function registerRoutes(
           ? ` and matched job \"${jobNumber}\" (from ${matchSource}) to this JSA.`
           : jobNumber
             ? ` — \"${jobNumber}\" (from ${matchSource}) did not match any job; awaiting assignment.`
-            : ` — no rig name in the workbook (K4) and no job number in the subject; awaiting assignment.`),
+            : ` — no rig name in the file and no job number in the subject; awaiting assignment.`),
     });
     res.status(201).json(data);
   });

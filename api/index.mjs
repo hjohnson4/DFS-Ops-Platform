@@ -7361,6 +7361,43 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       return null;
     }
   };
+  const isWordJsa = (name, mime) => /wordprocessingml|msword/i.test(String(mime ?? "")) || /\.docx?$/i.test(String(name ?? ""));
+  const readJsaFromWord = (base64) => {
+    try {
+      const buf = Buffer.from(base64, "base64");
+      const cfb = XLSX2.CFB.read(buf, { type: "buffer" });
+      const i = cfb.FullPaths.findIndex((p) => /word\/document\.xml$/i.test(p));
+      if (i < 0) return { location: null, date: null };
+      const xml = Buffer.from(cfb.FileIndex[i].content).toString("utf8");
+      const decode = (t) => t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
+      const paras = (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || []).map(
+        (p) => decode((p.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || []).map((t) => t.replace(/<[^>]+>/g, "")).join(""))
+      );
+      const clean2 = (v) => v.replace(/_+/g, " ").replace(/\s+/g, " ").trim();
+      let location = null;
+      let date = null;
+      for (const para of paras) {
+        if (!location) {
+          const m = para.match(/Location\s*:\s*(.*?)(?=\s*(?:Date|Job Task|Supervisor|Work Activity)\s*:|$)/i);
+          if (m && clean2(m[1])) location = clean2(m[1]);
+        }
+        if (!date) {
+          const m = para.match(/Date\s*:\s*(.*?)(?=\s*(?:Location|Job Task|Supervisor)\s*:|$)/i);
+          const d = m ? clean2(m[1]).match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/) : null;
+          if (d) {
+            const yy = d[3].length === 2 ? 2e3 + Number(d[3]) : Number(d[3]);
+            const mm = Number(d[1]);
+            const dd = Number(d[2]);
+            if (yy >= 2e3 && yy <= 2100 && mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31)
+              date = `${yy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+          }
+        }
+      }
+      return { location, date };
+    } catch {
+      return { location: null, date: null };
+    }
+  };
   app.post("/api/jsa-intake/ingest", async (req, res) => {
     if (!INGEST_TOKEN)
       return res.status(503).json({ message: "Ingest not configured (set INGEST_TOKEN)." });
@@ -7373,27 +7410,52 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     const p = parsed.data;
     const { data: existing } = await client2.from("jsa_reports").select(JSA_LIST_COLS).eq("email_message_id", p.email_message_id).maybeSingle();
     if (existing) return res.status(200).json({ ...existing, deduped: true });
-    const rigFromWorkbook = readJsaRigNameFromWorkbook(
-      p.attachment_base64,
-      p.attachment_mime
-    );
+    const word = isWordJsa(p.attachment_name, p.attachment_mime);
+    const rigFromWorkbook = word ? null : readJsaRigNameFromWorkbook(p.attachment_base64, p.attachment_mime);
+    const wordInfo = word ? readJsaFromWord(p.attachment_base64) : { location: null, date: null };
     const explicit = p.job_number && p.job_number.trim();
     const subjectNumber = parseJobNumber(p.subject);
-    const jobNumber = explicit || rigFromWorkbook || subjectNumber;
-    const matchSource = explicit ? "request" : rigFromWorkbook ? "workbook cell K4" : subjectNumber ? "email subject" : null;
+    const candidates = [];
+    if (explicit) candidates.push({ value: explicit, source: "request" });
+    if (rigFromWorkbook) candidates.push({ value: rigFromWorkbook, source: "workbook cell K4" });
+    if (wordInfo.location) candidates.push({ value: wordInfo.location, source: "the JSA's Location line" });
     let job_id = null;
     let area = null;
     let customer_id = null;
-    if (jobNumber) {
-      const { data: jobs } = await client2.from("jobs").select("id, area, customer_id, job_number").is("archived_at", null);
-      const target = normJobId(jobNumber);
-      const match = (jobs || []).find(
-        (j) => normJobId(j.job_number) === target
-      );
-      if (match) {
-        job_id = match.id;
-        area = match.area;
-        customer_id = match.customer_id;
+    let jobNumber = candidates[0]?.value ?? subjectNumber ?? null;
+    let matchSource = candidates[0]?.source ?? (subjectNumber ? "email subject" : null);
+    const { data: allJobs } = await client2.from("jobs").select("id, area, customer_id, job_number").is("archived_at", null);
+    const findJob = (v) => (allJobs || []).find((j) => normJobId(j.job_number) === normJobId(v));
+    for (const c of candidates) {
+      const m = findJob(c.value);
+      if (m) {
+        job_id = m.id;
+        area = m.area;
+        customer_id = m.customer_id;
+        jobNumber = c.value;
+        matchSource = c.source;
+        break;
+      }
+    }
+    if (!job_id) {
+      const { data: sib } = await client2.from("daily_reports").select("job_id, area, customer_id, job:jobs(job_number)").eq("email_message_id", p.email_message_id).not("job_id", "is", null).limit(1);
+      const r = (sib || [])[0];
+      if (r?.job_id) {
+        job_id = r.job_id;
+        area = r.area;
+        customer_id = r.customer_id;
+        jobNumber = r.job?.job_number ?? jobNumber;
+        matchSource = "the daily report in the same email";
+      }
+    }
+    if (!job_id && subjectNumber) {
+      const m = findJob(subjectNumber);
+      if (m) {
+        job_id = m.id;
+        area = m.area;
+        customer_id = m.customer_id;
+        jobNumber = subjectNumber;
+        matchSource = "email subject";
       }
     }
     const bytes = Buffer.from(p.attachment_base64, "base64");
@@ -7404,10 +7466,10 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       sender_name: p.sender_name ?? null,
       subject: p.subject ?? null,
       received_at: p.received_at ?? (/* @__PURE__ */ new Date()).toISOString(),
-      jsa_date: p.jsa_date ?? null,
+      jsa_date: p.jsa_date ?? wordInfo.date ?? null,
       job_number_raw: jobNumber,
       attachment_name: p.attachment_name,
-      attachment_mime: p.attachment_mime ?? "application/pdf",
+      attachment_mime: p.attachment_mime ?? (word ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : "application/pdf"),
       attachment_size: bytes.length,
       attachment_base64: p.attachment_base64,
       area,
@@ -7422,7 +7484,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       actor_name: p.sender_name || p.sender_email,
       actor_role: "field",
       action: "received",
-      detail: `Received JSA "${p.attachment_name}"` + (job_id ? ` and matched job "${jobNumber}" (from ${matchSource}) to this JSA.` : jobNumber ? ` \u2014 "${jobNumber}" (from ${matchSource}) did not match any job; awaiting assignment.` : ` \u2014 no rig name in the workbook (K4) and no job number in the subject; awaiting assignment.`)
+      detail: `Received JSA "${p.attachment_name}"` + (job_id ? ` and matched job "${jobNumber}" (from ${matchSource}) to this JSA.` : jobNumber ? ` \u2014 "${jobNumber}" (from ${matchSource}) did not match any job; awaiting assignment.` : ` \u2014 no rig name in the file and no job number in the subject; awaiting assignment.`)
     });
     res.status(201).json(data);
   });

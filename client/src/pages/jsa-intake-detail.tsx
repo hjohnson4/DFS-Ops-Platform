@@ -190,6 +190,11 @@ export default function JsaIntakeDetailPage() {
     }
   }
 
+  // Word JSAs can't be previewed in the browser — offer Download only.
+  const isWord =
+    /wordprocessingml|msword/i.test(String(jsa?.attachment_mime ?? "")) ||
+    /\.docx?$/i.test(String(jsa?.attachment_name ?? ""));
+
   if (isLoading) {
     return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
   }
@@ -273,12 +278,13 @@ export default function JsaIntakeDetailPage() {
             <div className="min-w-0">
               <div className="text-sm font-medium truncate">{jsa.attachment_name}</div>
               <div className="text-xs text-muted-foreground">
-                {jsa.attachment_mime || "file"}
+                {isWord ? "Word document — use Download to open it" : jsa.attachment_mime || "file"}
                 {jsa.attachment_size ? ` · ${fmtBytes(jsa.attachment_size)}` : ""}
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {!isWord && (
             <Button
               variant="outline"
               size="sm"
@@ -293,6 +299,7 @@ export default function JsaIntakeDetailPage() {
               )}
               View
             </Button>
+            )}
             <Button
               variant="outline"
               size="sm"
