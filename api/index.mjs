@@ -7365,7 +7365,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
   const readJsaFromWord = (base64) => {
     try {
       const buf = Buffer.from(base64, "base64");
-      const cfb = XLSX2.CFB.read(buf, { type: "buffer" });
+      const CFB2 = XLSX2.CFB ?? XLSX2.default?.CFB;
+      if (!CFB2) return { location: null, date: null };
+      const cfb = CFB2.read(buf, { type: "buffer" });
       const i = cfb.FullPaths.findIndex((p) => /word\/document\.xml$/i.test(p));
       if (i < 0) return { location: null, date: null };
       const xml = Buffer.from(cfb.FileIndex[i].content).toString("utf8");

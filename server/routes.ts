@@ -6916,7 +6916,11 @@ export async function registerRoutes(
   ): { location: string | null; date: string | null } => {
     try {
       const buf = Buffer.from(base64, "base64");
-      const cfb = (XLSX as any).CFB.read(buf, { type: "buffer" });
+      // In the ESM server bundle CFB lives on the default export, not the
+      // namespace (verified 2026-10-21) — check both.
+      const CFB = (XLSX as any).CFB ?? (XLSX as any).default?.CFB;
+      if (!CFB) return { location: null, date: null };
+      const cfb = CFB.read(buf, { type: "buffer" });
       const i = (cfb.FullPaths as string[]).findIndex((p) => /word\/document\.xml$/i.test(p));
       if (i < 0) return { location: null, date: null };
       const xml = Buffer.from(cfb.FileIndex[i].content).toString("utf8");
