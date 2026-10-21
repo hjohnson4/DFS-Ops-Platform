@@ -212,7 +212,20 @@ function ymdLocal(d: Date): string {
   return `${y}-${mm}-${dd}`;
 }
 
+// Dates with an impossible year (e.g. "10/11/206" typed for 10/11/2026, or a
+// blank template 0 that reads as 1899-12-30) are treated as NO date so the
+// importer infers them from the neighboring day tabs. Without this a typo'd
+// year sorts wrong and hides every later day tab in the workbook.
 function toDateStr(v: any): string | null {
+  const s = toDateStrRaw(v);
+  if (!s) return null;
+  const m = /^(\d{4})-\d{2}-\d{2}$/.exec(s);
+  if (!m) return null;
+  const y = Number(m[1]);
+  return y >= 2000 && y <= 2100 ? s : null;
+}
+
+function toDateStrRaw(v: any): string | null {
   if (v === null || v === undefined || v === "") return null;
   if (v instanceof Date) {
     return ymdLocal(v);

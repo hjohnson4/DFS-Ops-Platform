@@ -15,6 +15,16 @@
 // event dated 2000-01-01. Several changes on the same day: the last one wins.
 // With no events at all, the job's current rate is used for every day, with
 // earlier days treated as Active and today using the job's current status.
+//
+// Billing modes (jobs.manual_billing_mode):
+//  - "report_days" (default, Verdun): one day per received report day dated
+//    on/after the well's spud date.
+//  - "spud_to_latest" (Expand Energy): EVERY calendar day from the first
+//    well's spud date through the LATEST report date, whether or not a report
+//    was received for that day. Back-logged reports therefore bill
+//    day rate × days from spud to the latest report day (spud day counts).
+//    Each day is credited to the well whose spud date is the latest one on or
+//    before it. Rig Move / On Hold / Completed days still bill $0.
 import { supabaseAnon, supabaseAdmin } from "./supabase";
 import type { ManualBilling, ManualBillingEvent } from "@shared/schema";
 
@@ -56,12 +66,26 @@ export type ManualBillingFull = ManualBilling & {
   by_well_key: Map<string, number>; // wellKey -> revenue
 };
 
+export type ManualBillingMode = "report_days" | "spud_to_latest";
+
 type JobLite = {
   id: string;
   day_rate: any;
   status: string;
   manual_day_rate?: boolean | null;
+  manual_billing_mode?: string | null;
 };
+
+// Read each job's billing mode (column may not exist yet -> report_days).
+async function loadModes(ids: string[]): Promise<Map<string, ManualBillingMode>> {
+  const out = new Map<string, ManualBillingMode>();
+  if (!ids.length) return out;
+  const { data, error } = await client().from("jobs").select("id, manual_billing_mode").in("id", ids);
+  if (error) return out;
+  for (const r of (data ?? []) as any[])
+    out.set(String(r.id), r.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
+  return out;
+}
 
 export async function loadRateEvents(
   jobIds: string[],
@@ -98,6 +122,7 @@ export async function computeManualBilling(
   const ids = manual.map((j) => j.id);
   const today = todayCentral();
   const events = await loadRateEvents(ids);
+  const modes = await loadModes(ids);
   const { data: reps } = await client()
     .from("daily_reports")
     .select("job_id, well_name, report_date, report_day, well_context")
@@ -106,7 +131,8 @@ export async function computeManualBilling(
   const oldestSpud = addDays(today, -730);
   for (const r of reps ?? []) {
     const day = r.report_date ? String(r.report_date).slice(0, 10) : "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today) continue;
+    // Skip unparseable, future, or clearly mistyped (e.g. year 0206) dates.
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today || day < oldestSpud) continue;
     const arr = repsByJob.get(r.job_id) ?? [];
     const sp = String((r as any).well_context?.spud_date ?? "").slice(0, 10);
     // Ignore blank, future, or clearly stale template spud dates.
@@ -116,6 +142,10 @@ export async function computeManualBilling(
   }
 
   for (const j of manual) {
+    const mode: ManualBillingMode =
+      j.manual_billing_mode === "spud_to_latest" || modes.get(j.id) === "spud_to_latest"
+        ? "spud_to_latest"
+        : "report_days";
     const evs = events.get(j.id) ?? [];
     const jobRate = num(j.day_rate);
     const reports = (repsByJob.get(j.id) ?? []).sort((a, b) =>
@@ -162,10 +192,37 @@ export async function computeManualBilling(
     let total = 0;
     let billable = 0;
     let missingRateDays = 0;
+    const latestReport = reports.length ? reports[reports.length - 1].day : null;
+    const bill = (day: string, k: string) => {
+      const st = stateOn(day);
+      if (st.status !== "Active") return;
+      if (st.rate == null || st.rate <= 0) {
+        missingRateDays++;
+        return;
+      }
+      billable++;
+      total += st.rate;
+      daily.set(day, (daily.get(day) ?? 0) + st.rate);
+      byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
+    };
+    if (mode === "spud_to_latest") {
+      // Every calendar day from the first well's spud date through the latest
+      // report date, credited to the well that had spudded by that day.
+      if (start && latestReport && start <= latestReport) {
+        let d = start;
+        let guard = 0;
+        while (d <= latestReport && guard++ < 1500) {
+          let k = segs[0].key;
+          for (const g of segs) if (g.start <= d) k = g.key;
+          bill(d, k);
+          d = addDays(d, 1);
+        }
+      }
+    }
     // Bill one day per received report day (any status, duplicates of the
     // same day number counted once) dated on/after the well's spud date.
     const counted = new Set<string>();
-    for (const r of reports) {
+    if (mode === "report_days") for (const r of reports) {
       const k = wellKey(r.well);
       const seg = segMap.get(k)!;
       const wellStart = seg.spud ?? seg.first;
@@ -173,16 +230,7 @@ export async function computeManualBilling(
       const dayKey = `${k}|${r.rd > 0 ? `d${r.rd}` : r.day}`;
       if (counted.has(dayKey)) continue;
       counted.add(dayKey);
-      const st = stateOn(r.day);
-      if (st.status !== "Active") continue;
-      if (st.rate == null || st.rate <= 0) {
-        missingRateDays++;
-        continue;
-      }
-      billable++;
-      total += st.rate;
-      daily.set(r.day, (daily.get(r.day) ?? 0) + st.rate);
-      byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
+      bill(r.day, k);
     }
     for (const g of segs) wellDisplay.set(g.key, g.name || g.key);
     const todayState = stateOn(today);
@@ -194,7 +242,9 @@ export async function computeManualBilling(
       start_date: start,
       start_source: !start ? null : segs[0].spud ? "spud_date" : "first_report",
       current_well_spud_date: curSeg?.spud ?? null,
-      through_date: today,
+      mode,
+      through_date: mode === "spud_to_latest" ? latestReport ?? today : today,
+      latest_report_date: latestReport,
       billable_days: billable,
       missing_rate_days: missingRateDays,
       total: start && (billable > 0 || missingRateDays === 0) ? Math.round(total * 100) / 100 : null,

@@ -441,6 +441,14 @@ function ymdLocal(d) {
   return `${y}-${mm}-${dd}`;
 }
 function toDateStr(v) {
+  const s = toDateStrRaw(v);
+  if (!s) return null;
+  const m = /^(\d{4})-\d{2}-\d{2}$/.exec(s);
+  if (!m) return null;
+  const y = Number(m[1]);
+  return y >= 2e3 && y <= 2100 ? s : null;
+}
+function toDateStrRaw(v) {
   if (v === null || v === void 0 || v === "") return null;
   if (v instanceof Date) {
     return ymdLocal(v);
@@ -920,6 +928,7 @@ var updateJobSchema = z.object({
   ended_on: z.string().nullable().optional(),
   day_rate: dayRateField,
   manual_day_rate: z.boolean().optional(),
+  manual_billing_mode: z.enum(["report_days", "spud_to_latest"]).optional(),
   well_name: z.string().nullable().optional(),
   // when present, replaces the full set of field-tech assignments for the job
   field_tech_ids: z.array(z.string().uuid()).optional(),
@@ -2158,6 +2167,15 @@ var num = (v) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
+async function loadModes(ids) {
+  const out = /* @__PURE__ */ new Map();
+  if (!ids.length) return out;
+  const { data, error } = await client().from("jobs").select("id, manual_billing_mode").in("id", ids);
+  if (error) return out;
+  for (const r of data ?? [])
+    out.set(String(r.id), r.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
+  return out;
+}
 async function loadRateEvents(jobIds) {
   const out = /* @__PURE__ */ new Map();
   for (const id of jobIds) out.set(id, []);
@@ -2182,12 +2200,13 @@ async function computeManualBilling(jobs) {
   const ids = manual.map((j) => j.id);
   const today = todayCentral();
   const events = await loadRateEvents(ids);
+  const modes = await loadModes(ids);
   const { data: reps } = await client().from("daily_reports").select("job_id, well_name, report_date, report_day, well_context").in("job_id", ids);
   const repsByJob = /* @__PURE__ */ new Map();
   const oldestSpud = addDays(today, -730);
   for (const r of reps ?? []) {
     const day = r.report_date ? String(r.report_date).slice(0, 10) : "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day > today || day < oldestSpud) continue;
     const arr = repsByJob.get(r.job_id) ?? [];
     const sp = String(r.well_context?.spud_date ?? "").slice(0, 10);
     const spud = /^\d{4}-\d{2}-\d{2}$/.test(sp) && sp <= today && sp >= oldestSpud ? sp : null;
@@ -2195,6 +2214,7 @@ async function computeManualBilling(jobs) {
     repsByJob.set(r.job_id, arr);
   }
   for (const j of manual) {
+    const mode = j.manual_billing_mode === "spud_to_latest" || modes.get(j.id) === "spud_to_latest" ? "spud_to_latest" : "report_days";
     const evs = events.get(j.id) ?? [];
     const jobRate = num(j.day_rate);
     const reports = (repsByJob.get(j.id) ?? []).sort(
@@ -2232,8 +2252,33 @@ async function computeManualBilling(jobs) {
     let total = 0;
     let billable = 0;
     let missingRateDays = 0;
+    const latestReport = reports.length ? reports[reports.length - 1].day : null;
+    const bill = (day, k) => {
+      const st = stateOn(day);
+      if (st.status !== "Active") return;
+      if (st.rate == null || st.rate <= 0) {
+        missingRateDays++;
+        return;
+      }
+      billable++;
+      total += st.rate;
+      daily.set(day, (daily.get(day) ?? 0) + st.rate);
+      byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
+    };
+    if (mode === "spud_to_latest") {
+      if (start && latestReport && start <= latestReport) {
+        let d = start;
+        let guard = 0;
+        while (d <= latestReport && guard++ < 1500) {
+          let k = segs[0].key;
+          for (const g2 of segs) if (g2.start <= d) k = g2.key;
+          bill(d, k);
+          d = addDays(d, 1);
+        }
+      }
+    }
     const counted = /* @__PURE__ */ new Set();
-    for (const r of reports) {
+    if (mode === "report_days") for (const r of reports) {
       const k = wellKey2(r.well);
       const seg = segMap.get(k);
       const wellStart = seg.spud ?? seg.first;
@@ -2241,16 +2286,7 @@ async function computeManualBilling(jobs) {
       const dayKey = `${k}|${r.rd > 0 ? `d${r.rd}` : r.day}`;
       if (counted.has(dayKey)) continue;
       counted.add(dayKey);
-      const st = stateOn(r.day);
-      if (st.status !== "Active") continue;
-      if (st.rate == null || st.rate <= 0) {
-        missingRateDays++;
-        continue;
-      }
-      billable++;
-      total += st.rate;
-      daily.set(r.day, (daily.get(r.day) ?? 0) + st.rate);
-      byWell.set(k, (byWell.get(k) ?? 0) + st.rate);
+      bill(r.day, k);
     }
     for (const g2 of segs) wellDisplay.set(g2.key, g2.name || g2.key);
     const todayState = stateOn(today);
@@ -2262,7 +2298,9 @@ async function computeManualBilling(jobs) {
       start_date: start,
       start_source: !start ? null : segs[0].spud ? "spud_date" : "first_report",
       current_well_spud_date: curSeg?.spud ?? null,
-      through_date: today,
+      mode,
+      through_date: mode === "spud_to_latest" ? latestReport ?? today : today,
+      latest_report_date: latestReport,
       billable_days: billable,
       missing_rate_days: missingRateDays,
       total: start && (billable > 0 || missingRateDays === 0) ? Math.round(total * 100) / 100 : null,
@@ -3998,6 +4036,14 @@ async function registerRoutes(httpServer, app) {
           message: "Only an Admin or Area Manager can change set day rate billing"
         });
       if (patch.manual_day_rate === !!job.manual_day_rate) delete patch.manual_day_rate;
+      if (patch.manual_billing_mode !== void 0) {
+        const cur = job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days";
+        if (patch.manual_billing_mode === cur) delete patch.manual_billing_mode;
+        else if (!["admin", "area"].includes(req.profile.role))
+          return res.status(403).json({
+            message: "Only an Admin or Area Manager can change set day rate billing"
+          });
+      }
       if (patch.started_on === "") patch.started_on = null;
       if (patch.ended_on === "") patch.ended_on = null;
       const fieldTechIds = patch.field_tech_ids;

@@ -2285,6 +2285,16 @@ export async function registerRoutes(
           message: "Only an Admin or Area Manager can change set day rate billing",
         });
       if (patch.manual_day_rate === !!job.manual_day_rate) delete patch.manual_day_rate;
+      // Billing mode: Admin / Area Manager only; drop it when unchanged so an
+      // edit still works before the manual_billing_mode column exists.
+      if (patch.manual_billing_mode !== undefined) {
+        const cur = job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days";
+        if (patch.manual_billing_mode === cur) delete patch.manual_billing_mode;
+        else if (!["admin", "area"].includes(req.profile!.role))
+          return res.status(403).json({
+            message: "Only an Admin or Area Manager can change set day rate billing",
+          });
+      }
       if (patch.started_on === "") patch.started_on = null;
       if (patch.ended_on === "") patch.ended_on = null;
       // field_tech_ids / supervisor_ids are not columns on jobs — handle them

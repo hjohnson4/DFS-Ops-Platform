@@ -102,6 +102,8 @@ export interface Job {
   // Set day rate: bill day_rate every Active day instead of reading costs from
   // the daily report (Verdun Oil & Gas). See server/manualBilling.ts.
   manual_day_rate?: boolean;
+  // "report_days" (Verdun) or "spud_to_latest" (Expand Energy). See manualBilling.ts.
+  manual_billing_mode?: ManualBillingMode | null;
   manual_billing?: ManualBilling | null;
 }
 
@@ -113,12 +115,16 @@ export interface ManualBillingEvent {
   created_at: string;
 }
 
+export type ManualBillingMode = "report_days" | "spud_to_latest";
+
 export interface ManualBilling {
+  mode?: ManualBillingMode; // how days are counted
+  latest_report_date?: string | null; // newest report date on the job
   start_date: string | null; // first well's spud date (AU6), else oldest daily report date
   start_source?: "spud_date" | "first_report" | null;
   current_well_spud_date?: string | null;
-  through_date: string; // today (Central)
-  billable_days: number; // report days dated on/after the spud date
+  through_date: string; // today (report_days) or the latest report date (spud_to_latest)
+  billable_days: number; // report days on/after spud, or calendar days spud → latest report
   missing_rate_days: number; // Active days with no rate set
   total: number | null; // billed to date; null = no reports or no rate
   today_rate: number | null; // 0 on Rig Move / On Hold / Completed
@@ -1500,6 +1506,7 @@ export const updateJobSchema = z.object({
   ended_on: z.string().nullable().optional(),
   day_rate: dayRateField,
   manual_day_rate: z.boolean().optional(),
+  manual_billing_mode: z.enum(["report_days", "spud_to_latest"]).optional(),
   well_name: z.string().nullable().optional(),
   // when present, replaces the full set of field-tech assignments for the job
   field_tech_ids: z.array(z.string().uuid()).optional(),

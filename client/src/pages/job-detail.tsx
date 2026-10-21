@@ -162,6 +162,7 @@ export default function JobDetailPage() {
   const [endedOn, setEndedOn] = useState("");
   const [dayRate, setDayRate] = useState("");
   const [manualRate, setManualRate] = useState(false);
+  const [billMode, setBillMode] = useState<"report_days" | "spud_to_latest">("report_days");
 
   // seed edit fields whenever the job loads / changes
   useEffect(() => {
@@ -172,6 +173,7 @@ export default function JobDetailPage() {
       setEndedOn(toDateInput(job.ended_on));
       setDayRate(job.day_rate === null || job.day_rate === undefined ? "" : String(job.day_rate));
       setManualRate(!!job.manual_day_rate);
+      setBillMode(job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
     }
   }, [job]);
 
@@ -184,6 +186,7 @@ export default function JobDetailPage() {
         ended_on: endedOn || null,
         day_rate: dayRate.trim() === "" ? null : Number(dayRate),
         ...(canManageAssets ? { manual_day_rate: manualRate } : {}),
+        ...(canManageAssets && manualRate ? { manual_billing_mode: billMode } : {}),
       });
       return res.json();
     },
@@ -207,6 +210,7 @@ export default function JobDetailPage() {
       setEndedOn(toDateInput(job.ended_on));
       setDayRate(job.day_rate === null || job.day_rate === undefined ? "" : String(job.day_rate));
       setManualRate(!!job.manual_day_rate);
+      setBillMode(job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days");
     }
     setEditing(false);
   };
@@ -565,14 +569,53 @@ export default function JobDetailPage() {
                     className="mt-0.5"
                   />
                   <span>
-                    <span className="font-medium">Bill this day rate per report day</span>
+                    <span className="font-medium">Bill a set day rate</span>
                     <span className="block text-xs text-muted-foreground">
-                      For customers whose daily reports don't carry costs. The day rate above is billed once for
-                      each daily report day dated on or after the spud date (cell AU6). Rig Move, On Hold and
-                      Completed days bill $0. Changes to the rate or status apply from today.
+                      For customers whose daily reports don't carry costs. Billing starts on the spud date (cell
+                      AU6). Rig Move, On Hold and Completed days bill $0. Changes to the rate or status apply from
+                      today.
                     </span>
                   </span>
                 </label>
+                {manualRate && (
+                  <div className="mt-2 ml-6 space-y-1.5 text-sm" role="radiogroup" data-testid="radio-billing-mode">
+                    <label className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="bill-mode"
+                        className="mt-1"
+                        checked={billMode === "report_days"}
+                        disabled={!canManageAssets}
+                        onChange={() => setBillMode("report_days")}
+                        data-testid="radio-mode-report-days"
+                      />
+                      <span>
+                        Each daily report day received
+                        <span className="block text-xs text-muted-foreground">
+                          One day per report dated on or after the spud date. Missing report days don't bill.
+                        </span>
+                      </span>
+                    </label>
+                    <label className="flex items-start gap-2">
+                      <input
+                        type="radio"
+                        name="bill-mode"
+                        className="mt-1"
+                        checked={billMode === "spud_to_latest"}
+                        disabled={!canManageAssets}
+                        onChange={() => setBillMode("spud_to_latest")}
+                        data-testid="radio-mode-spud-to-latest"
+                      />
+                      <span>
+                        Every day from spud to the latest report
+                        <span className="block text-xs text-muted-foreground">
+                          Day rate × days from the spud date through the newest report date (spud day counts). Back-logged
+                          reports bill the full span.
+                        </span>
+                      </span>
+                    </label>
+                  </div>
+                )}
                 {manualRate && dayRate.trim() === "" && (
                   <div className="mt-2 text-xs text-destructive">Enter a day rate so this job can bill.</div>
                 )}
@@ -2501,12 +2544,15 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
   const day = (d: string | null | undefined) =>
     !d ? "—" : d <= "2000-01-01" ? "First report" : fmtDate(d);
   const history = (b?.events ?? []).slice().reverse();
+  const spanMode = b?.mode === "spud_to_latest" || job.manual_billing_mode === "spud_to_latest";
   return (
     <div className="mt-3 rounded-lg border border-card-border bg-card p-4 text-sm" data-testid="set-rate-billing">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="font-medium">Set day rate billing</div>
         <div className="text-xs text-muted-foreground">
-          Billed per daily report day from the spud date (AU6) on · $0 on Rig Move, On Hold and Completed
+          {spanMode
+            ? "Every day from the spud date (AU6) through the latest report · $0 on Rig Move, On Hold and Completed"
+            : "Billed per daily report day from the spud date (AU6) on · $0 on Rig Move, On Hold and Completed"}
         </div>
       </div>
       <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -2515,10 +2561,15 @@ function SetRateBilling({ job }: { job: JobWithCustomer }) {
           <div className="text-base font-semibold tabular-nums" data-testid="set-rate-total">{money(b?.total)}</div>
         </div>
         <div>
-          <div className="text-xs text-muted-foreground">Billable report days</div>
+          <div className="text-xs text-muted-foreground">{spanMode ? "Billable days" : "Billable report days"}</div>
           <div className="text-base font-semibold tabular-nums" data-testid="set-rate-days">
             {b?.start_date ? b.billable_days : "—"}
           </div>
+          {spanMode && b?.start_date && (
+            <div className="text-[11px] text-muted-foreground" data-testid="set-rate-through">
+              Through {b.latest_report_date ? fmtDate(b.latest_report_date) : "—"} (latest report)
+            </div>
+          )}
         </div>
         <div>
           <div className="text-xs text-muted-foreground">Billing since</div>
