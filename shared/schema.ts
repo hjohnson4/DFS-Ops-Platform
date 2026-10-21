@@ -216,6 +216,8 @@ export interface PadWellDerived {
   last_report: string | null; // yyyy-mm-dd of latest report on this well
   revenue: number | null; // accrued (cell AS57) on the well's latest report; falls back to day_rate x report_days
   is_current: boolean; // true for the well on the job's most recent report
+  is_month?: boolean; // billing-calendar jobs (Mud Plant): row is a month, not a well
+  not_billed_days?: number; // month rows: days marked Not billing (or $0 status)
 }
 export interface PadWithDerivedWells extends Pad {
   wells: PadWellDerived[];

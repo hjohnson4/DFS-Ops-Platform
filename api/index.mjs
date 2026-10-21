@@ -2700,6 +2700,65 @@ async function hoursSinceServiceFor(client2, assets) {
   }
   return out;
 }
+var MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function calendarMonthRows(jobId, padId, start, today, daily, namedWells) {
+  if (!start) return [];
+  const ymOf = (iso) => iso.slice(0, 7);
+  const startYm = ymOf(start);
+  const curYm = ymOf(today);
+  const nextYm = (ym) => {
+    const [y, m] = ym.split("-").map(Number);
+    return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+  };
+  let lastYm = curYm < startYm ? startYm : curYm;
+  for (const n of namedWells) {
+    const m = n.trim().match(/^([a-z]+)\s*(\d{4})?$/i);
+    if (!m) continue;
+    const idx = MONTH_NAMES.findIndex((x) => x.toLowerCase().startsWith(m[1].toLowerCase()) && m[1].length >= 3);
+    if (idx < 0) continue;
+    const mm = String(idx + 1).padStart(2, "0");
+    let ym = m[2] ? `${m[2]}-${mm}` : `${startYm.slice(0, 4)}-${mm}`;
+    if (!m[2] && ym < startYm) ym = `${Number(startYm.slice(0, 4)) + 1}-${mm}`;
+    if (ym > lastYm && ym <= `${Number(curYm.slice(0, 4)) + 2}-12`) lastYm = ym;
+  }
+  const rows = [];
+  for (let ym = startYm, guard = 0; ym <= lastYm && guard < 60; ym = nextYm(ym), guard++) {
+    const [y, m] = ym.split("-").map(Number);
+    const monthEnd = `${ym}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, "0")}`;
+    const from = ym === startYm ? start : `${ym}-01`;
+    const to = monthEnd < today ? monthEnd : today;
+    let billed = 0;
+    let revenue = 0;
+    let spanDays = 0;
+    if (from <= to) {
+      const d = /* @__PURE__ */ new Date(from + "T12:00:00Z");
+      for (let s = from; s <= to; d.setUTCDate(d.getUTCDate() + 1), s = d.toISOString().slice(0, 10)) {
+        spanDays++;
+        const v = daily.get(s);
+        if (v != null && v > 0) {
+          billed++;
+          revenue += v;
+        }
+      }
+    }
+    const status = ym === curYm ? "Open" : ym < curYm ? "Closed" : "Pending";
+    rows.push({
+      id: `month-${ym}`,
+      pad_id: padId,
+      job_id: jobId,
+      name: `${MONTH_NAMES[m - 1]} ${y}`,
+      status,
+      report_days: billed,
+      not_billed_days: Math.max(0, spanDays - billed),
+      first_report: from <= to ? from : null,
+      last_report: from <= to ? to : null,
+      revenue: from <= to ? Math.round(revenue * 100) / 100 : null,
+      is_current: ym === curYm,
+      is_month: true
+    });
+  }
+  return rows;
+}
 var INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 var MANUAL_RATE_MISSING = "Day rate (";
 var CENTRIFUGE_SLOT_NUMBERS = [1, 2, 3, 4];
@@ -4066,7 +4125,7 @@ async function registerRoutes(httpServer, app) {
           asset_id: e.asset_id,
           daily_report_id: null,
           job_id: job.id,
-          well_name: job.job_number || "Mud Plant",
+          well_name: `${MONTH_NAMES[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)}`,
           report_date: date,
           hours: next,
           source: "manual",
@@ -8157,6 +8216,17 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         ...p,
         wells: wellsByPad.get(p.id) ?? []
       }));
+      if (manualBill?.mode === "calendar" && result.length) {
+        const host = result.find((p) => p.status === "Open") ?? result[0];
+        host.wells = calendarMonthRows(
+          job.id,
+          host.id,
+          manualBill.billing_start_date ?? null,
+          manualBill.through_date,
+          manualBill.daily,
+          (wells ?? []).filter((w) => w.pad_id === host.id).map((w) => String(w.name ?? ""))
+        );
+      }
       res.json(result);
     }
   );

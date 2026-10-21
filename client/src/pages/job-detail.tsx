@@ -2050,6 +2050,9 @@ function PadCard({
       ? revenueWells.reduce((sum, w) => sum + (w.revenue ?? 0), 0)
       : null;
   const currentWell = wells.find((w) => w.is_current);
+  // Billing-calendar jobs (Mud Plant): rows are months, built from the
+  // billing calendar — no wells to add, move or remove.
+  const monthMode = wells.some((w) => w.is_month);
 
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(pad.name);
@@ -2149,7 +2152,7 @@ function PadCard({
               )}
               {currentWell && (
                 <span className="text-xs text-muted-foreground truncate">
-                  · Current well:{" "}
+                  · {monthMode ? "Current month" : "Current well"}:{" "}
                   <span className="font-medium text-foreground">
                     {currentWell.name}
                   </span>
@@ -2159,7 +2162,7 @@ function PadCard({
           )}
         </div>
         <div className="flex items-center gap-1.5">
-          {canManage && !addOpen && (
+          {canManage && !addOpen && !monthMode && (
             <Button
               size="sm"
               variant="outline"
@@ -2302,9 +2305,9 @@ function PadCard({
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-card-border text-xs text-muted-foreground">
-              <th className="text-left font-medium px-4 py-2">Well</th>
+              <th className="text-left font-medium px-4 py-2">{monthMode ? "Month" : "Well"}</th>
               <th className="text-center font-medium px-3 py-2">Status</th>
-              <th className="text-right font-medium px-3 py-2">Report days</th>
+              <th className="text-right font-medium px-3 py-2">{monthMode ? "Billed days" : "Report days"}</th>
               <th className="text-right font-medium px-3 py-2">Dates</th>
               <th className="text-right font-medium px-3 py-2">Revenue</th>
               {canManage && <th className="px-2 py-2" />}
@@ -2323,7 +2326,7 @@ function PadCard({
                     <div className="font-medium">{w.name}</div>
                     {w.is_current && (
                       <span className="mt-1 inline-flex rounded bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                        Current well
+                        {w.is_month ? "Current month" : "Current well"}
                       </span>
                     )}
                   </td>
@@ -2337,11 +2340,24 @@ function PadCard({
                             : "bg-amber-500/10 text-amber-700 dark:text-amber-400"
                       }`}
                     >
-                      {isOpen ? "Active" : w.status === "Closed" ? "Worked" : "Pending"}
+                      {w.is_month
+                        ? isOpen
+                          ? "Current"
+                          : w.status === "Closed"
+                            ? "Complete"
+                            : "Upcoming"
+                        : isOpen
+                          ? "Active"
+                          : w.status === "Closed"
+                            ? "Worked"
+                            : "Pending"}
                     </span>
                   </td>
                   <td className="px-3 py-2.5 text-right tabular-nums">
-                    {w.report_days}
+                    {w.is_month && w.status === "Pending" ? "—" : w.report_days}
+                    {w.is_month && (w.not_billed_days ?? 0) > 0 && (
+                      <div className="text-[10px] text-destructive">{w.not_billed_days} not billed</div>
+                    )}
                   </td>
                   <td className="px-3 py-2.5 text-right tabular-nums text-muted-foreground text-[11px]">
                     {w.first_report ? (
@@ -2358,7 +2374,8 @@ function PadCard({
                   <td className="px-3 py-2.5 text-right tabular-nums">
                     {w.revenue == null ? "—" : money(w.revenue)}
                   </td>
-                  {canManage && (
+                  {canManage && w.is_month && <td />}
+                  {canManage && !w.is_month && (
                     <td className="px-2 py-2 text-right whitespace-nowrap">
                       <DropdownMenu>
                         <DropdownMenuTrigger asChild>
