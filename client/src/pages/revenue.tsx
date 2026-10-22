@@ -41,6 +41,7 @@ type JobRow = {
   has_accrued: boolean;
   active: boolean;
   last_report: string | null;
+  billing_basis?: "reports" | "calendar";
 };
 type AreaRow = { area: string; revenue: number | null; jobs: number };
 type CustomerRow = {
@@ -565,11 +566,33 @@ export default function RevenuePage() {
                       <td className="px-4 py-2">{j.area}</td>
                       <td className="px-4 py-2">{j.customer_name || "—"}</td>
                       <td className="px-4 py-2 text-right tabular-nums">
-                        {j.report_days || "—"}
+                        {j.billing_basis === "calendar" ? (
+                          <span title="Days billed on the job's billing calendar">
+                            {j.report_days ? `${j.report_days} billed` : "—"}
+                          </span>
+                        ) : (
+                          j.report_days || "—"
+                        )}
                       </td>
                       <td className="px-4 py-2">{fmtDate(j.last_report)}</td>
                       <td className="px-4 py-2 text-center">
-                        {j.active ? (
+                        {j.billing_basis === "calendar" ? (
+                          j.active ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-xs text-primary"
+                              title="Billing today on the job's billing calendar"
+                            >
+                              <Activity className="h-3 w-3" /> Active
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center gap-1 text-xs text-muted-foreground"
+                              title="Not billing today on the job's billing calendar"
+                            >
+                              <CheckCircle2 className="h-3 w-3" /> Not billing
+                            </span>
+                          )
+                        ) : j.active ? (
                           <span className="inline-flex items-center gap-1 text-xs text-primary">
                             <Activity className="h-3 w-3" /> Active
                           </span>

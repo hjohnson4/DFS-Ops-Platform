@@ -8584,7 +8584,7 @@ export async function registerRoutes(
       const byJob = jobRows.map((j: any) => {
         const acc = accrued.get(j.id) ?? { revenue: null, hasAccrued: false };
         const days = reportDaysByJob.get(j.id) ?? 0;
-        return {
+        const row = {
           job_id: j.id,
           job_number: j.job_number,
           area: j.area,
@@ -8598,7 +8598,18 @@ export async function registerRoutes(
           has_accrued: acc.hasAccrued,
           active: days > 0, // has report activity
           last_report: lastReportByJob.get(j.id) ?? null,
+          billing_basis: "reports" as "reports" | "calendar",
         };
+        // Calendar-billed jobs (Mud Plant) have no daily reports: their status,
+        // day count and last day come from the job's billing calendar.
+        const mb = manualBill.get(j.id) as any;
+        if (mb?.mode === "calendar") {
+          row.active = !!mb.billing_today;
+          row.report_days = Number(mb.billable_days ?? 0);
+          row.last_report = mb.last_billed_date ?? null;
+          row.billing_basis = "calendar";
+        }
+        return row;
       });
 
       const sumRev = (rows: { revenue: number | null }[]) => {

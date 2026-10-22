@@ -301,6 +301,11 @@ export async function computeManualBilling(
         today_rate:
           t.status === "Active" && t.rate != null && t.rate > 0 ? t.rate : t.status === "Active" ? null : 0,
         today_status: t.status,
+        // Revenue page status for calendar jobs: billing today per the
+        // calendar (started, today not marked Not billing, job Active).
+        billing_today: !!calStart && calStart <= today &&
+          (billingDays.get(j.id)?.get(today) !== false) && t.status === "Active",
+        last_billed_date: Array.from(daily.keys()).sort().pop() ?? null,
         current_well: null,
         current_well_revenue: null,
         by_well: [],

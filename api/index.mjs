@@ -2346,6 +2346,10 @@ async function computeManualBilling(jobs) {
         total: calStart ? Math.round(total * 100) / 100 : null,
         today_rate: t.status === "Active" && t.rate != null && t.rate > 0 ? t.rate : t.status === "Active" ? null : 0,
         today_status: t.status,
+        // Revenue page status for calendar jobs: billing today per the
+        // calendar (started, today not marked Not billing, job Active).
+        billing_today: !!calStart && calStart <= today && billingDays.get(j.id)?.get(today) !== false && t.status === "Active",
+        last_billed_date: Array.from(daily.keys()).sort().pop() ?? null,
         current_well: null,
         current_well_revenue: null,
         by_well: [],
@@ -8479,7 +8483,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const byJob = jobRows.map((j) => {
         const acc = accrued.get(j.id) ?? { revenue: null, hasAccrued: false };
         const days = reportDaysByJob.get(j.id) ?? 0;
-        return {
+        const row = {
           job_id: j.id,
           job_number: j.job_number,
           area: j.area,
@@ -8492,8 +8496,17 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           has_accrued: acc.hasAccrued,
           active: days > 0,
           // has report activity
-          last_report: lastReportByJob.get(j.id) ?? null
+          last_report: lastReportByJob.get(j.id) ?? null,
+          billing_basis: "reports"
         };
+        const mb = manualBill.get(j.id);
+        if (mb?.mode === "calendar") {
+          row.active = !!mb.billing_today;
+          row.report_days = Number(mb.billable_days ?? 0);
+          row.last_report = mb.last_billed_date ?? null;
+          row.billing_basis = "calendar";
+        }
+        return row;
       });
       const sumRev = (rows) => {
         const vals = rows.map((r) => r.revenue).filter((v) => v != null);
