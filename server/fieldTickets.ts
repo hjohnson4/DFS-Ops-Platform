@@ -73,6 +73,7 @@ function normalizeLines(
       end_date: end,
       well_name: clean(li.well_name),
       section: clean(li.section),
+      ...(li.service_id ? { service_id: li.service_id } : {}),
     };
   });
 }
@@ -299,6 +300,7 @@ export function registerFieldTicketRoutes(app: Express) {
       const lines: LineItem[] = Array.isArray(t.line_items) ? t.line_items : [];
       for (const l of lines) {
         if (!l.start_date) continue;
+        if (l.service_id) continue; // service charge lines don't cover report days
         const wk = wellKey(l.well_name || t.well_name);
         if (!wk) continue;
         const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;

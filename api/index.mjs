@@ -935,7 +935,7 @@ var updateJobSchema = z.object({
   // when present, replaces the full set of supervisor assignments for the job
   supervisor_ids: z.array(z.string().uuid()).optional()
 });
-var SERVICE_TYPES = ["Drive-by Service", "Call-out Service"];
+var SERVICE_TYPES = ["Service Charge", "Drive-by Service", "Call-out Service"];
 var serviceCostField = z.union([z.number(), z.string()]).nullable().optional().transform((v) => {
   if (v === null || v === void 0 || v === "") return null;
   const n = typeof v === "string" ? Number(v) : v;
@@ -946,16 +946,18 @@ var serviceCostField = z.union([z.number(), z.string()]).nullable().optional().t
 var createJobServiceSchema = z.object({
   service_type: z.enum(SERVICE_TYPES),
   service_date: z.string().min(1, "Service date is required"),
-  cost: serviceCostField,
+  cost: serviceCostField.refine((v) => v !== null, { message: "Enter the cost to bill" }),
   well_id: z.string().uuid().nullable().optional(),
-  notes: z.string().trim().max(2e3).nullable().optional()
+  asset_id: z.string().uuid().nullable().optional(),
+  notes: z.string({ required_error: "Describe what was done" }).trim().min(1, "Describe what was done").max(2e3)
 });
 var updateJobServiceSchema = z.object({
   service_type: z.enum(SERVICE_TYPES).optional(),
   service_date: z.string().min(1).optional(),
   cost: serviceCostField,
   well_id: z.string().uuid().nullable().optional(),
-  notes: z.string().trim().max(2e3).nullable().optional()
+  asset_id: z.string().uuid().nullable().optional(),
+  notes: z.string().trim().min(1, "Describe what was done").max(2e3).optional()
 });
 var createPadSchema = z.object({
   // Pad names are auto-assigned server-side as generic sequential labels
@@ -1010,7 +1012,8 @@ var lineItemSchema = z.object({
   start_date: ymd,
   end_date: ymd,
   well_name: z.string().nullable().optional(),
-  section: z.string().nullable().optional()
+  section: z.string().nullable().optional(),
+  service_id: z.string().uuid().nullable().optional()
 });
 var createFieldTicketSchema = z.object({
   // Optional hand-entered ticket number; blank = next automatic number.
@@ -1804,7 +1807,8 @@ function normalizeLines(lines) {
       start_date: start,
       end_date: end,
       well_name: clean(li.well_name),
-      section: clean(li.section)
+      section: clean(li.section),
+      ...li.service_id ? { service_id: li.service_id } : {}
     };
   });
 }
@@ -1971,6 +1975,7 @@ function registerFieldTicketRoutes(app) {
       const lines = Array.isArray(t.line_items) ? t.line_items : [];
       for (const l of lines) {
         if (!l.start_date) continue;
+        if (l.service_id) continue;
         const wk = wellKey(l.well_name || t.well_name);
         if (!wk) continue;
         const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
@@ -3321,6 +3326,28 @@ async function registerRoutes(httpServer, app) {
             detail: note ? note : `JSA #${j.jsa_number}${well}`,
             href: `/jobs/${j.job_id}`,
             ts: j.created_at || null
+          });
+        }
+      }
+      if (canReview) {
+        const since = new Date(now - 7 * DAY).toISOString();
+        let sq = padClient().from("job_services").select("id, job_id, area, service_type, service_date, cost, notes, created_by, created_by_name, created_at, job:jobs(job_number)").gte("created_at", since).order("created_at", { ascending: false }).limit(50);
+        if (scope) sq = sq.eq("area", scope);
+        const { data: svcs, error: sErr } = await sq;
+        if (sErr) console.error("[notifications] job_services", sErr.message);
+        for (const v of svcs || []) {
+          if (v.created_by && v.created_by === myId) continue;
+          const jobNo = v.job?.job_number ?? "a job";
+          const amt = v.cost != null && Number.isFinite(Number(v.cost)) ? ` \xB7 $${Number(v.cost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "";
+          const desc = String(v.notes ?? "").trim();
+          items.push({
+            id: `svc-${v.id}`,
+            type: "service_charge",
+            severity: "info",
+            title: `${v.service_type} on ${jobNo}${amt}`,
+            detail: `${desc ? desc.length > 120 ? desc.slice(0, 117) + "\u2026" : desc : "No description"}${v.created_by_name ? ` \xB7 logged by ${v.created_by_name}` : ""}`,
+            href: `/jobs/${v.job_id}`,
+            ts: v.created_at || null
           });
         }
       }
@@ -8062,6 +8089,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     const { data } = await padClient().from("job_assignments").select("id").eq("job_id", jobId).eq("profile_id", req.profile.id).maybeSingle();
     return !!data;
   }
+  async function resolveServiceAsset(job, assetId) {
+    if (!assetId) return { ok: true, asset_id: null };
+    const { data } = await padClient().from("assets").select("id, area, job_id").eq("id", assetId).maybeSingle();
+    if (!data) return { ok: false, message: "That equipment wasn't found" };
+    if (data.job_id !== job.id && data.area !== job.area)
+      return { ok: false, message: "That equipment isn't on this job or in its area" };
+    return { ok: true, asset_id: data.id };
+  }
   async function resolveServiceWell(jobId, wellId) {
     if (wellId === null || wellId === void 0)
       return { ok: true, well_id: null, well_name: null };
@@ -8080,12 +8115,33 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
   app.get(
     "/api/jobs/:jobId/services",
     requireAuth,
+    requireRole("admin", "area", "super"),
     async (req, res) => {
       const job = await loadScopedJob(req, res, req.params.jobId);
       if (!job) return;
       const { data, error } = await padClient().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: false }).order("created_at", { ascending: false });
       if (error) return res.status(500).json({ message: error.message });
-      res.json(data || []);
+      const rows = data || [];
+      const assetIds = Array.from(new Set(rows.map((r) => r.asset_id).filter(Boolean)));
+      const assetById = /* @__PURE__ */ new Map();
+      if (assetIds.length) {
+        const { data: as } = await padClient().from("assets").select("id, tag, category").in("id", assetIds);
+        for (const a of as || []) assetById.set(a.id, a);
+      }
+      const ticketOf = /* @__PURE__ */ new Map();
+      const { data: tickets } = await padClient().from("field_tickets").select("ticket_number, line_items").eq("job_id", job.id);
+      for (const t of tickets || [])
+        for (const l of Array.isArray(t.line_items) ? t.line_items : [])
+          if (l?.service_id && !ticketOf.has(l.service_id))
+            ticketOf.set(l.service_id, t.ticket_number);
+      res.json(
+        rows.map((r) => ({
+          ...r,
+          asset_tag: r.asset_id ? assetById.get(r.asset_id)?.tag ?? null : null,
+          asset_category: r.asset_id ? assetById.get(r.asset_id)?.category ?? null : null,
+          on_ticket: ticketOf.get(r.id) ?? null
+        }))
+      );
     }
   );
   app.post(
@@ -8095,11 +8151,6 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const job = await loadScopedJob(req, res, req.params.jobId);
       if (!job) return;
-      const { data: jobRow } = await padClient().from("jobs").select("crewing").eq("id", job.id).single();
-      if (!jobRow || jobRow.crewing !== "Unmanned")
-        return res.status(400).json({
-          message: "Services can only be logged on unmanned jobs"
-        });
       if (!await canManageServices(req, job.id))
         return res.status(403).json({
           message: "Only an assigned supervisor or a manager can log services"
@@ -8110,7 +8161,10 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const wellRes = await resolveServiceWell(job.id, parsed.data.well_id ?? null);
       if (!wellRes.ok)
         return res.status(400).json({ message: wellRes.message });
+      const assetRes = await resolveServiceAsset(job, parsed.data.asset_id ?? null);
+      if (!assetRes.ok) return res.status(400).json({ message: assetRes.message });
       const { data, error } = await padClient().from("job_services").insert({
+        asset_id: assetRes.asset_id,
         job_id: job.id,
         area: job.area,
         service_type: parsed.data.service_type,
@@ -8154,7 +8208,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         patch.well_name = wellRes.well_name;
       }
       if (parsed.data.notes !== void 0)
-        patch.notes = parsed.data.notes?.trim() || null;
+        patch.notes = parsed.data.notes.trim();
+      if (parsed.data.asset_id !== void 0) {
+        const assetRes = await resolveServiceAsset(job, parsed.data.asset_id);
+        if (!assetRes.ok) return res.status(400).json({ message: assetRes.message });
+        patch.asset_id = assetRes.asset_id;
+      }
       if (Object.keys(patch).length === 0)
         return res.status(400).json({ message: "Nothing to update" });
       const { data, error } = await padClient().from("job_services").update(patch).eq("id", req.params.serviceId).eq("job_id", job.id).select().single();
@@ -8173,6 +8232,16 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       if (!await canManageServices(req, job.id))
         return res.status(403).json({
           message: "Only an assigned supervisor or a manager can delete services"
+        });
+      const { data: tks } = await padClient().from("field_tickets").select("ticket_number, line_items").eq("job_id", job.id);
+      const onTicket = (tks || []).find(
+        (t) => (Array.isArray(t.line_items) ? t.line_items : []).some(
+          (l) => l?.service_id === req.params.serviceId
+        )
+      );
+      if (onTicket)
+        return res.status(400).json({
+          message: `This charge is billed on field ticket #${onTicket.ticket_number}. Remove it from that ticket first.`
         });
       const { error } = await padClient().from("job_services").delete().eq("id", req.params.serviceId).eq("job_id", job.id);
       if (error) return res.status(400).json({ message: error.message });
@@ -8344,6 +8413,25 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       res.json(out);
     }
   );
+  async function serviceChargesByJob(jobIds) {
+    const out = /* @__PURE__ */ new Map();
+    if (!jobIds.length) return out;
+    const { data, error } = await padClient().from("job_services").select("job_id, service_date, cost").in("job_id", jobIds);
+    if (error) {
+      console.error("[revenue] job_services", error.message);
+      return out;
+    }
+    for (const r of data || []) {
+      const amt = Number(r.cost);
+      if (!Number.isFinite(amt) || amt <= 0) continue;
+      const day = String(r.service_date ?? "").slice(0, 10);
+      const cur = out.get(r.job_id) ?? { total: 0, byDay: /* @__PURE__ */ new Map() };
+      cur.total = Math.round((cur.total + amt) * 100) / 100;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(day)) cur.byDay.set(day, (cur.byDay.get(day) ?? 0) + amt);
+      out.set(r.job_id, cur);
+    }
+    return out;
+  }
   async function jobAccruedRevenue(jobIds) {
     const out = /* @__PURE__ */ new Map();
     for (const id of jobIds) out.set(id, { revenue: null, hasAccrued: false });
@@ -8408,6 +8496,15 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const manualBill = await computeManualBilling(jobRows);
       for (const [jid, b] of Array.from(manualBill.entries()))
         accrued.set(jid, { revenue: b.total, hasAccrued: b.total != null });
+      const svcCharges = await serviceChargesByJob(jobIds);
+      for (const [jid, sc] of Array.from(svcCharges.entries())) {
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sc.total) * 100) / 100,
+          hasAccrued: true
+        });
+      }
       const { data: reps } = await client2.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
       const jobFallbackRate = /* @__PURE__ */ new Map();
       for (const j of jobRows) {
@@ -8474,6 +8571,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           const mon = day.slice(0, 7);
           monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
         }
+      for (const [, sc] of Array.from(svcCharges.entries()))
+        for (const [day, amt] of Array.from(sc.byDay.entries())) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + amt);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
+        }
       const dayRateOf = /* @__PURE__ */ new Map();
       for (const j of jobRows)
         dayRateOf.set(
@@ -8497,7 +8600,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           active: days > 0,
           // has report activity
           last_report: lastReportByJob.get(j.id) ?? null,
-          billing_basis: "reports"
+          billing_basis: "reports",
+          service_charges: svcCharges.get(j.id)?.total ?? 0
         };
         const mb = manualBill.get(j.id);
         if (mb?.mode === "calendar") {
@@ -8668,6 +8772,15 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const manualBill = await computeManualBilling(jobRows);
       for (const [jid, b] of Array.from(manualBill.entries()))
         accrued.set(jid, { revenue: b.total, hasAccrued: b.total != null });
+      const svcCharges = await serviceChargesByJob(jobIds);
+      for (const [jid, sc] of Array.from(svcCharges.entries())) {
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sc.total) * 100) / 100,
+          hasAccrued: true
+        });
+      }
       const { data: reps } = await client2.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
       const reportDaysByJob = /* @__PURE__ */ new Map();
       const currentRateByJob = /* @__PURE__ */ new Map();

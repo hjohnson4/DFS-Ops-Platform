@@ -19,6 +19,7 @@ import {
   type FieldTicketStatus,
   type FieldTicketType,
   type LineItem,
+  type JobService,
   type TicketCoverage,
   FIELD_TICKET_STATUS_LABEL,
   FIELD_TICKET_TYPE_LABEL,
@@ -92,6 +93,7 @@ interface DraftLine {
   quantity: string;
   unit_cost: string;
   qtyAuto: boolean; // quantity follows the day count until typed over
+  service_id?: string | null; // a job service charge this line bills
 }
 interface DraftSection {
   key: string;
@@ -137,6 +139,7 @@ function toSections(items: LineItem[], ticketWell: string | null): DraftSection[
       quantity: String(li.quantity),
       unit_cost: String(li.unit_cost),
       qtyAuto: days != null && Number(li.quantity) === days,
+      service_id: li.service_id ?? null,
     });
   }
   return out.length ? out : [blankSection(ticketWell ?? "")];
@@ -157,6 +160,7 @@ function toLineItems(sections: DraftSection[]) {
         end_date: l.start && l.end && l.end > l.start ? l.end : null,
         well_name: s.well.trim() || null,
         section: s.title.trim() || null,
+        ...(l.service_id ? { service_id: l.service_id } : {}),
       });
     }
   return items;
@@ -355,6 +359,52 @@ export function FieldTicketDialog({ trigger, job: fixedJob, ticket: initial }: P
   const removeSection = (sk: string) =>
     setSections((prev) => (prev.length === 1 ? [blankSection()] : prev.filter((s) => s.key !== sk)));
 
+  // Service charges on this job not yet billed on a ticket (or billed on this
+  // one but taken off the draft) — "Add service charges" puts them on as lines.
+  const { data: jobServices } = useQuery<JobService[]>({
+    queryKey: ["/api/jobs", jobId, "services"],
+    enabled: open && !!jobId && canManage,
+  });
+  const draftServiceIds = new Set(
+    sections.flatMap((s) => s.lines.map((l) => l.service_id).filter(Boolean) as string[]),
+  );
+  const openCharges = (jobServices ?? []).filter(
+    (v) =>
+      !draftServiceIds.has(v.id) &&
+      Number(v.cost ?? 0) > 0 &&
+      (v.on_ticket == null || v.on_ticket === saved?.ticket_number),
+  );
+  const addServiceCharges = (sk: string) => {
+    if (openCharges.length === 0) return;
+    const sorted = [...openCharges].sort((a, b) => a.service_date.localeCompare(b.service_date));
+    setSections((prev) =>
+      prev.map((s) => {
+        if (s.key !== sk) return s;
+        const kept = s.lines.filter((l) => l.description.trim() || l.quantity.trim() || l.unit_cost.trim());
+        const added: DraftLine[] = sorted.map((v) => {
+          const day = String(v.service_date).slice(0, 10);
+          const what = (v.notes ?? "").trim();
+          return {
+            key: nextId(),
+            description: `${v.service_type}${v.asset_tag ? ` (${v.asset_tag})` : ""}${what ? ` — ${what}` : ""}`,
+            start: day,
+            end: day,
+            quantity: "1",
+            unit_cost: String(v.cost ?? 0),
+            qtyAuto: false,
+            service_id: v.id,
+          };
+        });
+        const firstWell = sorted.find((v) => v.well_name)?.well_name ?? "";
+        return { ...s, well: s.well.trim() ? s.well : firstWell, lines: [...kept, ...added] };
+      }),
+    );
+    toast({
+      title: `Added ${sorted.length} service charge${sorted.length === 1 ? "" : "s"}`,
+      description: "Check the well on this section before saving.",
+    });
+  };
+
   // Fill a section from signed-off report days (not yet on a ticket) for a well:
   // consecutive days at the same rate become one line.
   const fillFromReports = (sk: string, well: string) => {
@@ -404,6 +454,7 @@ export function FieldTicketDialog({ trigger, job: fixedJob, ticket: initial }: P
     if (jobId) {
       queryClient.invalidateQueries({ queryKey: ["/api/jobs", jobId, "field-tickets"] });
       queryClient.invalidateQueries({ queryKey: ["/api/jobs", jobId, "ticket-coverage"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/jobs", jobId, "services"] });
     }
     if (t) {
       setSaved(t);
@@ -731,6 +782,16 @@ export function FieldTicketDialog({ trigger, job: fixedJob, ticket: initial }: P
                     <Button variant="outline" size="sm" onClick={() => addLine(s.key)} data-testid={`button-add-line-${si}`}>
                       <Plus className="mr-1 h-3.5 w-3.5" /> Add line
                     </Button>
+                    {openCharges.length > 0 && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => addServiceCharges(s.key)}
+                        data-testid={`button-add-service-charges-${si}`}
+                      >
+                        <Plus className="mr-1 h-3.5 w-3.5" /> Add service charges ({openCharges.length})
+                      </Button>
+                    )}
                     {wellsWithOpenDays.length > 0 && (
                       <Select value="" onValueChange={(w) => fillFromReports(s.key, w)}>
                         <SelectTrigger className="h-8 w-auto gap-2 text-sm" data-testid={`select-fill-reports-${si}`}>

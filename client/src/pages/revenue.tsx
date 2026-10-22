@@ -42,6 +42,7 @@ type JobRow = {
   active: boolean;
   last_report: string | null;
   billing_basis?: "reports" | "calendar";
+  service_charges?: number; // billed service charges included in revenue
 };
 type AreaRow = { area: string; revenue: number | null; jobs: number };
 type CustomerRow = {
@@ -604,6 +605,15 @@ export default function RevenuePage() {
                       </td>
                       <td className="px-4 py-2 text-right tabular-nums font-medium">
                         {money(j.revenue)}
+                        {(j.service_charges ?? 0) > 0 && (
+                          <div
+                            className="text-[11px] font-normal text-muted-foreground"
+                            title="Service charges billed to the customer, included in this revenue"
+                            data-testid={`job-service-charges-${j.job_id}`}
+                          >
+                            incl. {money(j.service_charges ?? 0)} service
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ))}

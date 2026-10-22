@@ -944,7 +944,8 @@ export async function registerRoutes(
           | "signoff_pending"
           | "new_report"
           | "changes_requested"
-          | "missing_data";
+          | "missing_data"
+          | "service_charge";
         severity: "warning" | "info";
         title: string;
         detail: string;
@@ -1117,6 +1118,40 @@ export async function registerRoutes(
             detail: note ? note : `JSA #${j.jsa_number}${well}`,
             href: `/jobs/${j.job_id}`,
             ts: j.created_at || null,
+          });
+        }
+      }
+
+      // Service charges logged in the last 7 days (in this user's area) by
+      // someone else — so supervisors / area managers see that a service was
+      // made, what happened, and what it bills.
+      if (canReview) {
+        const since = new Date(now - 7 * DAY).toISOString();
+        let sq = padClient()
+          .from("job_services")
+          .select("id, job_id, area, service_type, service_date, cost, notes, created_by, created_by_name, created_at, job:jobs(job_number)")
+          .gte("created_at", since)
+          .order("created_at", { ascending: false })
+          .limit(50);
+        if (scope) sq = sq.eq("area", scope);
+        const { data: svcs, error: sErr } = await sq;
+        if (sErr) console.error("[notifications] job_services", sErr.message);
+        for (const v of (svcs || []) as any[]) {
+          if (v.created_by && v.created_by === myId) continue;
+          const jobNo = v.job?.job_number ?? "a job";
+          const amt =
+            v.cost != null && Number.isFinite(Number(v.cost))
+              ? ` · $${Number(v.cost).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : "";
+          const desc = String(v.notes ?? "").trim();
+          items.push({
+            id: `svc-${v.id}`,
+            type: "service_charge",
+            severity: "info",
+            title: `${v.service_type} on ${jobNo}${amt}`,
+            detail: `${desc ? (desc.length > 120 ? desc.slice(0, 117) + "…" : desc) : "No description"}${v.created_by_name ? ` · logged by ${v.created_by_name}` : ""}`,
+            href: `/jobs/${v.job_id}`,
+            ts: v.created_at || null,
           });
         }
       }
@@ -7930,7 +7965,25 @@ export async function registerRoutes(
     return !!data;
   }
 
-  // ==== Job services (drive-by / call-out on unmanned jobs) ================
+  // ==== Job services / service charges (any job) ===========================
+
+  // Equipment picked for a service charge must be in the job's area (it is
+  // normally a unit assigned to the job). null clears it.
+  async function resolveServiceAsset(
+    job: { id: string; area: string },
+    assetId: string | null | undefined,
+  ): Promise<{ ok: true; asset_id: string | null } | { ok: false; message: string }> {
+    if (!assetId) return { ok: true, asset_id: null };
+    const { data } = await padClient()
+      .from("assets")
+      .select("id, area, job_id")
+      .eq("id", assetId)
+      .maybeSingle();
+    if (!data) return { ok: false, message: "That equipment wasn't found" };
+    if (data.job_id !== job.id && data.area !== job.area)
+      return { ok: false, message: "That equipment isn't on this job or in its area" };
+    return { ok: true, asset_id: data.id };
+  }
 
   // Resolve a well selection for a service. Returns { ok, well_name } when the
   // well belongs to this job and is not completed (report-derived status !=
@@ -7962,11 +8015,14 @@ export async function registerRoutes(
     return { ok: true, well_id: well.id, well_name: well.name };
   }
 
-  // List services for a job. Any user who can view the job (area-scoped) can
-  // read its services.
+  // List service charges for a job. Supervisors, area managers and admins in
+  // the job's area can read them (they carry billed amounts, so field techs
+  // don't). Each row is joined with its equipment tag and the field ticket it
+  // is billed on (a ticket line carrying its service_id), if any.
   app.get(
     "/api/jobs/:jobId/services",
     requireAuth,
+    requireRole("admin", "area", "super"),
     async (req: Request, res: Response) => {
       const job = await loadScopedJob(req, res, req.params.jobId);
       if (!job) return;
@@ -7977,7 +8033,33 @@ export async function registerRoutes(
         .order("service_date", { ascending: false })
         .order("created_at", { ascending: false });
       if (error) return res.status(500).json({ message: error.message });
-      res.json(data || []);
+      const rows = (data || []) as any[];
+      const assetIds = Array.from(new Set(rows.map((r) => r.asset_id).filter(Boolean)));
+      const assetById = new Map<string, any>();
+      if (assetIds.length) {
+        const { data: as } = await padClient()
+          .from("assets")
+          .select("id, tag, category")
+          .in("id", assetIds);
+        for (const a of as || []) assetById.set(a.id, a);
+      }
+      const ticketOf = new Map<string, number>();
+      const { data: tickets } = await padClient()
+        .from("field_tickets")
+        .select("ticket_number, line_items")
+        .eq("job_id", job.id);
+      for (const t of (tickets || []) as any[])
+        for (const l of Array.isArray(t.line_items) ? t.line_items : [])
+          if (l?.service_id && !ticketOf.has(l.service_id))
+            ticketOf.set(l.service_id, t.ticket_number);
+      res.json(
+        rows.map((r) => ({
+          ...r,
+          asset_tag: r.asset_id ? assetById.get(r.asset_id)?.tag ?? null : null,
+          asset_category: r.asset_id ? assetById.get(r.asset_id)?.category ?? null : null,
+          on_ticket: ticketOf.get(r.id) ?? null,
+        })),
+      );
     },
   );
 
@@ -7990,16 +8072,7 @@ export async function registerRoutes(
     async (req: Request, res: Response) => {
       const job = await loadScopedJob(req, res, req.params.jobId);
       if (!job) return;
-      // Confirm the job is unmanned before allowing service creation.
-      const { data: jobRow } = await padClient()
-        .from("jobs")
-        .select("crewing")
-        .eq("id", job.id)
-        .single();
-      if (!jobRow || jobRow.crewing !== "Unmanned")
-        return res.status(400).json({
-          message: "Services can only be logged on unmanned jobs",
-        });
+      // Service charges can be logged on any job (manned or unmanned).
       if (!(await canManageServices(req, job.id)))
         return res.status(403).json({
           message: "Only an assigned supervisor or a manager can log services",
@@ -8010,9 +8083,12 @@ export async function registerRoutes(
       const wellRes = await resolveServiceWell(job.id, parsed.data.well_id ?? null);
       if (!wellRes.ok)
         return res.status(400).json({ message: wellRes.message });
+      const assetRes = await resolveServiceAsset(job, parsed.data.asset_id ?? null);
+      if (!assetRes.ok) return res.status(400).json({ message: assetRes.message });
       const { data, error } = await padClient()
         .from("job_services")
         .insert({
+          asset_id: assetRes.asset_id,
           job_id: job.id,
           area: job.area,
           service_type: parsed.data.service_type,
@@ -8060,7 +8136,12 @@ export async function registerRoutes(
         patch.well_name = wellRes.well_name;
       }
       if (parsed.data.notes !== undefined)
-        patch.notes = parsed.data.notes?.trim() || null;
+        patch.notes = parsed.data.notes.trim();
+      if (parsed.data.asset_id !== undefined) {
+        const assetRes = await resolveServiceAsset(job, parsed.data.asset_id);
+        if (!assetRes.ok) return res.status(400).json({ message: assetRes.message });
+        patch.asset_id = assetRes.asset_id;
+      }
       if (Object.keys(patch).length === 0)
         return res.status(400).json({ message: "Nothing to update" });
       const { data, error } = await padClient()
@@ -8087,6 +8168,20 @@ export async function registerRoutes(
       if (!(await canManageServices(req, job.id)))
         return res.status(403).json({
           message: "Only an assigned supervisor or a manager can delete services",
+        });
+      // Don't orphan a billed line: it must come off its field ticket first.
+      const { data: tks } = await padClient()
+        .from("field_tickets")
+        .select("ticket_number, line_items")
+        .eq("job_id", job.id);
+      const onTicket = ((tks || []) as any[]).find((t) =>
+        (Array.isArray(t.line_items) ? t.line_items : []).some(
+          (l: any) => l?.service_id === req.params.serviceId,
+        ),
+      );
+      if (onTicket)
+        return res.status(400).json({
+          message: `This charge is billed on field ticket #${onTicket.ticket_number}. Remove it from that ticket first.`,
         });
       const { error } = await padClient()
         .from("job_services")
@@ -8386,6 +8481,33 @@ export async function registerRoutes(
 
   // Compute, for a set of jobs, the accrued (AS57) revenue per job by summing
   // each well's latest reported AS57 value. One pass over the jobs' reports.
+  // Service charges (job_services.cost) are billed to the customer: summed per
+  // job and per service date for the Revenue module.
+  async function serviceChargesByJob(
+    jobIds: string[],
+  ): Promise<Map<string, { total: number; byDay: Map<string, number> }>> {
+    const out = new Map<string, { total: number; byDay: Map<string, number> }>();
+    if (!jobIds.length) return out;
+    const { data, error } = await padClient()
+      .from("job_services")
+      .select("job_id, service_date, cost")
+      .in("job_id", jobIds);
+    if (error) {
+      console.error("[revenue] job_services", error.message);
+      return out;
+    }
+    for (const r of (data || []) as any[]) {
+      const amt = Number(r.cost);
+      if (!Number.isFinite(amt) || amt <= 0) continue;
+      const day = String(r.service_date ?? "").slice(0, 10);
+      const cur = out.get(r.job_id) ?? { total: 0, byDay: new Map<string, number>() };
+      cur.total = Math.round((cur.total + amt) * 100) / 100;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(day)) cur.byDay.set(day, (cur.byDay.get(day) ?? 0) + amt);
+      out.set(r.job_id, cur);
+    }
+    return out;
+  }
+
   async function jobAccruedRevenue(
     jobIds: string[],
   ): Promise<Map<string, { revenue: number | null; hasAccrued: boolean }>> {
@@ -8477,6 +8599,16 @@ export async function registerRoutes(
       const manualBill = await computeManualBilling(jobRows as any);
       for (const [jid, b] of Array.from(manualBill.entries()))
         accrued.set(jid, { revenue: b.total, hasAccrued: b.total != null });
+      // Service charges are billed to the customer: add them to job revenue.
+      const svcCharges = await serviceChargesByJob(jobIds);
+      for (const [jid, sc] of Array.from(svcCharges.entries())) {
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sc.total) * 100) / 100,
+          hasAccrued: true,
+        });
+      }
 
       // All in-scope reports once, for daily/monthly day-rate revenue and
       // active detection (a job is active if it has a most-recent-dated well).
@@ -8570,6 +8702,13 @@ export async function registerRoutes(
           const mon = day.slice(0, 7);
           monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
         }
+      // Service charges land on their service date.
+      for (const [, sc] of Array.from(svcCharges.entries()))
+        for (const [day, amt] of Array.from(sc.byDay.entries())) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + amt);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
+        }
       // The rate shown on a job row: latest report's AL57 rate, else fallback.
       const dayRateOf = new Map<string, number | null>();
       for (const j of jobRows)
@@ -8599,6 +8738,7 @@ export async function registerRoutes(
           active: days > 0, // has report activity
           last_report: lastReportByJob.get(j.id) ?? null,
           billing_basis: "reports" as "reports" | "calendar",
+          service_charges: svcCharges.get(j.id)?.total ?? 0,
         };
         // Calendar-billed jobs (Mud Plant) have no daily reports: their status,
         // day count and last day come from the job's billing calendar.
@@ -8819,6 +8959,16 @@ export async function registerRoutes(
       const manualBill = await computeManualBilling(jobRows as any);
       for (const [jid, b] of Array.from(manualBill.entries()))
         accrued.set(jid, { revenue: b.total, hasAccrued: b.total != null });
+      // Service charges are billed to the customer: add them to job revenue.
+      const svcCharges = await serviceChargesByJob(jobIds);
+      for (const [jid, sc] of Array.from(svcCharges.entries())) {
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sc.total) * 100) / 100,
+          hasAccrued: true,
+        });
+      }
       const { data: reps } = await client
         .from("daily_reports")
         .select("job_id, report_date, received_at, report_day, kpis")

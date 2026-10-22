@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, Wrench, ClipboardCheck, Mail, AlertTriangle, PenLine, FileWarning } from "lucide-react";
+import { Bell, Wrench, ClipboardCheck, Mail, AlertTriangle, PenLine, FileWarning, Receipt } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -15,7 +15,8 @@ type NotificationType =
   | "signoff_pending"
   | "new_report"
   | "changes_requested"
-  | "missing_data";
+  | "missing_data"
+  | "service_charge";
 
 interface Notification {
   id: string;
@@ -40,6 +41,7 @@ const ICONS: Record<NotificationType, typeof Wrench> = {
   new_report: Mail,
   changes_requested: PenLine,
   missing_data: FileWarning,
+  service_charge: Receipt,
 };
 
 function relTime(ts: string | null): string {

@@ -1105,8 +1105,9 @@ export default function JobDetailPage() {
       )}
       </>)}
 
-      {/* Drive-by / call-out services — unmanned jobs only */}
-      {(job.crewing ?? "Manned") === "Unmanned" && <ServicesSection job={job} />}
+      {/* Service charges (billed to the customer) — any job; supervisors,
+          area managers and admins only */}
+      {profile && profile.role !== "field" && <ServicesSection job={job} />}
 
       {/* Pads & wells — current well inferred from daily reports */}
       <PadsSection job={job} />
@@ -1120,10 +1121,11 @@ export default function JobDetailPage() {
   );
 }
 
-// ---- Drive-by / call-out services (unmanned jobs) ------------------------
-// Unmanned jobs have no crew logging daily work, so an assigned supervisor (or
-// an area manager / admin) records the periodic drive-by and call-out visits
-// here — each with a type, date, optional cost, and notes.
+// ---- Service charges (any job) -------------------------------------------
+// An assigned supervisor (or an area manager / admin) logs a service made on
+// the job — type, date, well, optional equipment, a description of what was
+// done, and the cost billed to the customer. Charges count toward the job's
+// revenue, can be pulled onto a field ticket, and notify the area.
 function ServiceFormDialog({
   job,
   service,
@@ -1149,6 +1151,16 @@ function ServiceFormDialog({
   const [notes, setNotes] = useState(service?.notes ?? "");
   const NO_WELL = "__none__";
   const [wellId, setWellId] = useState<string>(service?.well_id ?? NO_WELL);
+  const NO_ASSET = "__none__";
+  const [assetId, setAssetId] = useState<string>(service?.asset_id ?? NO_ASSET);
+  // Equipment on this job (plus the current pick, if it has since moved).
+  const { data: allAssets } = useQuery<Asset[]>({
+    queryKey: ["/api/assets"],
+    enabled: open,
+  });
+  const jobAssets = (allAssets ?? [])
+    .filter((a) => a.job_id === job.id || a.id === service?.asset_id)
+    .sort((a, b) => String(a.tag).localeCompare(String(b.tag)));
   const servicesKey = ["/api/jobs", job.id, "services"];
 
   // Wells the supervisor can pick from: everything on the job that isn't
@@ -1179,6 +1191,7 @@ function ServiceFormDialog({
     );
     setNotes(service?.notes ?? "");
     setWellId(service?.well_id ?? NO_WELL);
+    setAssetId(service?.asset_id ?? NO_ASSET);
   };
 
   const save = useMutation({
@@ -1188,7 +1201,8 @@ function ServiceFormDialog({
         service_date: date,
         cost: cost.trim() === "" ? null : Number(cost),
         well_id: wellId === NO_WELL ? null : wellId,
-        notes: notes.trim() || null,
+        asset_id: assetId === NO_ASSET ? null : assetId,
+        notes: notes.trim(),
       };
       if (service) {
         await apiRequest(
@@ -1202,20 +1216,22 @@ function ServiceFormDialog({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: servicesKey });
-      toast({ title: service ? "Service updated" : "Service logged" });
+      toast({ title: service ? "Service charge updated" : "Service charge logged" });
       setOpen(false);
       if (!service) reset();
     },
     onError: (e: any) =>
       toast({
-        title: service ? "Could not update service" : "Could not log service",
+        title: service ? "Could not update service charge" : "Could not log service charge",
         description: e.message,
         variant: "destructive",
       }),
   });
 
   const dateInvalid = !date;
-  const costInvalid = cost.trim() !== "" && Number(cost) < 0;
+  const costMissing = cost.trim() === "" || !Number.isFinite(Number(cost));
+  const costInvalid = !costMissing && Number(cost) < 0;
+  const notesMissing = notes.trim() === "";
 
   return (
     <Dialog
@@ -1228,7 +1244,7 @@ function ServiceFormDialog({
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>{service ? "Edit service" : "Log a service"}</DialogTitle>
+          <DialogTitle>{service ? "Edit service charge" : "Log a service charge"}</DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           <div className="space-y-1.5">
@@ -1287,7 +1303,28 @@ function ServiceFormDialog({
             )}
           </div>
           <div className="space-y-1.5">
-            <Label>Cost (optional)</Label>
+            <Label>Equipment (optional)</Label>
+            <Select value={assetId} onValueChange={setAssetId}>
+              <SelectTrigger data-testid="select-service-asset">
+                <SelectValue placeholder="Which unit was serviced?" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_ASSET}>No specific equipment</SelectItem>
+                {jobAssets.map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.tag} · {a.category}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {open && allAssets && jobAssets.length === 0 && (
+              <p className="text-xs text-muted-foreground">
+                No equipment is assigned to this job.
+              </p>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label>Cost billed to the customer</Label>
             <div className="relative">
               <DollarSign className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
@@ -1305,14 +1342,17 @@ function ServiceFormDialog({
             {costInvalid && (
               <p className="text-xs text-destructive">Cost cannot be negative.</p>
             )}
+            <p className="text-xs text-muted-foreground">
+              Counts toward this job's revenue and can be added to a field ticket.
+            </p>
           </div>
           <div className="space-y-1.5">
-            <Label>Notes (optional)</Label>
+            <Label>Description</Label>
             <Textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               rows={3}
-              placeholder="What was done on this visit?"
+              placeholder="What happened and what was done?"
               data-testid="input-service-notes"
             />
           </div>
@@ -1327,13 +1367,13 @@ function ServiceFormDialog({
           </Button>
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || dateInvalid || costInvalid}
+            disabled={save.isPending || dateInvalid || costMissing || costInvalid || notesMissing}
             data-testid="button-save-service"
           >
             {save.isPending && (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
             )}
-            {service ? "Save changes" : "Log service"}
+            {service ? "Save changes" : "Log service charge"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1367,7 +1407,7 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
       apiRequest("DELETE", `/api/jobs/${job.id}/services/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: servicesKey });
-      toast({ title: "Service deleted" });
+      toast({ title: "Service charge deleted" });
     },
     onError: (e: any) =>
       toast({
@@ -1384,13 +1424,13 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
     <>
       <div className="mt-6 mb-2 flex items-center justify-between">
         <h2 className="text-sm font-semibold">
-          Drive-by &amp; call-out services{" "}
+          Service charges{" "}
           <span className="text-muted-foreground font-normal">
             ({list.length})
           </span>
           {list.length > 0 && (
             <span className="ml-2 text-muted-foreground font-normal">
-              · Total cost{" "}
+              · Billed{" "}
               <span
                 className="font-medium text-foreground tabular-nums"
                 data-testid="job-services-total"
@@ -1406,13 +1446,13 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
               job={job}
               trigger={
                 <Button size="sm" data-testid="button-add-service">
-                  <Plus className="mr-2 h-4 w-4" /> Log service
+                  <Plus className="mr-2 h-4 w-4" /> Log service charge
                 </Button>
               }
             />
           ) : (
             <span className="text-xs text-muted-foreground">
-              Job not active — services are read-only
+              Job not active — service charges are read-only
             </span>
           ))}
       </div>
@@ -1425,11 +1465,11 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-8 text-center">
           <Navigation className="h-5 w-5 mx-auto text-muted-foreground mb-1.5" />
           <div className="text-sm text-muted-foreground">
-            No services logged yet.
+            No service charges logged yet.
           </div>
           {canManage && isLiveJobStatus(job.status) && (
             <div className="text-xs text-muted-foreground mt-1">
-              Log a drive-by or call-out visit to this unmanned job.
+              Log a service made on this job, what happened, and what it bills.
             </div>
           )}
         </div>
@@ -1441,7 +1481,7 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
               className="px-4 py-3"
               data-testid={`service-row-${s.id}`}
             >
-              <div className="flex items-center gap-2 text-sm">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
                 <Navigation className="h-4 w-4 text-muted-foreground shrink-0" />
                 <span className="font-medium">{s.service_type}</span>
                 <span className="text-muted-foreground">
@@ -1456,6 +1496,22 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
                     {s.well_name}
                   </span>
                 )}
+                {s.asset_tag && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+                    data-testid={`service-asset-${s.id}`}
+                  >
+                    <Wrench className="h-3 w-3" />
+                    {s.asset_tag}
+                  </span>
+                )}
+                <span
+                  className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs ${s.on_ticket != null ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200" : "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"}`}
+                  data-testid={`service-ticket-${s.id}`}
+                >
+                  <Ticket className="h-3 w-3" />
+                  {s.on_ticket != null ? `Ticket #${s.on_ticket}` : "Not on a ticket"}
+                </span>
                 <span className="ml-auto font-medium tabular-nums">
                   {money(s.cost)}
                 </span>
@@ -1488,7 +1544,7 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
-                          <AlertDialogTitle>Delete this service?</AlertDialogTitle>
+                          <AlertDialogTitle>Delete this service charge?</AlertDialogTitle>
                           <AlertDialogDescription>
                             This removes the {s.service_type.toLowerCase()} from{" "}
                             {padDateFmt(s.service_date)}. This cannot be undone.

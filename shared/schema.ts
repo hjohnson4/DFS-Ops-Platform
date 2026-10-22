@@ -645,6 +645,7 @@ export interface LineItem {
   end_date?: string | null; // last day; null/same = one day
   well_name?: string | null; // well this line is billed to
   section?: string | null; // section heading the line is grouped under
+  service_id?: string | null; // job_services row this line bills (service charges)
 }
 
 // Field ticket lifecycle: an Area Manager/Admin builds it while Open, closes it
@@ -1521,7 +1522,10 @@ export const updateJobSchema = z.object({
 export type UpdateJobInput = z.infer<typeof updateJobSchema>;
 
 // ==== Job services (drive-by / call-out on unmanned jobs) ==================
-export const SERVICE_TYPES = ["Drive-by Service", "Call-out Service"] as const;
+// "Service Charge" (any job) is billed to the customer: it counts toward the
+// job's revenue and can be pulled onto a field ticket. Drive-by / Call-out are
+// the original unmanned-job visit types and bill the same way.
+export const SERVICE_TYPES = ["Service Charge", "Drive-by Service", "Call-out Service"] as const;
 export type ServiceType = (typeof SERVICE_TYPES)[number];
 
 export interface JobService {
@@ -1533,7 +1537,11 @@ export interface JobService {
   cost: number | null;
   well_id: string | null; // the well that was open when service was performed
   well_name: string | null; // snapshot of the well name at time of logging
-  notes: string | null;
+  notes: string | null; // description: what was done and why
+  asset_id?: string | null; // equipment the service was for (optional)
+  asset_tag?: string | null; // joined for display
+  asset_category?: string | null; // joined for display
+  on_ticket?: number | null; // field ticket number it's billed on, if any
   created_by: string | null;
   created_by_name: string | null;
   created_at: string;
@@ -1555,9 +1563,14 @@ const serviceCostField = z
 export const createJobServiceSchema = z.object({
   service_type: z.enum(SERVICE_TYPES),
   service_date: z.string().min(1, "Service date is required"),
-  cost: serviceCostField,
+  cost: serviceCostField.refine((v) => v !== null, { message: "Enter the cost to bill" }),
   well_id: z.string().uuid().nullable().optional(),
-  notes: z.string().trim().max(2000).nullable().optional(),
+  asset_id: z.string().uuid().nullable().optional(),
+  notes: z
+    .string({ required_error: "Describe what was done" })
+    .trim()
+    .min(1, "Describe what was done")
+    .max(2000),
 });
 export type CreateJobServiceInput = z.infer<typeof createJobServiceSchema>;
 
@@ -1566,7 +1579,8 @@ export const updateJobServiceSchema = z.object({
   service_date: z.string().min(1).optional(),
   cost: serviceCostField,
   well_id: z.string().uuid().nullable().optional(),
-  notes: z.string().trim().max(2000).nullable().optional(),
+  asset_id: z.string().uuid().nullable().optional(),
+  notes: z.string().trim().min(1, "Describe what was done").max(2000).optional(),
 });
 export type UpdateJobServiceInput = z.infer<typeof updateJobServiceSchema>;
 
@@ -1678,6 +1692,7 @@ export const lineItemSchema = z.object({
   end_date: ymd,
   well_name: z.string().nullable().optional(),
   section: z.string().nullable().optional(),
+  service_id: z.string().uuid().nullable().optional(),
 });
 export type LineItemInput = z.infer<typeof lineItemSchema>;
 
