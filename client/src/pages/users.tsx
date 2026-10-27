@@ -333,7 +333,7 @@ export default function UsersPage() {
                         type="text"
                         value={password}
                         onChange={(e) => setPassword(e.target.value)}
-                        placeholder="min 10 chars, letters and numbers"
+                        placeholder="any password"
                         data-testid="input-new-password"
                         className="font-mono"
                       />
@@ -405,7 +405,7 @@ export default function UsersPage() {
                   !name ||
                   !email ||
                   (mode === "password" &&
-                    !/^(?=.*[A-Za-z])(?=.*[0-9]).{10,}$/.test(password))
+                    password.length < 1)
                 }
                 data-testid="button-save-user"
               >

@@ -8,7 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Loader2, ShieldCheck } from "lucide-react";
 import logoUrl from "@/assets/dfs-logo.png";
 
-const PW_OK = /^(?=.*[A-Za-z])(?=.*[0-9]).{10,}$/;
+const PW_OK = /^.+$/;
 
 /**
  * ChangePasswordForm — the shared form used both in Settings (change anytime)
@@ -69,13 +69,13 @@ export function ChangePasswordForm({ onDone }: { onDone?: () => void }) {
           type="password"
           value={next}
           onChange={(e) => setNext(e.target.value)}
-          placeholder="min 10 chars, letters and numbers"
+          placeholder="any password"
           autoComplete="new-password"
           data-testid="input-new-password"
         />
         {next.length > 0 && !nextOk && (
           <p className="text-xs text-destructive">
-            Must be at least 10 characters and include a letter and a number.
+            Enter a password.
           </p>
         )}
       </div>

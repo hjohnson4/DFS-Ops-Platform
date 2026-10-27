@@ -30,7 +30,7 @@ function tokenFromHash(): string {
   return params.get("token") || "";
 }
 
-const PW_OK = (p: string) => /^(?=.*[A-Za-z])(?=.*[0-9]).{10,}$/.test(p);
+const PW_OK = (p: string) => p.length >= 1;
 
 export default function SetPassword() {
   const { refresh } = useAuth();
@@ -77,7 +77,7 @@ export default function SetPassword() {
     e.preventDefault();
     setErr("");
     if (!PW_OK(pw)) {
-      setErr("Password must be at least 10 characters and include a letter and a number.");
+      setErr("Enter a password.");
       return;
     }
     if (pw !== pw2) {
@@ -154,7 +154,7 @@ export default function SetPassword() {
                     autoComplete="new-password"
                     value={pw}
                     onChange={(e) => setPw(e.target.value)}
-                    placeholder="min 10 chars, letters and numbers"
+                    placeholder="any password"
                     required
                     data-testid="input-set-password"
                   />

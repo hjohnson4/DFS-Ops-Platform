@@ -1193,13 +1193,12 @@ export interface NotificationPrefs {
 }
 
 // ---- Insert / validation schemas -------------------------------------------
-// Password rule shared by manual create and password reset: at least 10 chars
-// with letters and numbers (these mint real login accounts).
+// Password rule shared by manual create and password reset. No length or
+// strength rule (owner decision 2026-10-27) — any non-empty password. Short
+// passwords are padded server-side (authPw in routes.ts) to satisfy Supabase.
 const strongPassword = z
   .string()
-  .min(10, "Password must be at least 10 characters")
-  .regex(/[A-Za-z]/, "Password must include a letter")
-  .regex(/[0-9]/, "Password must include a number");
+  .min(1, "Enter a password");
 
 // Creating a user supports two modes:
 //   - "invite": no password; the system emails a secure set-password link.

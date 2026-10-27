@@ -662,6 +662,12 @@ export async function registerRoutes(
     });
   });
   // ---- Auth ---------------------------------------------------------------
+  // No password length rule (owner decision 2026-10-27). Supabase Auth rejects
+  // passwords under 6 characters, so short passwords are padded with a fixed
+  // suffix before they reach Supabase — the SAME way at set time and at login,
+  // so users only ever type their short password. Passwords of 6+ characters
+  // pass through unchanged (existing accounts are unaffected).
+  const authPw = (p: string) => (p.length >= 6 ? p : p + "::Dfs-Pw-Pad-0");
   // Login: exchange email+password for a Supabase session (access token)
   app.post("/api/auth/login", async (req: Request, res: Response) => {
     const { email, password } = req.body || {};
@@ -670,7 +676,7 @@ export async function registerRoutes(
 
     const { data, error } = await supabaseAnon.auth.signInWithPassword({
       email,
-      password,
+      password: authPw(String(password)),
     });
     if (error || !data.session) {
       return res.status(401).json({ message: "Invalid email or password" });
@@ -774,26 +780,24 @@ export async function registerRoutes(
     if ("error" in v) return res.status(400).json({ message: v.error });
     if (
       typeof password !== "string" ||
-      password.length < 10 ||
-      !/[A-Za-z]/.test(password) ||
-      !/[0-9]/.test(password)
+      password.length < 1
     ) {
       return res.status(400).json({
-        message: "Password must be at least 10 characters and include a letter and a number.",
+        message: "Enter a password.",
       });
     }
     if (!supabaseAdmin)
       return res.status(503).json({ message: "Service unavailable." });
     // Set the password (and make sure the email is confirmed).
     const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(v.uid, {
-      password,
+      password: authPw(password),
       email_confirm: true,
     });
     if (uErr) return res.status(400).json({ message: uErr.message });
     // Sign them in so they land in the app already authenticated.
     const { data: signIn, error: sErr } = await supabaseAnon.auth.signInWithPassword({
       email: v.email,
-      password,
+      password: authPw(password),
     });
     if (sErr || !signIn.session) {
       // Password was set but auto-login failed — tell them to sign in normally.
@@ -886,7 +890,7 @@ export async function registerRoutes(
       const { data: signIn, error: sErr } =
         await supabaseAnon.auth.signInWithPassword({
           email: me.email,
-          password: currentPassword,
+          password: authPw(currentPassword),
         });
       if (sErr || !signIn.session) {
         return res.status(400).json({ message: "Your current password is incorrect." });
@@ -896,7 +900,7 @@ export async function registerRoutes(
       //    metadata flag); fall back to updating via the user's own session.
       if (supabaseAdmin) {
         const { error: uErr } = await supabaseAdmin.auth.admin.updateUserById(me.id, {
-          password: newPassword,
+          password: authPw(newPassword),
           user_metadata: {
             name: me.name,
             must_change_password: false,
@@ -906,7 +910,7 @@ export async function registerRoutes(
       } else {
         // No service role key: update through the just-established session.
         const { error: uErr } = await supabaseAnon.auth.updateUser(
-          { password: newPassword },
+          { password: authPw(newPassword) },
           { /* uses the session from signIn above */ } as any,
         );
         if (uErr) return res.status(400).json({ message: uErr.message });
@@ -1519,7 +1523,7 @@ export async function registerRoutes(
       const { data: created, error: cErr } =
         await supabaseAdmin.auth.admin.createUser({
           email,
-          ...(mode === "password" ? { password } : {}),
+          ...(mode === "password" ? { password: authPw(password || "") } : {}),
           email_confirm: true,
           user_metadata: { name, ...(mustChange ? { must_change_password: true } : {}) },
         });
