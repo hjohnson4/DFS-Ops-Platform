@@ -4005,6 +4005,19 @@ async function registerRoutes(httpServer, app) {
     const { data: days } = await client2.from("job_billing_days").select("day, billing, note, changed_by_name, changed_at").eq("job_id", job.id).order("day", { ascending: true });
     const { data: events } = await client2.from("job_billing_events").select("kind, day, billing, start_date, note, changed_by_name, created_at").eq("job_id", job.id).order("created_at", { ascending: false }).limit(15);
     const billing = (await computeManualBilling([job])).get(job.id);
+    const { data: svcRows } = await client2.from("job_services").select("id, service_type, service_date, cost, notes").eq("job_id", job.id).order("service_date", { ascending: true });
+    const services = {};
+    let serviceTotal = 0;
+    for (const v of svcRows || []) {
+      const amt = Number(v.cost);
+      const day = String(v.service_date ?? "").slice(0, 10);
+      if (!Number.isFinite(amt) || amt <= 0 || !ISO.test(day)) continue;
+      const cur = services[day] ?? { total: 0, items: [] };
+      cur.total = Math.round((cur.total + amt) * 100) / 100;
+      cur.items.push({ type: v.service_type, cost: amt, notes: v.notes ?? null });
+      services[day] = cur;
+      serviceTotal = Math.round((serviceTotal + amt) * 100) / 100;
+    }
     res.json({
       start_date: job.billing_start_date ?? job.started_on ?? null,
       day_rate: job.day_rate != null ? Number(job.day_rate) : null,
@@ -4013,6 +4026,8 @@ async function registerRoutes(httpServer, app) {
       events: events || [],
       summary: publicBilling(billing),
       daily: billing ? Object.fromEntries(billing.daily) : {},
+      services,
+      service_total: serviceTotal,
       can_edit: canEditCalendar(req)
     });
   });
@@ -7397,10 +7412,10 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     try {
       const buf = Buffer.from(base64, "base64");
       const CFB2 = XLSX2.CFB ?? XLSX2.default?.CFB;
-      if (!CFB2) return { location: null, date: null };
+      if (!CFB2) return { location: null, date: null, text: null };
       const cfb = CFB2.read(buf, { type: "buffer" });
       const i = cfb.FullPaths.findIndex((p) => /word\/document\.xml$/i.test(p));
-      if (i < 0) return { location: null, date: null };
+      if (i < 0) return { location: null, date: null, text: null };
       const xml = Buffer.from(cfb.FileIndex[i].content).toString("utf8");
       const decode = (t) => t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
       const paras = (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || []).map(
@@ -7426,10 +7441,45 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           }
         }
       }
-      return { location, date };
+      return { location, date, text: paras.join("\n") };
     } catch {
-      return { location: null, date: null };
+      return { location: null, date: null, text: null };
     }
+  };
+  const readJsaWorkbookText = (base64) => {
+    try {
+      const wb = XLSX2.read(Buffer.from(base64, "base64"), { type: "buffer" });
+      const parts = [];
+      for (const n of wb.SheetNames) {
+        const ws2 = wb.Sheets[n];
+        for (const k of Object.keys(ws2 || {})) {
+          if (k[0] === "!") continue;
+          const v = ws2[k]?.v;
+          if (v != null && typeof v !== "number") parts.push(String(v));
+        }
+      }
+      return parts.join("\n");
+    } catch {
+      return null;
+    }
+  };
+  const findJobInText = (text, jobs) => {
+    if (!text) return null;
+    const hay = " " + normJobId(String(text).replace(/\.(xlsx?|xlsm|xlsb|docx?|pdf)\b/gi, " ").replace(/_+/g, " ")) + " ";
+    const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    let best = [];
+    let bestLen = 0;
+    for (const j of jobs) {
+      const n = normJobId(j.job_number);
+      if (n.replace(/\s/g, "").length < 4) continue;
+      const re = new RegExp("(^|[^A-Z0-9])" + esc(n) + "(?=[^A-Z0-9]|$)");
+      if (!re.test(hay)) continue;
+      if (n.length > bestLen) {
+        best = [j];
+        bestLen = n.length;
+      } else if (n.length === bestLen) best.push(j);
+    }
+    return best.length === 1 ? best[0] : null;
   };
   app.post("/api/jsa-intake/ingest", async (req, res) => {
     if (!INGEST_TOKEN)
@@ -7445,7 +7495,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     if (existing) return res.status(200).json({ ...existing, deduped: true });
     const word = isWordJsa(p.attachment_name, p.attachment_mime);
     const rigFromWorkbook = word ? null : readJsaRigNameFromWorkbook(p.attachment_base64, p.attachment_mime);
-    const wordInfo = word ? readJsaFromWord(p.attachment_base64) : { location: null, date: null };
+    const wordInfo = word ? readJsaFromWord(p.attachment_base64) : { location: null, date: null, text: null };
     const explicit = p.job_number && p.job_number.trim();
     const subjectNumber = parseJobNumber(p.subject);
     const candidates = [];
@@ -7471,6 +7521,16 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       }
     }
     if (!job_id) {
+      const m = findJobInText(p.attachment_name, allJobs || []);
+      if (m) {
+        job_id = m.id;
+        area = m.area;
+        customer_id = m.customer_id;
+        jobNumber = m.job_number;
+        matchSource = "the file name";
+      }
+    }
+    if (!job_id) {
       const { data: sib } = await client2.from("daily_reports").select("job_id, area, customer_id, job:jobs(job_number)").eq("email_message_id", p.email_message_id).not("job_id", "is", null).limit(1);
       const r = (sib || [])[0];
       if (r?.job_id) {
@@ -7479,6 +7539,18 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         customer_id = r.customer_id;
         jobNumber = r.job?.job_number ?? jobNumber;
         matchSource = "the daily report in the same email";
+      }
+    }
+    if (!job_id) {
+      const isPdf = /pdf/i.test(String(p.attachment_mime ?? "")) || /\.pdf$/i.test(p.attachment_name);
+      const fileText = word ? wordInfo.text : isPdf ? null : readJsaWorkbookText(p.attachment_base64);
+      const m = findJobInText(fileText, allJobs || []);
+      if (m) {
+        job_id = m.id;
+        area = m.area;
+        customer_id = m.customer_id;
+        jobNumber = m.job_number;
+        matchSource = "the JSA's contents";
       }
     }
     if (!job_id && subjectNumber) {

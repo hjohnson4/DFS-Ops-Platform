@@ -2097,6 +2097,25 @@ export async function registerRoutes(
       .order("created_at", { ascending: false })
       .limit(15);
     const billing = (await computeManualBilling([job])).get(job.id);
+    // Service / drive-by / call-out charges are added on top of the day rate
+    // for the day they occurred (they're billed to the customer).
+    const { data: svcRows } = await client
+      .from("job_services")
+      .select("id, service_type, service_date, cost, notes")
+      .eq("job_id", job.id)
+      .order("service_date", { ascending: true });
+    const services: Record<string, { total: number; items: { type: string; cost: number; notes: string | null }[] }> = {};
+    let serviceTotal = 0;
+    for (const v of (svcRows || []) as any[]) {
+      const amt = Number(v.cost);
+      const day = String(v.service_date ?? "").slice(0, 10);
+      if (!Number.isFinite(amt) || amt <= 0 || !ISO.test(day)) continue;
+      const cur = services[day] ?? { total: 0, items: [] };
+      cur.total = Math.round((cur.total + amt) * 100) / 100;
+      cur.items.push({ type: v.service_type, cost: amt, notes: v.notes ?? null });
+      services[day] = cur;
+      serviceTotal = Math.round((serviceTotal + amt) * 100) / 100;
+    }
     res.json({
       start_date: job.billing_start_date ?? job.started_on ?? null,
       day_rate: job.day_rate != null ? Number(job.day_rate) : null,
@@ -2105,6 +2124,8 @@ export async function registerRoutes(
       events: events || [],
       summary: publicBilling(billing),
       daily: billing ? Object.fromEntries(billing.daily) : {},
+      services,
+      service_total: serviceTotal,
       can_edit: canEditCalendar(req),
     });
   });
@@ -6948,16 +6969,16 @@ export async function registerRoutes(
     /wordprocessingml|msword/i.test(String(mime ?? "")) || /\.docx?$/i.test(String(name ?? ""));
   const readJsaFromWord = (
     base64: string,
-  ): { location: string | null; date: string | null } => {
+  ): { location: string | null; date: string | null; text: string | null } => {
     try {
       const buf = Buffer.from(base64, "base64");
       // In the ESM server bundle CFB lives on the default export, not the
       // namespace (verified 2026-10-21) — check both.
       const CFB = (XLSX as any).CFB ?? (XLSX as any).default?.CFB;
-      if (!CFB) return { location: null, date: null };
+      if (!CFB) return { location: null, date: null, text: null };
       const cfb = CFB.read(buf, { type: "buffer" });
       const i = (cfb.FullPaths as string[]).findIndex((p) => /word\/document\.xml$/i.test(p));
-      if (i < 0) return { location: null, date: null };
+      if (i < 0) return { location: null, date: null, text: null };
       const xml = Buffer.from(cfb.FileIndex[i].content).toString("utf8");
       const decode = (t: string) =>
         t.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'");
@@ -6984,10 +7005,53 @@ export async function registerRoutes(
           }
         }
       }
-      return { location, date };
+      return { location, date, text: paras.join("\n") };
     } catch {
-      return { location: null, date: null };
+      return { location: null, date: null, text: null };
     }
+  };
+
+  // All cell text of an .xlsx JSA (every sheet), for the "find a job number
+  // anywhere in the file" fallback. Null for unreadable files.
+  const readJsaWorkbookText = (base64: string): string | null => {
+    try {
+      const wb = XLSX.read(Buffer.from(base64, "base64"), { type: "buffer" });
+      const parts: string[] = [];
+      for (const n of wb.SheetNames) {
+        const ws = wb.Sheets[n] as any;
+        for (const k of Object.keys(ws || {})) {
+          if (k[0] === "!") continue;
+          const v = ws[k]?.v;
+          if (v != null && typeof v !== "number") parts.push(String(v));
+        }
+      }
+      return parts.join("\n");
+    } catch {
+      return null;
+    }
+  };
+
+  // Find exactly one active job whose number appears in free text (a file
+  // name or the file's contents). Spaces, dashes and underscores are treated
+  // alike, and the number must stand on its own ("H&P 541" matches
+  // "J Lee JSA H&P 541.xlsx" but not "H&P 5410"). The longest match wins
+  // (so "H&P 541" beats "H&P 54"); a tie between different jobs, or a job
+  // number shorter than 4 characters, is never guessed.
+  const findJobInText = (text: string | null | undefined, jobs: any[]): any | null => {
+    if (!text) return null;
+    const hay = " " + normJobId(String(text).replace(/\.(xlsx?|xlsm|xlsb|docx?|pdf)\b/gi, " ").replace(/_+/g, " ")) + " ";
+    const esc = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    let best: any[] = [];
+    let bestLen = 0;
+    for (const j of jobs) {
+      const n = normJobId(j.job_number);
+      if (n.replace(/\s/g, "").length < 4) continue;
+      const re = new RegExp("(^|[^A-Z0-9])" + esc(n) + "(?=[^A-Z0-9]|$)");
+      if (!re.test(hay)) continue;
+      if (n.length > bestLen) { best = [j]; bestLen = n.length; }
+      else if (n.length === bestLen) best.push(j);
+    }
+    return best.length === 1 ? best[0] : null;
   };
 
   // Ingest a JSA email. Auth via the shared x-ingest-token (same as reports).
@@ -7020,12 +7084,15 @@ export async function registerRoutes(
     const rigFromWorkbook = word
       ? null
       : readJsaRigNameFromWorkbook(p.attachment_base64, p.attachment_mime);
-    const wordInfo = word ? readJsaFromWord(p.attachment_base64) : { location: null, date: null };
+    const wordInfo = word
+      ? readJsaFromWord(p.attachment_base64)
+      : { location: null, date: null, text: null };
     const explicit = p.job_number && p.job_number.trim();
     const subjectNumber = parseJobNumber(p.subject);
     // Candidate job identifiers, strongest first:
-    //   request override → workbook K4 → Word "Location:" → (same-email daily
-    //   report's job, below) → email subject.
+    //   request override → workbook K4 → Word "Location:" → (below) file name
+    //   → same-email daily report's job → job number anywhere in the file →
+    //   email subject.
     const candidates: { value: string; source: string }[] = [];
     if (explicit) candidates.push({ value: explicit, source: "request" });
     if (rigFromWorkbook) candidates.push({ value: rigFromWorkbook, source: "workbook cell K4" });
@@ -7048,6 +7115,14 @@ export async function registerRoutes(
         break;
       }
     }
+    // The attachment's file name names the job (e.g. "J Lee JSA H&P 541.xlsx").
+    if (!job_id) {
+      const m = findJobInText(p.attachment_name, allJobs || []);
+      if (m) {
+        job_id = m.id; area = m.area; customer_id = m.customer_id;
+        jobNumber = m.job_number; matchSource = "the file name";
+      }
+    }
     // Same email also carried a daily report (e.g. Dustin Dillard's crews send
     // the report + JSA together): use that report's job.
     if (!job_id) {
@@ -7062,6 +7137,16 @@ export async function registerRoutes(
         job_id = r.job_id; area = r.area; customer_id = r.customer_id;
         jobNumber = r.job?.job_number ?? jobNumber;
         matchSource = "the daily report in the same email";
+      }
+    }
+    // A job number written anywhere in the JSA itself (any cell / any line).
+    if (!job_id) {
+      const isPdf = /pdf/i.test(String(p.attachment_mime ?? "")) || /\.pdf$/i.test(p.attachment_name);
+      const fileText = word ? wordInfo.text : isPdf ? null : readJsaWorkbookText(p.attachment_base64);
+      const m = findJobInText(fileText, allJobs || []);
+      if (m) {
+        job_id = m.id; area = m.area; customer_id = m.customer_id;
+        jobNumber = m.job_number; matchSource = "the JSA's contents";
       }
     }
     if (!job_id && subjectNumber) {
