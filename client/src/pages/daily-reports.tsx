@@ -20,7 +20,16 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronRight,
+  MapPin,
 } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { AREAS } from "@shared/schema";
 import {
   Dialog,
   DialogContent,
@@ -342,7 +351,27 @@ export default function DailyReportsPage() {
     queryKey: ["/api/daily-reports"],
   });
 
-  const all = reports || [];
+  // Admin area filter (West Texas / South Texas / North Louisiana). Other
+  // roles already only receive their own area's reports from the server.
+  const isAdmin = profile?.role === "admin";
+  const [areaFilter, setAreaFilterState] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem("daily-reports-area-filter") || "all";
+    } catch {
+      return "all";
+    }
+  });
+  const setAreaFilter = (v: string) => {
+    setAreaFilterState(v);
+    try {
+      sessionStorage.setItem("daily-reports-area-filter", v);
+    } catch {}
+  };
+  const activeArea = isAdmin && areaFilter !== "all" ? areaFilter : null;
+  const all = useMemo(
+    () => (reports || []).filter((r) => !activeArea || r.area === activeArea),
+    [reports, activeArea],
+  );
   const pending = all.filter((r) => r.status === "Pending Review").length;
   const needsMatch = all.filter((r) => r.status === "Needs job match").length;
 
@@ -644,6 +673,23 @@ export default function DailyReportsPage() {
           <ToggleGroupItem value="pending" data-testid="filter-status-pending">Pending</ToggleGroupItem>
           <ToggleGroupItem value="signed" data-testid="filter-status-signed">Signed off</ToggleGroupItem>
         </ToggleGroup>
+
+        {isAdmin && (
+          <Select value={areaFilter} onValueChange={setAreaFilter}>
+            <SelectTrigger className="h-9 w-[200px]" data-testid="select-daily-reports-area">
+              <MapPin className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+              <SelectValue placeholder="All areas" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All areas</SelectItem>
+              {AREAS.map((a) => (
+                <SelectItem key={a} value={a} data-testid={`option-daily-reports-area-${a}`}>
+                  {a}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
 
         <div className="flex items-center gap-1 ml-auto">
           <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setAllGroups(true)} disabled={!!q} data-testid="button-expand-all-jobs">
