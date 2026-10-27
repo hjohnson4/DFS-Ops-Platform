@@ -5458,7 +5458,7 @@ async function registerRoutes(httpServer, app) {
           return res.status(404).json({ message: "Asset not found" });
       }
       const { data: reps } = await client3.from("maintenance_reports").select(
-        "id, work_type, status, report_date, filed_at, notes, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)"
+        "id, work_type, status, report_date, filed_at, notes, checklist, score_pass, score_total, flagged_count, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)"
       ).eq("asset_id", req.params.id).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
       const history = (reps || []).map((r) => ({
         id: r.id,
@@ -5467,7 +5467,11 @@ async function registerRoutes(httpServer, app) {
         report_date: r.report_date,
         filed_at: r.filed_at,
         notes: r.notes,
-        supervisor_name: r.supervisor?.name ?? null
+        supervisor_name: r.supervisor?.name ?? null,
+        has_form: r.checklist != null,
+        score_pass: r.score_pass ?? null,
+        score_total: r.score_total ?? null,
+        flagged_count: r.flagged_count ?? null
       }));
       let { hoursSince, interval, state } = serviceStatusFor(asset);
       if (tracksRunHours(asset.category)) {

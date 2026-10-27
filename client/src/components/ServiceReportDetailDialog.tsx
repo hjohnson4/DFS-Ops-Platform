@@ -81,6 +81,8 @@ export function ServiceReportDetailDialog({
       queryClient.invalidateQueries({ queryKey: ["/api/service-forms"] });
       queryClient.invalidateQueries({ queryKey: ["/api/service/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
+      // Asset pop-up history (status / removal) refreshes too.
+      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
       toast({ title: "Service report deleted" });
       onClose();
     },
@@ -105,6 +107,8 @@ export function ServiceReportDetailDialog({
       queryClient.invalidateQueries({ queryKey: ["/api/service-forms"] });
       queryClient.invalidateQueries({ queryKey: ["/api/service/dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["/api/reports"] });
+      // Asset pop-up history (status / removal) refreshes too.
+      queryClient.invalidateQueries({ queryKey: ["/api/assets"] });
       toast({
         title: "Service report signed off",
         description: "The supervisor who filed it has been notified.",

@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { RefurbishmentHistory } from "@/components/RefurbishmentHistory";
+import { ServiceReportDetailDialog } from "@/components/ServiceReportDetailDialog";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -59,6 +60,7 @@ import {
   FileText,
   Pencil,
   Trash2,
+  Eye,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -898,6 +900,8 @@ function AssetDetailDialog({
   const canManage = profile?.role === "admin" || profile?.role === "area";
   const canSeeRefurb = canManage || profile?.role === "super";
   const [editing, setEditing] = useState(false);
+  // Inspection opened from the history list (in-app service report).
+  const [openReportId, setOpenReportId] = useState<string | null>(null);
   const { data, isLoading } = useQuery<AssetDetail>({
     queryKey: ["/api/assets", assetId],
     enabled: !!assetId,
@@ -1012,15 +1016,16 @@ function AssetDetailDialog({
                   No maintenance or inspection reports filed for this asset yet.
                 </div>
               ) : (
-                <div className="rounded-md border border-card-border overflow-hidden">
+                <div className="rounded-md border border-card-border overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-card-border bg-muted/40 text-left text-xs text-muted-foreground">
                         <th className="px-3 py-2 font-medium">Date</th>
-                        <th className="px-3 py-2 font-medium">Work type</th>
+                        <th className="px-3 py-2 font-medium hidden sm:table-cell">Work type</th>
                         <th className="px-3 py-2 font-medium">Status</th>
-                        <th className="px-3 py-2 font-medium">Technician</th>
+                        <th className="px-3 py-2 font-medium hidden sm:table-cell">Technician</th>
                         <th className="px-3 py-2 font-medium">Notes</th>
+                        <th className="px-3 py-2 font-medium text-right"></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1031,13 +1036,39 @@ function AssetDetailDialog({
                           data-testid={`history-row-${h.id}`}
                         >
                           <td className="px-3 py-2 whitespace-nowrap">{fmtDate(h.report_date)}</td>
-                          <td className="px-3 py-2">{h.work_type}</td>
+                          <td className="px-3 py-2 hidden sm:table-cell">{h.work_type}</td>
                           <td className="px-3 py-2">
                             <span className="text-xs text-muted-foreground">{h.status}</span>
                           </td>
-                          <td className="px-3 py-2">{h.supervisor_name ?? "\u2014"}</td>
+                          <td className="px-3 py-2 hidden sm:table-cell">{h.supervisor_name ?? "\u2014"}</td>
                           <td className="px-3 py-2 text-muted-foreground max-w-xs">
                             {h.notes || "\u2014"}
+                            {h.score_total ? (
+                              <div className="text-xs mt-0.5">
+                                Score {h.score_pass ?? 0}/{h.score_total}
+                                {h.flagged_count ? (
+                                  <span className="ml-1.5 text-red-600 dark:text-red-400">
+                                    {h.flagged_count} flagged
+                                  </span>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2 text-right">
+                            {h.has_form ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-xs"
+                                onClick={() => setOpenReportId(h.id)}
+                                data-testid={`button-view-inspection-${h.id}`}
+                              >
+                                <Eye className="mr-1 h-3.5 w-3.5" />
+                                View
+                              </Button>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">{"\u2014"}</span>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -1058,6 +1089,10 @@ function AssetDetailDialog({
             onOpenChange={setEditing}
           />
         )}
+        <ServiceReportDetailDialog
+          reportId={openReportId}
+          onClose={() => setOpenReportId(null)}
+        />
       </DialogContent>
     </Dialog>
   );

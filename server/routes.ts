@@ -3880,7 +3880,7 @@ export async function registerRoutes(
       const { data: reps } = await client
         .from("maintenance_reports")
         .select(
-          "id, work_type, status, report_date, filed_at, notes, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)",
+          "id, work_type, status, report_date, filed_at, notes, checklist, score_pass, score_total, flagged_count, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)",
         )
         .eq("asset_id", req.params.id)
         .order("report_date", { ascending: false })
@@ -3893,6 +3893,10 @@ export async function registerRoutes(
         filed_at: r.filed_at,
         notes: r.notes,
         supervisor_name: r.supervisor?.name ?? null,
+        has_form: r.checklist != null,
+        score_pass: r.score_pass ?? null,
+        score_total: r.score_total ?? null,
+        flagged_count: r.flagged_count ?? null,
       }));
       // Derive the run-hours-since-service view for centrifuges so the asset
       // detail can show "X hrs since last service" alongside the raw meter.

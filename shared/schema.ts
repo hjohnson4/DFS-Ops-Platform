@@ -397,6 +397,10 @@ export interface AssetHistoryEntry {
   filed_at: string;
   notes: string | null;
   supervisor_name: string | null;
+  has_form?: boolean; // in-app service form → can be opened with "View"
+  score_pass?: number | null;
+  score_total?: number | null;
+  flagged_count?: number | null;
 }
 
 // Full detail payload for the asset pop-up: the asset (with joins) + its history.
