@@ -281,6 +281,53 @@ export default function UsersPage() {
       }),
   });
 
+
+  // Edit / Resend invite / Reset password / Deactivate for one user (used by
+  // both the desktop table and the phone cards).
+  const userActions = (u: Profile) => (
+    <>
+                  <Button variant="ghost" size="sm" onClick={() => openEdit(u)} data-testid={`button-edit-${u.id}`}>
+                    <Pencil className="mr-1.5 h-3.5 w-3.5" /> Edit
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => resendInvite.mutate(u)}
+                    disabled={resendingId === u.id || (health && (!health.adminReady || !health.emailReady))}
+                    title={
+                      health && !health.emailReady
+                        ? "Email isn't configured yet, so invites can't be sent."
+                        : "Email a fresh set-password link to this user"
+                    }
+                    data-testid={`button-resend-${u.id}`}
+                  >
+                    {resendingId === u.id ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Send className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Resend invite
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => resetPassword.mutate(u)}
+                    disabled={resettingId === u.id || (health && !health.adminReady)}
+                    title="Set a new temporary password for this user to share"
+                    data-testid={`button-reset-${u.id}`}
+                  >
+                    {resettingId === u.id ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <KeyRound className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    Reset password
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => toggleActive.mutate(u)} data-testid={`button-toggle-${u.id}`}>
+                    {u.active ? "Deactivate" : "Reactivate"}
+                  </Button>
+    </>
+  );
   return (
     <div className="p-6 max-w-5xl">
       <div className="flex items-center justify-between mb-1">
@@ -432,87 +479,32 @@ export default function UsersPage() {
         </div>
       )}
 
-      <div className="rounded-lg border border-card-border overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/50 text-muted-foreground">
-            <tr className="text-left">
-              <th className="px-4 py-2.5 font-medium">Name</th>
-              <th className="px-4 py-2.5 font-medium">Email</th>
-              <th className="px-4 py-2.5 font-medium">Role</th>
-              <th className="px-4 py-2.5 font-medium">Area</th>
-              <th className="px-4 py-2.5 font-medium">Status</th>
-              <th className="px-4 py-2.5" />
-            </tr>
-          </thead>
-          <tbody>
-            {isLoading && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">Loading…</td></tr>
-            )}
-            {users && users.length === 0 && (
-              <tr><td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">No users yet. Add the first account.</td></tr>
-            )}
-            {users?.map((u) => (
-              <tr key={u.id} className="border-t border-card-border" data-testid={`row-user-${u.id}`}>
-                <td className="px-4 py-2.5 font-medium">{u.name}</td>
-                <td className="px-4 py-2.5 text-muted-foreground">{u.email}</td>
-                <td className="px-4 py-2.5">
-                  <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${ROLE_TONE[u.role]}`}>
-                    {ROLE_LABELS[u.role]}
-                  </span>
-                </td>
-                <td className="px-4 py-2.5 text-muted-foreground">{u.area || "—"}</td>
-                <td className="px-4 py-2.5">
-                  <span className={u.active ? "text-emerald-600" : "text-muted-foreground"}>
-                    {u.active ? "Active" : "Inactive"}
-                  </span>
-                </td>
-                <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                  <Button variant="ghost" size="sm" onClick={() => openEdit(u)} data-testid={`button-edit-${u.id}`}>
-                    <Pencil className="mr-1.5 h-3.5 w-3.5" /> Edit
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => resendInvite.mutate(u)}
-                    disabled={resendingId === u.id || (health && (!health.adminReady || !health.emailReady))}
-                    title={
-                      health && !health.emailReady
-                        ? "Email isn't configured yet, so invites can't be sent."
-                        : "Email a fresh set-password link to this user"
-                    }
-                    data-testid={`button-resend-${u.id}`}
-                  >
-                    {resendingId === u.id ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Send className="mr-1.5 h-3.5 w-3.5" />
-                    )}
-                    Resend invite
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => resetPassword.mutate(u)}
-                    disabled={resettingId === u.id || (health && !health.adminReady)}
-                    title="Set a new temporary password for this user to share"
-                    data-testid={`button-reset-${u.id}`}
-                  >
-                    {resettingId === u.id ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <KeyRound className="mr-1.5 h-3.5 w-3.5" />
-                    )}
-                    Reset password
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => toggleActive.mutate(u)} data-testid={`button-toggle-${u.id}`}>
-                    {u.active ? "Deactivate" : "Reactivate"}
-                  </Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {/* One card per user so every action (incl. Deactivate) is always visible. */}
+      <div className="grid gap-2 lg:grid-cols-2" data-testid="user-cards">
+        {isLoading && <div className="lg:col-span-2 py-6 text-center text-sm text-muted-foreground">Loading…</div>}
+        {users && users.length === 0 && (
+          <div className="lg:col-span-2 py-6 text-center text-sm text-muted-foreground">No users yet. Add the first account.</div>
+        )}
+        {users?.map((u) => (
+          <div key={u.id} className="rounded-lg border border-card-border bg-card p-3" data-testid={`card-user-${u.id}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="font-medium">{u.name}</div>
+                <div className="text-xs text-muted-foreground break-all">{u.email}</div>
+              </div>
+              <span className={`shrink-0 text-xs ${u.active ? "text-emerald-600" : "text-muted-foreground"}`}>
+                {u.active ? "Active" : "Inactive"}
+              </span>
+            </div>
+            <div className="mt-1.5 flex items-center gap-2 text-xs">
+              <span className={`inline-flex rounded px-1.5 py-0.5 font-medium ${ROLE_TONE[u.role]}`}>{ROLE_LABELS[u.role]}</span>
+              <span className="text-muted-foreground">{u.area || "—"}</span>
+            </div>
+            <div className="mt-2 -mx-2 flex flex-wrap gap-1 border-t border-card-border pt-2">{userActions(u)}</div>
+          </div>
+        ))}
       </div>
+
 
       {/* Edit position + area */}
       <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
