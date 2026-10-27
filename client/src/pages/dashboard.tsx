@@ -473,13 +473,16 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
   };
 
   // ---- Headline rollups ---------------------------------------------------
-  const activeList = jobsScoped.filter((j) => isLiveJobStatus(j.status));
+  // Jobs on standby (equipment on location, no crew) count at the standby rate.
+  const activeList = jobsScoped.filter((j) => isLiveJobStatus(j.status) || !!j.standby?.active);
   const activeJobs = activeList.length;
 
   const activeRates = activeList.map((j) => ({
     job: j,
     // Set day rate jobs: the job rate on Active days, $0 on Rig Move.
-    rate: j.manual_day_rate
+    rate: j.standby?.active
+      ? j.standby.rate
+      : j.manual_day_rate
       ? j.manual_billing
         ? j.manual_billing.today_rate
         : j.status === "Active"

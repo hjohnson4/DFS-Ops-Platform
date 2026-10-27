@@ -259,10 +259,10 @@ Sent by DFS Ops`;
   return deliverChangeRequest(to, `Changes requested \u2014 ${re}`, html, text);
 }
 async function sendNotificationEmails(kind, ctx) {
-  const client2 = supabaseAdmin || supabaseAnon;
+  const client3 = supabaseAdmin || supabaseAnon;
   const { report, asset } = ctx;
   if (kind === "needs_signoff") {
-    const { data: mgrs } = await client2.from("profiles").select("id,email,name,role,area,active, notification_prefs(on_needs_signoff)").eq("role", "area").eq("area", asset.area).eq("active", true);
+    const { data: mgrs } = await client3.from("profiles").select("id,email,name,role,area,active, notification_prefs(on_needs_signoff)").eq("role", "area").eq("area", asset.area).eq("active", true);
     for (const m of mgrs || []) {
       const pref = m.notification_prefs?.[0]?.on_needs_signoff ?? true;
       if (!pref) continue;
@@ -274,7 +274,7 @@ async function sendNotificationEmails(kind, ctx) {
     }
   }
   if (kind === "signed") {
-    const { data: sup } = await client2.from("profiles").select("id,email,name, notification_prefs(on_signed)").eq("id", report.supervisor_id).single();
+    const { data: sup } = await client3.from("profiles").select("id,email,name, notification_prefs(on_signed)").eq("id", report.supervisor_id).single();
     if (sup) {
       const pref = sup.notification_prefs?.[0]?.on_signed ?? true;
       if (pref)
@@ -1431,8 +1431,8 @@ function registerForecastRoutes(app) {
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
       const win = forecastWindow();
-      const client2 = db();
-      let jq = client2.from("jobs").select("id, job_number, area, status, started_on, est_release_on, projected_day_rate, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
+      const client3 = db();
+      let jq = client3.from("jobs").select("id, job_number, area, status, started_on, est_release_on, projected_day_rate, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
       if (scope) jq = jq.eq("area", scope);
       const { data: jRows, error: jErr } = await jq;
       if (jErr) {
@@ -1444,7 +1444,7 @@ function registerForecastRoutes(app) {
       const jobs = (jRows || []).filter((j) => !j.est_release_on || j.est_release_on >= win.window_start);
       const latest = /* @__PURE__ */ new Map();
       if (jobs.length) {
-        const { data: reps } = await client2.from("daily_reports").select("job_id, report_date, report_day, day_rate:kpis->day_rate").in("job_id", jobs.map((j) => j.id));
+        const { data: reps } = await client3.from("daily_reports").select("job_id, report_date, report_day, day_rate:kpis->day_rate").in("job_id", jobs.map((j) => j.id));
         for (const r of reps || []) {
           const n = Number(r.day_rate);
           const d = r.report_date ? String(r.report_date).slice(0, 10) : null;
@@ -1454,7 +1454,7 @@ function registerForecastRoutes(app) {
           if (!cur || d > cur.d || d === cur.d && day > cur.day) latest.set(r.job_id, { d, day, rate: n });
         }
       }
-      let fq = client2.from("forecast_jobs").select("id, rig, customer_name, area, stage, odds, start_on, end_on, day_rate").in("stage", ["Bid", "Likely", "Awarded"]).lte("start_on", win.window_end);
+      let fq = client3.from("forecast_jobs").select("id, rig, customer_name, area, stage, odds, start_on, end_on, day_rate").in("stage", ["Bid", "Likely", "Awarded"]).lte("start_on", win.window_end);
       if (scope) fq = fq.eq("area", scope);
       const { data: fRows, error: fErr } = await fq;
       if (fErr) {
@@ -1522,8 +1522,8 @@ function registerForecastRoutes(app) {
       const qArea = String(req.query.area || "");
       const area = scope || (AREAS.includes(qArea) ? qArea : null);
       const win = forecastWindow();
-      const client2 = db();
-      let fq = client2.from("forecast_jobs").select("*, units:forecast_units(asset_id)").in("stage", ["Bid", "Likely", "Awarded", "Converted"]).lte("start_on", win.window_end).order("start_on", { ascending: true });
+      const client3 = db();
+      let fq = client3.from("forecast_jobs").select("*, units:forecast_units(asset_id)").in("stage", ["Bid", "Likely", "Awarded", "Converted"]).lte("start_on", win.window_end).order("start_on", { ascending: true });
       if (area) fq = fq.eq("area", area);
       const { data: fRows, error: fErr } = await fq;
       if (fErr) {
@@ -1537,14 +1537,14 @@ function registerForecastRoutes(app) {
         units: void 0
       }));
       if (forecasts.length) {
-        const { data: dRows } = await client2.from("bid_documents").select("forecast_job_id").in("forecast_job_id", forecasts.map((f) => f.id));
+        const { data: dRows } = await client3.from("bid_documents").select("forecast_job_id").in("forecast_job_id", forecasts.map((f) => f.id));
         const counts = /* @__PURE__ */ new Map();
         (dRows || []).forEach((d) => counts.set(d.forecast_job_id, (counts.get(d.forecast_job_id) || 0) + 1));
         forecasts.forEach((f) => f.bid_doc_count = counts.get(f.id) || 0);
       }
       const plannedIds = /* @__PURE__ */ new Set();
       forecasts.forEach((f) => f.asset_ids.forEach((a) => plannedIds.add(a)));
-      let aq = client2.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("category", FORECAST_CATEGORIES);
+      let aq = client3.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("category", FORECAST_CATEGORIES);
       if (area) aq = aq.eq("area", area);
       const { data: aRows, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
@@ -1554,7 +1554,7 @@ function registerForecastRoutes(app) {
       const have = new Set(assets.map((a) => a.id));
       const extra = Array.from(plannedIds).filter((id) => !have.has(id));
       if (extra.length) {
-        const { data: more } = await client2.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("id", extra);
+        const { data: more } = await client3.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("id", extra);
         (more || []).forEach((a) => assets.push(a));
       }
       const num3 = (t) => {
@@ -1563,7 +1563,7 @@ function registerForecastRoutes(app) {
       };
       assets.sort((a, b) => num3(a.tag) - num3(b.tag) || String(a.tag).localeCompare(String(b.tag)));
       const jobIds = Array.from(new Set(assets.map((a) => a.job_id).filter(Boolean)));
-      let jq = client2.from("jobs").select("id, job_number, area, status, started_on, est_release_on, day_rate, archived_at, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
+      let jq = client3.from("jobs").select("id, job_number, area, status, started_on, est_release_on, day_rate, archived_at, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
       if (area) jq = jq.or(`area.eq."${area}"${jobIds.length ? `,id.in.(${jobIds.join(",")})` : ""}`);
       const { data: jRows, error: jErr } = await jq;
       if (jErr) {
@@ -1683,11 +1683,11 @@ function registerForecastRoutes(app) {
         if (scope && ok.some((a) => a.area !== scope))
           return res.status(403).json({ message: "You can only plan units from your area" });
       }
-      const client2 = db();
-      const { error: delErr } = await client2.from("forecast_units").delete().eq("forecast_job_id", f.id);
+      const client3 = db();
+      const { error: delErr } = await client3.from("forecast_units").delete().eq("forecast_job_id", f.id);
       if (delErr) return res.status(400).json({ message: delErr.message });
       if (ids.length) {
-        const { error } = await client2.from("forecast_units").insert(ids.map((asset_id) => ({ forecast_job_id: f.id, asset_id })));
+        const { error } = await client3.from("forecast_units").insert(ids.map((asset_id) => ({ forecast_job_id: f.id, asset_id })));
         if (error) return res.status(400).json({ message: error.message });
       }
       res.json({ asset_ids: ids });
@@ -1706,8 +1706,8 @@ function registerForecastRoutes(app) {
         return res.status(403).json({ message: "You can only plan work in your area" });
       if (f.stage !== "Awarded")
         return res.status(400).json({ message: "Only an Awarded forecast can be converted to a job" });
-      const client2 = db();
-      const { data: job, error } = await client2.from("jobs").insert({
+      const client3 = db();
+      const { data: job, error } = await client3.from("jobs").insert({
         job_number: parsed.data.job_number,
         area: f.area,
         customer_id: parsed.data.customer_id,
@@ -1727,21 +1727,21 @@ function registerForecastRoutes(app) {
         return res.status(400).json({ message: error.message });
       }
       const want = new Set(parsed.data.asset_ids ?? []);
-      const { data: planned } = await client2.from("forecast_units").select("asset_id, asset:assets(id, job_id, job:jobs(status, archived_at))").eq("forecast_job_id", f.id);
+      const { data: planned } = await client3.from("forecast_units").select("asset_id, asset:assets(id, job_id, job:jobs(status, archived_at))").eq("forecast_job_id", f.id);
       const movable = (planned || []).filter((p) => want.has(p.asset_id)).filter((p) => {
         const j = p.asset?.job;
         return !p.asset?.job_id || !j || j.archived_at || !LIVE_STATUSES.includes(j.status);
       }).map((p) => p.asset_id);
       let moved = [];
       if (movable.length) {
-        const { error: mErr } = await client2.from("assets").update({ job_id: job.id, status: "On Job", area: f.area }).in("id", movable);
+        const { error: mErr } = await client3.from("assets").update({ job_id: job.id, status: "On Job", area: f.area }).in("id", movable);
         if (!mErr) {
           moved = movable;
-          await client2.from("forecast_units").delete().eq("forecast_job_id", f.id).in("asset_id", movable);
+          await client3.from("forecast_units").delete().eq("forecast_job_id", f.id).in("asset_id", movable);
         }
       }
-      await client2.from("bid_documents").update({ job_id: job.id, area: f.area }).eq("forecast_job_id", f.id);
-      await client2.from("forecast_jobs").update({ stage: "Converted", odds: 100, converted_job_id: job.id, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", f.id);
+      await client3.from("bid_documents").update({ job_id: job.id, area: f.area }).eq("forecast_job_id", f.id);
+      await client3.from("forecast_jobs").update({ stage: "Converted", odds: 100, converted_job_id: job.id, updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", f.id);
       res.status(201).json({ job, moved_asset_ids: moved });
     }
   );
@@ -2591,10 +2591,10 @@ var missingSetup = (msg) => !!msg && /rental_|asset_job_stints|is_rental/.test(m
 var SETUP_MSG2 = "Rental tracking isn't set up yet. Run the rental centrifuges SQL in the Supabase SQL editor, then refresh.";
 async function loadRentalBits(assetIds) {
   if (!assetIds.length) return { stints: /* @__PURE__ */ new Map(), charges: /* @__PURE__ */ new Map() };
-  const client2 = db3();
+  const client3 = db3();
   const [{ data: st }, { data: ch }] = await Promise.all([
-    client2.from("asset_job_stints").select("id, asset_id, job_id, day_rate, start_date, end_date, created_at, job:jobs(job_number)").in("asset_id", assetIds),
-    client2.from("rental_charges").select("id, asset_id, charge_date, description, amount, created_by_name, created_at").in("asset_id", assetIds).order("charge_date", { ascending: true })
+    client3.from("asset_job_stints").select("id, asset_id, job_id, day_rate, start_date, end_date, created_at, job:jobs(job_number)").in("asset_id", assetIds),
+    client3.from("rental_charges").select("id, asset_id, charge_date, description, amount, created_by_name, created_at").in("asset_id", assetIds).order("charge_date", { ascending: true })
   ]);
   const stints = /* @__PURE__ */ new Map();
   (st || []).forEach((s) => stints.set(s.asset_id, [...stints.get(s.asset_id) || [], s]));
@@ -2731,8 +2731,100 @@ function registerRentalRoutes(app) {
   });
 }
 
+// server/standby.ts
+var client2 = () => supabaseAdmin || supabaseAnon;
+function addDaysIso(iso, n) {
+  const d = /* @__PURE__ */ new Date(iso + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function publicStandby(s) {
+  if (!s) return null;
+  const { byDay: _b, ...rest } = s;
+  return rest;
+}
+function dayOf(r) {
+  const d = r?.report_date ? String(r.report_date).slice(0, 10) : null;
+  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  return null;
+}
+async function standbyByJob(jobIds) {
+  const out = /* @__PURE__ */ new Map();
+  if (!jobIds.length) return out;
+  const { data, error } = await client2().from("job_standby_periods").select("*").in("job_id", jobIds).order("start_date", { ascending: true });
+  if (error) {
+    if (!/does not exist|schema cache/i.test(error.message))
+      console.error("[standby] load", error.message);
+    return out;
+  }
+  const rows = (data || []).sort(
+    (a, b) => String(a.start_date) < String(b.start_date) ? -1 : 1
+  );
+  if (!rows.length) return out;
+  const today = todayCentral();
+  const open = rows.filter((p) => !p.end_date);
+  if (open.length) {
+    const openJobIds = Array.from(new Set(open.map((p) => p.job_id)));
+    const minStart = open.reduce((m, p) => p.start_date < m ? p.start_date : m, open[0].start_date);
+    const { data: reps } = await client2().from("daily_reports").select("job_id, report_date").in("job_id", openJobIds).gte("report_date", minStart);
+    for (const p of open) {
+      let first = null;
+      for (const r of reps ?? []) {
+        if (r.job_id !== p.job_id) continue;
+        const d = dayOf(r);
+        if (!d || d < p.start_date || d > today) continue;
+        if (!first || d < first) first = d;
+      }
+      if (!first) continue;
+      const end = addDaysIso(first, -1);
+      p.end_date = end;
+      p.ended_reason = "report";
+      p.ended_by_name = `Daily report ${first}`;
+      const { error: upErr } = await client2().from("job_standby_periods").update({ end_date: end, ended_reason: "report", ended_by_name: p.ended_by_name }).eq("id", p.id).is("end_date", null);
+      if (upErr) console.error("[standby] auto-end", upErr.message);
+    }
+  }
+  for (const p of rows) {
+    const rate = Number(p.rate);
+    const start = String(p.start_date).slice(0, 10);
+    const lastRaw = p.end_date ? String(p.end_date).slice(0, 10) : today;
+    const last = lastRaw > today ? today : lastRaw;
+    const cur = out.get(p.job_id) ?? { active: false, rate: null, start_date: null, days: 0, total: 0, periods: [], byDay: /* @__PURE__ */ new Map() };
+    let days = 0;
+    if (Number.isFinite(rate) && rate >= 0 && start <= last) {
+      for (let d = start; d <= last; d = addDaysIso(d, 1)) {
+        if (cur.byDay.has(d)) continue;
+        cur.byDay.set(d, rate);
+        days++;
+      }
+    }
+    const total = Math.round(days * (Number.isFinite(rate) ? rate : 0) * 100) / 100;
+    cur.days += days;
+    cur.total = Math.round((cur.total + total) * 100) / 100;
+    if (!p.end_date) {
+      cur.active = true;
+      cur.rate = rate;
+      cur.start_date = start;
+    }
+    cur.periods.unshift({
+      id: p.id,
+      rate,
+      start_date: start,
+      end_date: p.end_date ? String(p.end_date).slice(0, 10) : null,
+      ended_reason: p.ended_reason ?? null,
+      created_by_name: p.created_by_name ?? null,
+      ended_by_name: p.ended_by_name ?? null,
+      created_at: p.created_at ?? null,
+      days,
+      total
+    });
+    out.set(p.job_id, cur);
+  }
+  return out;
+}
+
 // server/routes.ts
-async function logRunHours(client2, report, alloc) {
+async function logRunHours(client3, report, alloc) {
   if (!alloc.length) return;
   try {
     const rows = alloc.map((a) => ({
@@ -2743,18 +2835,18 @@ async function logRunHours(client2, report, alloc) {
       report_date: report.report_date,
       hours: a.add
     }));
-    const { error } = await client2.from("asset_run_hours").upsert(rows, { onConflict: "asset_id,daily_report_id" });
+    const { error } = await client3.from("asset_run_hours").upsert(rows, { onConflict: "asset_id,daily_report_id" });
     if (error) console.warn("[run-hours log] skipped:", error.message);
   } catch (e) {
     console.warn("[run-hours log] skipped:", e?.message ?? e);
   }
 }
-async function loadRunHoursLog(client2, assetIds) {
+async function loadRunHoursLog(client3, assetIds) {
   if (!assetIds.length) return { ready: true, rows: [] };
   const out = [];
   const PAGE = 1e3;
   for (let from = 0; ; from += PAGE) {
-    const { data, error } = await client2.from("asset_run_hours").select("asset_id, daily_report_id, job_id, well_name, report_date, hours, job:jobs(job_number)").in("asset_id", assetIds).order("report_date", { ascending: true }).range(from, from + PAGE - 1);
+    const { data, error } = await client3.from("asset_run_hours").select("asset_id, daily_report_id, job_id, well_name, report_date, hours, job:jobs(job_number)").in("asset_id", assetIds).order("report_date", { ascending: true }).range(from, from + PAGE - 1);
     if (error) return { ready: false, rows: [] };
     out.push(...data || []);
     if (!data || data.length < PAGE) break;
@@ -2771,15 +2863,15 @@ function hoursAfter(rows, afterDate) {
   return Math.round(t * 100) / 100;
 }
 var round23 = (n) => Math.round(n * 100) / 100;
-async function hoursSinceServiceFor(client2, assets) {
+async function hoursSinceServiceFor(client3, assets) {
   const ids = assets.map((a) => a.id);
   const out = /* @__PURE__ */ new Map();
   if (!ids.length) return out;
   const last = /* @__PURE__ */ new Map();
-  const { data: reps } = await client2.from("maintenance_reports").select("asset_id, report_date").in("asset_id", ids).order("report_date", { ascending: false });
+  const { data: reps } = await client3.from("maintenance_reports").select("asset_id, report_date").in("asset_id", ids).order("report_date", { ascending: false });
   for (const r of reps || [])
     if (!last.has(r.asset_id) && r.report_date) last.set(r.asset_id, String(r.report_date));
-  const log2 = await loadRunHoursLog(client2, ids);
+  const log2 = await loadRunHoursLog(client3, ids);
   for (const a of assets) {
     const lastService = last.get(a.id) ?? null;
     let since;
@@ -2881,8 +2973,8 @@ function soloCentrifugeHours(kp, slot) {
   const filled = CENTRIFUGE_SLOT_NUMBERS.filter((s) => (by[s] ?? 0) > 0);
   return filled.length === 1 ? by[filled[0]] : 0;
 }
-async function manualRateJobIds(client2) {
-  const { data } = await client2.from("jobs").select("id").eq("manual_day_rate", true);
+async function manualRateJobIds(client3) {
+  const { data } = await client3.from("jobs").select("id").eq("manual_day_rate", true);
   return new Set((data || []).map((j) => String(j.id)));
 }
 function dropManualRateField(fields, jobId, manual) {
@@ -2902,9 +2994,9 @@ function withoutManualRateFlag(r, manual) {
 function normJobId(v) {
   return (v || "").toUpperCase().replace(/[\s-]+/g, " ").trim();
 }
-async function resolveJobForWell(client2, wellName, jobNumber, operator) {
+async function resolveJobForWell(client3, wellName, jobNumber, operator) {
   const empty = { job_id: null, area: null, customer_id: null };
-  const { data: liveJobs } = await client2.from("jobs").select("id, area, customer_id, job_number, well_name, created_at, customer:customers(name)").is("archived_at", null);
+  const { data: liveJobs } = await client3.from("jobs").select("id, area, customer_id, job_number, well_name, created_at, customer:customers(name)").is("archived_at", null);
   const live = liveJobs || [];
   const pick = (j) => ({ job_id: j.id, area: j.area, customer_id: j.customer_id });
   const normName = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -2927,7 +3019,7 @@ async function resolveJobForWell(client2, wellName, jobNumber, operator) {
   if (!target) return empty;
   const jobMatch = live.find((j) => (j.well_name || "").trim().toLowerCase() === target);
   if (jobMatch) return pick(jobMatch);
-  const { data: priorReports } = await client2.from("daily_reports").select("well_name, job_id, created_at, received_at, report_date").not("job_id", "is", null).not("well_name", "is", null).order("created_at", { ascending: false }).limit(500);
+  const { data: priorReports } = await client3.from("daily_reports").select("well_name, job_id, created_at, received_at, report_date").not("job_id", "is", null).not("well_name", "is", null).order("created_at", { ascending: false }).limit(500);
   const liveById = new Map(live.map((j) => [j.id, j]));
   const prior = (priorReports || []).find(
     (r) => (r.well_name || "").trim().toLowerCase() === target && liveById.has(r.job_id)
@@ -2935,9 +3027,9 @@ async function resolveJobForWell(client2, wellName, jobNumber, operator) {
   if (prior?.job_id) return pick(liveById.get(prior.job_id));
   return empty;
 }
-async function jobIsArchived(client2, jobId) {
+async function jobIsArchived(client3, jobId) {
   if (!jobId) return false;
-  const { data } = await client2.from("jobs").select("archived_at").eq("id", jobId).maybeSingle();
+  const { data } = await client3.from("jobs").select("archived_at").eq("id", jobId).maybeSingle();
   return !!data?.archived_at;
 }
 var ARCHIVED_JOB_MSG = "This job is archived. Nothing can be assigned to an archived job. Restore it first, or pick an active job.";
@@ -2965,9 +3057,9 @@ function correctionFields(row) {
   for (const k of CORRECTION_COLUMNS) if (k in row) out[k] = row[k];
   return out;
 }
-async function findPriorSameDay(client2, job_id, report_day, well_name) {
+async function findPriorSameDay(client3, job_id, report_day, well_name) {
   if (!job_id || report_day == null || !well_name) return null;
-  const { data } = await client2.from("daily_reports").select(
+  const { data } = await client3.from("daily_reports").select(
     "id, status, email_message_id, received_at, report_date, report_day, well_name, kpis, well_context, analysis, run_hours_applied, attachment_name, area, job_id"
   ).eq("job_id", job_id).eq("report_day", report_day).eq("source", "email").ilike("well_name", well_name.trim()).order("received_at", { ascending: false }).limit(1);
   return data && data.length ? data[0] : null;
@@ -2991,12 +3083,12 @@ function isOlderEmail(incomingId, incomingAt, priorId, priorAt) {
   if (Number.isFinite(ta) && Number.isFinite(tb)) return ta < tb;
   return false;
 }
-async function addSupersededEmail(client2, report, emailId) {
+async function addSupersededEmail(client3, report, emailId) {
   const analysis = { ...report.analysis || {} };
   const list = Array.isArray(analysis.superseded_email_ids) ? analysis.superseded_email_ids : [];
   if (!list.includes(emailId)) list.push(emailId);
   analysis.superseded_email_ids = list;
-  await client2.from("daily_reports").update({ analysis }).eq("id", report.id);
+  await client3.from("daily_reports").update({ analysis }).eq("id", report.id);
 }
 function correctedAnalysis(prior, incomingAnalysis, changes, replacedEmailId) {
   const old = prior.analysis || {};
@@ -3143,13 +3235,13 @@ async function registerRoutes(httpServer, app) {
     const rt = String((req.body || {}).refresh_token || "");
     if (!rt) return res.status(401).json({ message: "Please sign in again." });
     try {
-      const client2 = freshAnonClient();
-      const { data, error } = await client2.auth.refreshSession({ refresh_token: rt });
+      const client3 = freshAnonClient();
+      const { data, error } = await client3.auth.refreshSession({ refresh_token: rt });
       if (error || !data.session || !data.user) {
         const st = Number(error?.status) || 0;
         return res.status(st >= 500 ? 503 : 401).json({ message: "Your session has ended. Please sign in again." });
       }
-      const { data: profile } = await client2.from("profiles").select("id,active").eq("id", data.user.id).single();
+      const { data: profile } = await client3.from("profiles").select("id,active").eq("id", data.user.id).single();
       if (!profile)
         return res.status(403).json({ message: "No profile for this account" });
       if (!profile.active)
@@ -3322,18 +3414,18 @@ async function registerRoutes(httpServer, app) {
       const scope = areaScopeOf(req.profile);
       const role = req.profile.role;
       const canReview = role === "admin" || role === "area" || role === "super";
-      const client2 = supabaseAnon;
+      const client3 = supabaseAnon;
       const now = Date.now();
       const DAY = 24 * 60 * 60 * 1e3;
       const SIGNOFF_OVERDUE_DAYS = 2;
       const items = [];
       const myId = req.profile.id;
       const myEmail = (req.profile.email || "").toLowerCase();
-      let aq = client2.from("assets").select("id, tag, category, area, run_hours, run_hours_at_service, service_hours_interval").in("category", RUN_HOUR_CATEGORIES);
+      let aq = client3.from("assets").select("id, tag, category, area, run_hours, run_hours_at_service, service_hours_interval").in("category", RUN_HOUR_CATEGORIES);
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) console.error("[notifications] assets", aErr.message);
-      const svc = await hoursSinceServiceFor(client2, assetsData || []);
+      const svc = await hoursSinceServiceFor(client3, assetsData || []);
       for (const a of assetsData || []) {
         const state = svc.get(a.id)?.state;
         const hrs = svc.get(a.id)?.hoursSince;
@@ -3350,13 +3442,13 @@ async function registerRoutes(httpServer, app) {
         }
       }
       if (canReview) {
-        let dq = client2.from("daily_reports").select(
+        let dq = client3.from("daily_reports").select(
           "id, status, area, well_name, sender_name, sender_email, report_date, received_at, report_day, analysis, job_id"
         ).in("status", ["Pending Review", "Needs job match", "Correction pending"]);
         if (scope) dq = dq.eq("area", scope);
         const { data: drData, error: dErr } = await dq;
         if (dErr) console.error("[notifications] daily_reports", dErr.message);
-        const manualJobs = await manualRateJobIds(client2);
+        const manualJobs = await manualRateJobIds(client3);
         for (const r0 of drData || []) {
           const r = withoutManualRateFlag(r0, manualJobs);
           const who = r.sender_name || r.sender_email || "Unknown sender";
@@ -3412,7 +3504,7 @@ async function registerRoutes(httpServer, app) {
       }
       {
         const orFilter = myEmail ? `submitted_by.eq.${myId},sender_email.ilike.${myEmail}` : `submitted_by.eq.${myId}`;
-        const { data: crReports, error: crErr } = await client2.from("daily_reports").select(
+        const { data: crReports, error: crErr } = await client3.from("daily_reports").select(
           "id, well_name, area, report_date, received_at, change_notes, reviewed_by_name, reviewed_at"
         ).eq("status", "Changes requested").or(orFilter);
         if (crErr) console.error("[notifications] changes_requested reports", crErr.message);
@@ -3430,7 +3522,7 @@ async function registerRoutes(httpServer, app) {
             ts: r.reviewed_at || r.received_at || r.report_date || null
           });
         }
-        const { data: crJsas, error: crjErr } = await client2.from("jsas").select(
+        const { data: crJsas, error: crjErr } = await client3.from("jsas").select(
           "id, job_id, jsa_number, well_name, change_notes, created_at"
         ).eq("status", "Changes requested").eq("submitted_by", myId);
         if (crjErr) console.error("[notifications] changes_requested jsas", crjErr.message);
@@ -3487,7 +3579,7 @@ async function registerRoutes(httpServer, app) {
     "/api/audit-trail",
     requireAuth,
     async (req, res) => {
-      const client2 = supabaseAnon;
+      const client3 = supabaseAnon;
       const profile = req.profile;
       const scope = areaScopeOf(profile);
       const role = profile.role;
@@ -3511,12 +3603,12 @@ async function registerRoutes(httpServer, app) {
       };
       const labelFor = (a) => ACTION_LABELS[a] || a;
       {
-        const { data: evs, error } = await client2.from("daily_report_events").select("id, report_id, actor_id, actor_name, actor_role, action, detail, occurred_at").order("occurred_at", { ascending: false }).limit(500);
+        const { data: evs, error } = await client3.from("daily_report_events").select("id, report_id, actor_id, actor_name, actor_role, action, detail, occurred_at").order("occurred_at", { ascending: false }).limit(500);
         if (error) console.error("[audit-trail] daily_report_events", error.message);
         const ids = Array.from(new Set((evs || []).map((e) => e.report_id).filter(Boolean)));
         const ctx = {};
         if (ids.length) {
-          const { data: reps } = await client2.from("daily_reports").select("id, area, well_name, report_date").in("id", ids);
+          const { data: reps } = await client3.from("daily_reports").select("id, area, well_name, report_date").in("id", ids);
           for (const r of reps || []) {
             ctx[r.id] = {
               area: r.area ?? null,
@@ -3543,12 +3635,12 @@ async function registerRoutes(httpServer, app) {
         }
       }
       {
-        const { data: evs, error } = await client2.from("jsa_report_events").select("id, jsa_id, actor_id, actor_name, actor_role, action, detail, occurred_at").order("occurred_at", { ascending: false }).limit(500);
+        const { data: evs, error } = await client3.from("jsa_report_events").select("id, jsa_id, actor_id, actor_name, actor_role, action, detail, occurred_at").order("occurred_at", { ascending: false }).limit(500);
         if (error) console.error("[audit-trail] jsa_report_events", error.message);
         const ids = Array.from(new Set((evs || []).map((e) => e.jsa_id).filter(Boolean)));
         const ctx = {};
         if (ids.length) {
-          const { data: rows } = await client2.from("jsa_reports").select("id, area, subject, jsa_date").in("id", ids);
+          const { data: rows } = await client3.from("jsa_reports").select("id, area, subject, jsa_date").in("id", ids);
           for (const r of rows || []) {
             ctx[r.id] = {
               area: r.area ?? null,
@@ -3575,12 +3667,12 @@ async function registerRoutes(httpServer, app) {
         }
       }
       {
-        const { data: evs, error } = await client2.from("rig_up_report_events").select("id, rig_up_id, actor_id, actor_name, actor_role, action, detail, occurred_at").order("occurred_at", { ascending: false }).limit(500);
+        const { data: evs, error } = await client3.from("rig_up_report_events").select("id, rig_up_id, actor_id, actor_name, actor_role, action, detail, occurred_at").order("occurred_at", { ascending: false }).limit(500);
         if (error) console.error("[audit-trail] rig_up_report_events", error.message);
         const ids = Array.from(new Set((evs || []).map((e) => e.rig_up_id).filter(Boolean)));
         const ctx = {};
         if (ids.length) {
-          const { data: rows } = await client2.from("rig_up_reports").select("id, area, title, report_date").in("id", ids);
+          const { data: rows } = await client3.from("rig_up_reports").select("id, area, title, report_date").in("id", ids);
           for (const r of rows || []) {
             ctx[r.id] = {
               area: r.area ?? null,
@@ -3607,12 +3699,12 @@ async function registerRoutes(httpServer, app) {
         }
       }
       {
-        const { data: evs, error } = await client2.from("audit_events").select("id, report_id, asset_id, actor_id, actor_name, actor_role, action, occurred_at").order("occurred_at", { ascending: false }).limit(500);
+        const { data: evs, error } = await client3.from("audit_events").select("id, report_id, asset_id, actor_id, actor_name, actor_role, action, occurred_at").order("occurred_at", { ascending: false }).limit(500);
         if (error) console.error("[audit-trail] audit_events", error.message);
         const ids = Array.from(new Set((evs || []).map((e) => e.asset_id).filter(Boolean)));
         const ctx = {};
         if (ids.length) {
-          const { data: rows } = await client2.from("assets").select("id, area, tag, category").in("id", ids);
+          const { data: rows } = await client3.from("assets").select("id, area, tag, category").in("id", ids);
           for (const r of rows || []) {
             ctx[r.id] = {
               area: r.area ?? null,
@@ -3839,8 +3931,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = updateUserSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("profiles").update(parsed.data).eq("id", req.params.id).select().single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("profiles").update(parsed.data).eq("id", req.params.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(data);
     }
@@ -3864,12 +3956,12 @@ async function registerRoutes(httpServer, app) {
       const parsed = createCustomerSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const payload = {
         ...parsed.data,
         email: parsed.data.email === "" ? null : parsed.data.email
       };
-      const { data, error } = await client2.from("customers").insert(payload).select().single();
+      const { data, error } = await client3.from("customers").insert(payload).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json(data);
     }
@@ -3882,10 +3974,10 @@ async function registerRoutes(httpServer, app) {
       const parsed = updateCustomerSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const patch = { ...parsed.data };
       if (patch.email === "") patch.email = null;
-      const { data, error } = await client2.from("customers").update(patch).eq("id", req.params.id).select().single();
+      const { data, error } = await client3.from("customers").update(patch).eq("id", req.params.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(data);
     }
@@ -3895,14 +3987,14 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { count, error: countErr } = await client2.from("jobs").select("id", { count: "exact", head: true }).eq("customer_id", req.params.id);
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { count, error: countErr } = await client3.from("jobs").select("id", { count: "exact", head: true }).eq("customer_id", req.params.id);
       if (countErr) return res.status(500).json({ message: countErr.message });
       if ((count ?? 0) > 0)
         return res.status(409).json({
           message: `This customer has ${count} job${count === 1 ? "" : "s"}. Remove or reassign those jobs before deleting the customer.`
         });
-      const { error } = await client2.from("customers").delete().eq("id", req.params.id);
+      const { error } = await client3.from("customers").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -3920,17 +4012,19 @@ async function registerRoutes(httpServer, app) {
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
     const billing = await computeManualBilling(data || []);
+    const standby = await standbyByJob((data || []).map((j) => j.id));
     const rows = (data || []).map((j) => ({
       ...j,
       customer_name: j.customer?.name ?? "",
       customer: void 0,
-      manual_billing: j.manual_day_rate ? publicBilling(billing.get(j.id)) : null
+      manual_billing: j.manual_day_rate ? publicBilling(billing.get(j.id)) : null,
+      standby: publicStandby(standby.get(j.id))
     }));
     res.json(rows);
   });
   app.get("/api/jobs/:id/well-run-hours", requireAuth, async (req, res) => {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: job } = await client2.from("jobs").select("id, area").eq("id", req.params.id).single();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: job } = await client3.from("jobs").select("id, area").eq("id", req.params.id).single();
     if (!job) return res.status(404).json({ message: "Job not found" });
     const scope = areaScopeOf(req.profile);
     if (scope && job.area !== scope) return res.status(404).json({ message: "Job not found" });
@@ -3941,7 +4035,7 @@ async function registerRoutes(httpServer, app) {
     const log2 = [];
     let ready = true;
     for (let from = 0; ; from += 1e3) {
-      const { data, error } = await client2.from("asset_run_hours").select("asset_id, daily_report_id, well_name, report_date, hours").eq("job_id", job.id).range(from, from + 999);
+      const { data, error } = await client3.from("asset_run_hours").select("asset_id, daily_report_id, well_name, report_date, hours").eq("job_id", job.id).range(from, from + 999);
       if (error) {
         ready = false;
         break;
@@ -3951,14 +4045,14 @@ async function registerRoutes(httpServer, app) {
     }
     const reports = [];
     for (let from = 0; ; from += 1e3) {
-      const { data } = await client2.from("daily_reports").select("id, well_name, report_date, status, run_hours_applied, kpis").eq("job_id", job.id).range(from, from + 999);
+      const { data } = await client3.from("daily_reports").select("id, well_name, report_date, status, run_hours_applied, kpis").eq("job_id", job.id).range(from, from + 999);
       reports.push(...data || []);
       if (!data || data.length < 1e3) break;
     }
     const assetIds = Array.from(new Set(log2.map((r) => r.asset_id)));
-    const { data: onJob } = await client2.from("assets").select("id, tag, category, is_rental, rental_vendor, centrifuge_slot, job_id").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES);
+    const { data: onJob } = await client3.from("assets").select("id, tag, category, is_rental, rental_vendor, centrifuge_slot, job_id").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES);
     const missing = assetIds.filter((id) => !(onJob || []).some((a) => a.id === id));
-    const { data: past } = missing.length ? await client2.from("assets").select("id, tag, category, is_rental, rental_vendor, centrifuge_slot, job_id").in("id", missing) : { data: [] };
+    const { data: past } = missing.length ? await client3.from("assets").select("id, tag, category, is_rental, rental_vendor, centrifuge_slot, job_id").in("id", missing) : { data: [] };
     const assets = [...onJob || [], ...past || []].map((a) => ({
       id: a.id,
       tag: a.tag,
@@ -4018,12 +4112,12 @@ async function registerRoutes(httpServer, app) {
     })).filter((w) => w.total > 0 || w.awaiting_hours > 0 || w.uncredited_hours > 0 || assets.length > 0).sort((a, b) => String(b.last_date ?? "").localeCompare(String(a.last_date ?? "")));
     res.json({ ready, assets, wells: list });
   });
-  async function planJobCredit(client2, jobId) {
-    const { data: cents } = await client2.from("assets").select("id, tag, run_hours, centrifuge_slot").eq("job_id", jobId).in("category", RUN_HOUR_CATEGORIES).order("tag");
+  async function planJobCredit(client3, jobId) {
+    const { data: cents } = await client3.from("assets").select("id, tag, run_hours, centrifuge_slot").eq("job_id", jobId).in("category", RUN_HOUR_CATEGORIES).order("tag");
     const centrifuges = cents || [];
     const reports = [];
     for (let from = 0; ; from += 1e3) {
-      const { data } = await client2.from("daily_reports").select("id, well_name, report_date, status, run_hours_applied, kpis").eq("job_id", jobId).eq("status", "Signed off").order("report_date", { ascending: true }).order("id", { ascending: true }).range(from, from + 999);
+      const { data } = await client3.from("daily_reports").select("id, well_name, report_date, status, run_hours_applied, kpis").eq("job_id", jobId).eq("status", "Signed off").order("report_date", { ascending: true }).order("id", { ascending: true }).range(from, from + 999);
       reports.push(...data || []);
       if (!data || data.length < 1e3) break;
     }
@@ -4079,8 +4173,8 @@ async function registerRoutes(httpServer, app) {
     return { centrifuges, plan, perAsset, problem, duplicates, unrouted };
   }
   async function creditJobGuard(req, res) {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: job } = await client2.from("jobs").select("id, area, job_number").eq("id", req.params.id).single();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: job } = await client3.from("jobs").select("id, area, job_number").eq("id", req.params.id).single();
     if (!job) {
       res.status(404).json({ message: "Job not found" });
       return null;
@@ -4090,12 +4184,12 @@ async function registerRoutes(httpServer, app) {
       res.status(403).json({ message: "Outside your area" });
       return null;
     }
-    return { client: client2, job };
+    return { client: client3, job };
   }
   const ISO = /^\d{4}-\d{2}-\d{2}$/;
   async function calendarJobGuard(req, res) {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: job, error } = await client2.from("jobs").select("id, area, job_number, day_rate, status, manual_day_rate, manual_billing_mode, billing_start_date, started_on").eq("id", req.params.id).single();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: job, error } = await client3.from("jobs").select("id, area, job_number, day_rate, status, manual_day_rate, manual_billing_mode, billing_start_date, started_on").eq("id", req.params.id).single();
     if (error || !job) {
       res.status(404).json({ message: "Job not found" });
       return null;
@@ -4114,17 +4208,17 @@ async function registerRoutes(httpServer, app) {
       res.status(400).json({ message: "This job isn't on a billing calendar." });
       return null;
     }
-    return { client: client2, job };
+    return { client: client3, job };
   }
   const canEditCalendar = (req) => ["admin", "area"].includes(String(req.profile.role));
   app.get("/api/jobs/:id/billing-calendar", requireAuth, async (req, res) => {
     const g2 = await calendarJobGuard(req, res);
     if (!g2) return;
-    const { client: client2, job } = g2;
-    const { data: days } = await client2.from("job_billing_days").select("day, billing, note, changed_by_name, changed_at").eq("job_id", job.id).order("day", { ascending: true });
-    const { data: events } = await client2.from("job_billing_events").select("kind, day, billing, start_date, note, changed_by_name, created_at").eq("job_id", job.id).order("created_at", { ascending: false }).limit(15);
+    const { client: client3, job } = g2;
+    const { data: days } = await client3.from("job_billing_days").select("day, billing, note, changed_by_name, changed_at").eq("job_id", job.id).order("day", { ascending: true });
+    const { data: events } = await client3.from("job_billing_events").select("kind, day, billing, start_date, note, changed_by_name, created_at").eq("job_id", job.id).order("created_at", { ascending: false }).limit(15);
     const billing = (await computeManualBilling([job])).get(job.id);
-    const { data: svcRows } = await client2.from("job_services").select("id, service_type, service_date, cost, notes").eq("job_id", job.id).order("service_date", { ascending: true });
+    const { data: svcRows } = await client3.from("job_services").select("id, service_type, service_date, cost, notes").eq("job_id", job.id).order("service_date", { ascending: true });
     const services = {};
     let serviceTotal = 0;
     for (const v of svcRows || []) {
@@ -4153,19 +4247,19 @@ async function registerRoutes(httpServer, app) {
   app.put("/api/jobs/:id/billing-calendar/day", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const g2 = await calendarJobGuard(req, res);
     if (!g2) return;
-    const { client: client2, job } = g2;
+    const { client: client3, job } = g2;
     const day = String(req.body?.day ?? "");
     const billing = req.body?.billing;
     const note = req.body?.note ? String(req.body.note).slice(0, 500) : null;
     if (!ISO.test(day)) return res.status(400).json({ message: "Pick a valid day." });
     if (typeof billing !== "boolean") return res.status(400).json({ message: "Choose Billing or Not billing." });
     const actor = req.profile;
-    const { error } = await client2.from("job_billing_days").upsert(
+    const { error } = await client3.from("job_billing_days").upsert(
       { job_id: job.id, day, billing, note, changed_by: actor.id, changed_by_name: actor.name, changed_at: (/* @__PURE__ */ new Date()).toISOString() },
       { onConflict: "job_id,day" }
     );
     if (error) return res.status(400).json({ message: `Could not save: ${error.message}` });
-    await client2.from("job_billing_events").insert({
+    await client3.from("job_billing_events").insert({
       job_id: job.id,
       kind: "day",
       day,
@@ -4179,14 +4273,14 @@ async function registerRoutes(httpServer, app) {
   app.put("/api/jobs/:id/billing-calendar/start", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const g2 = await calendarJobGuard(req, res);
     if (!g2) return;
-    const { client: client2, job } = g2;
+    const { client: client3, job } = g2;
     const start = String(req.body?.start_date ?? "");
     if (!ISO.test(start)) return res.status(400).json({ message: "Pick a valid start date." });
     if (start > todayCentral()) return res.status(400).json({ message: "The billing start date can't be in the future." });
-    const { error } = await client2.from("jobs").update({ billing_start_date: start }).eq("id", job.id);
+    const { error } = await client3.from("jobs").update({ billing_start_date: start }).eq("id", job.id);
     if (error) return res.status(400).json({ message: `Could not save: ${error.message}` });
     const actor = req.profile;
-    await client2.from("job_billing_events").insert({
+    await client3.from("job_billing_events").insert({
       job_id: job.id,
       kind: "start",
       start_date: start,
@@ -4198,7 +4292,7 @@ async function registerRoutes(httpServer, app) {
   app.get("/api/jobs/:id/manual-hours", requireAuth, async (req, res) => {
     const g2 = await calendarJobGuard(req, res);
     if (!g2) return;
-    const { client: client2, job } = g2;
+    const { client: client3, job } = g2;
     const today = todayCentral();
     const to = ISO.test(String(req.query.to ?? "")) ? String(req.query.to) : today;
     const from = ISO.test(String(req.query.from ?? "")) ? String(req.query.from) : (() => {
@@ -4206,11 +4300,11 @@ async function registerRoutes(httpServer, app) {
       d.setUTCDate(d.getUTCDate() - 6);
       return d.toISOString().slice(0, 10);
     })();
-    const { data: assets } = await client2.from("assets").select("id, tag, category, run_hours, run_hours_at_service, service_hours_interval").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES).order("tag", { ascending: true });
+    const { data: assets } = await client3.from("assets").select("id, tag, category, run_hours, run_hours_at_service, service_hours_interval").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES).order("tag", { ascending: true });
     const list = assets || [];
-    const { data: rows } = await client2.from("asset_run_hours").select("asset_id, report_date, hours, entered_by_name, created_at").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", from).lte("report_date", to).order("report_date", { ascending: false });
+    const { data: rows } = await client3.from("asset_run_hours").select("asset_id, report_date, hours, entered_by_name, created_at").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", from).lte("report_date", to).order("report_date", { ascending: false });
     const monthStart = to.slice(0, 8) + "01";
-    const { data: mtdRows } = await client2.from("asset_run_hours").select("asset_id, hours").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", monthStart).lte("report_date", to);
+    const { data: mtdRows } = await client3.from("asset_run_hours").select("asset_id, hours").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", monthStart).lte("report_date", to);
     const mtd = {};
     for (const r of mtdRows || []) mtd[r.asset_id] = round23((mtd[r.asset_id] ?? 0) + (Number(r.hours) || 0));
     const start = String(job.billing_start_date ?? job.started_on ?? "").slice(0, 10);
@@ -4220,7 +4314,7 @@ async function registerRoutes(httpServer, app) {
       const s = d.toISOString().slice(0, 10);
       return ISO.test(start) && start > s ? start : s;
     })();
-    const { data: seen } = await client2.from("asset_run_hours").select("report_date").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", lookFrom).lte("report_date", today);
+    const { data: seen } = await client3.from("asset_run_hours").select("report_date").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", lookFrom).lte("report_date", today);
     const have = new Set((seen || []).map((r) => String(r.report_date).slice(0, 10)));
     const missing = [];
     if (list.length) {
@@ -4231,7 +4325,7 @@ async function registerRoutes(httpServer, app) {
         d.setUTCDate(d.getUTCDate() + 1);
       }
     }
-    const svc = await hoursSinceServiceFor(client2, list);
+    const svc = await hoursSinceServiceFor(client3, list);
     res.json({
       from,
       to,
@@ -4252,13 +4346,13 @@ async function registerRoutes(httpServer, app) {
   app.put("/api/jobs/:id/manual-hours", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const g2 = await calendarJobGuard(req, res);
     if (!g2) return;
-    const { client: client2, job } = g2;
+    const { client: client3, job } = g2;
     const date = String(req.body?.date ?? "");
     const entries = Array.isArray(req.body?.entries) ? req.body.entries : [];
     if (!ISO.test(date)) return res.status(400).json({ message: "Pick a valid date." });
     if (date > todayCentral()) return res.status(400).json({ message: "You can't enter hours for a future day." });
     if (!entries.length) return res.status(400).json({ message: "Enter hours for at least one centrifuge." });
-    const { data: assets } = await client2.from("assets").select("id, tag, run_hours").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES);
+    const { data: assets } = await client3.from("assets").select("id, tag, run_hours").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES);
     const byId = new Map((assets || []).map((a) => [a.id, a]));
     const clean2 = [];
     for (const e of entries) {
@@ -4276,17 +4370,17 @@ async function registerRoutes(httpServer, app) {
     }
     const actor = req.profile;
     for (const e of clean2) {
-      const { data: prev } = await client2.from("asset_run_hours").select("id, hours").eq("asset_id", e.asset_id).eq("job_id", job.id).eq("report_date", date).is("daily_report_id", null).maybeSingle();
+      const { data: prev } = await client3.from("asset_run_hours").select("id, hours").eq("asset_id", e.asset_id).eq("job_id", job.id).eq("report_date", date).is("daily_report_id", null).maybeSingle();
       const old = prev ? Number(prev.hours) || 0 : 0;
       const next = e.hours ?? 0;
       if (prev && e.hours == null) {
-        const { error } = await client2.from("asset_run_hours").delete().eq("id", prev.id);
+        const { error } = await client3.from("asset_run_hours").delete().eq("id", prev.id);
         if (error) return res.status(400).json({ message: `${e.tag}: ${error.message}` });
       } else if (prev) {
-        const { error } = await client2.from("asset_run_hours").update({ hours: next, entered_by: actor.id, entered_by_name: actor.name }).eq("id", prev.id);
+        const { error } = await client3.from("asset_run_hours").update({ hours: next, entered_by: actor.id, entered_by_name: actor.name }).eq("id", prev.id);
         if (error) return res.status(400).json({ message: `${e.tag}: ${error.message}` });
       } else if (e.hours != null) {
-        const { error } = await client2.from("asset_run_hours").insert({
+        const { error } = await client3.from("asset_run_hours").insert({
           asset_id: e.asset_id,
           daily_report_id: null,
           job_id: job.id,
@@ -4301,9 +4395,9 @@ async function registerRoutes(httpServer, app) {
       }
       const delta = round23(next - old);
       if (delta !== 0) {
-        const { data: cur } = await client2.from("assets").select("run_hours").eq("id", e.asset_id).single();
+        const { data: cur } = await client3.from("assets").select("run_hours").eq("id", e.asset_id).single();
         const meter = round23(Math.max(0, (Number(cur?.run_hours ?? 0) || 0) + delta));
-        await client2.from("assets").update({ run_hours: meter }).eq("id", e.asset_id);
+        await client3.from("assets").update({ run_hours: meter }).eq("id", e.asset_id);
       }
     }
     res.json({ ok: true, saved: clean2.length });
@@ -4324,25 +4418,25 @@ async function registerRoutes(httpServer, app) {
   app.post("/api/jobs/:id/credit-run-hours", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const g2 = await creditJobGuard(req, res);
     if (!g2) return;
-    const { client: client2, job } = g2;
-    const p = await planJobCredit(client2, job.id);
+    const { client: client3, job } = g2;
+    const p = await planJobCredit(client3, job.id);
     if (p.problem) return res.status(400).json({ message: p.problem });
     if (!p.plan.length) return res.status(400).json({ message: "There are no run hours left to credit on this job." });
     for (const a of p.perAsset.filter((x) => x.hours > 0)) {
-      const { data: cur } = await client2.from("assets").select("run_hours").eq("id", a.asset_id).single();
+      const { data: cur } = await client3.from("assets").select("run_hours").eq("id", a.asset_id).single();
       const next = Math.round(((Number(cur?.run_hours ?? 0) || 0) + a.hours) * 100) / 100;
-      const { error } = await client2.from("assets").update({ run_hours: next }).eq("id", a.asset_id);
+      const { error } = await client3.from("assets").update({ run_hours: next }).eq("id", a.asset_id);
       if (error) return res.status(400).json({ message: `Could not update run hours for ${a.tag}: ${error.message}` });
     }
     const actor = req.profile;
     for (const { report, alloc } of p.plan) {
       await logRunHours(
-        client2,
+        client3,
         { id: report.id, job_id: job.id, well_name: report.well_name ?? null, report_date: report.report_date ?? null },
         alloc.map((x) => ({ asset_id: x.asset_id, add: x.add }))
       );
-      await client2.from("daily_reports").update({ run_hours_applied: true }).eq("id", report.id);
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_reports").update({ run_hours_applied: true }).eq("id", report.id);
+      await client3.from("daily_report_events").insert({
         report_id: report.id,
         actor_id: actor.id,
         actor_name: actor.name,
@@ -4380,7 +4474,8 @@ async function registerRoutes(httpServer, app) {
       customer_name: customer?.name ?? "",
       field_tech_ids: assignments.map((a) => a.profile_id),
       assignments,
-      manual_billing: billing
+      manual_billing: billing,
+      standby: publicStandby((await standbyByJob([rest.id])).get(rest.id))
     });
   });
   app.get(
@@ -4415,16 +4510,16 @@ async function registerRoutes(httpServer, app) {
       res.json(data || []);
     }
   );
-  const syncJobAssignmentsForRole = async (client2, jobId, jobArea, role, profileIds, assignedBy) => {
+  const syncJobAssignmentsForRole = async (client3, jobId, jobArea, role, profileIds, assignedBy) => {
     let eligible = [];
     if (profileIds.length > 0) {
-      const { data: people } = await client2.from("profiles").select("id").in("id", profileIds).eq("role", role).eq("active", true).eq("area", jobArea);
+      const { data: people } = await client3.from("profiles").select("id").in("id", profileIds).eq("role", role).eq("active", true).eq("area", jobArea);
       eligible = (people || []).map((t) => t.id);
     }
-    const { data: existing } = await client2.from("job_assignments").select("profile_id, profile:profiles!job_assignments_profile_id_fkey(role)").eq("job_id", jobId);
+    const { data: existing } = await client3.from("job_assignments").select("profile_id, profile:profiles!job_assignments_profile_id_fkey(role)").eq("job_id", jobId);
     const roleRowIds = (existing || []).filter((a) => a.profile?.role === role).map((a) => a.profile_id);
     if (roleRowIds.length > 0) {
-      const { error: delErr } = await client2.from("job_assignments").delete().eq("job_id", jobId).in("profile_id", roleRowIds);
+      const { error: delErr } = await client3.from("job_assignments").delete().eq("job_id", jobId).in("profile_id", roleRowIds);
       if (delErr) return delErr.message;
     }
     if (eligible.length > 0) {
@@ -4433,13 +4528,13 @@ async function registerRoutes(httpServer, app) {
         profile_id: pid,
         assigned_by: assignedBy
       }));
-      const { error: insErr } = await client2.from("job_assignments").insert(rows);
+      const { error: insErr } = await client3.from("job_assignments").insert(rows);
       if (insErr) return insErr.message;
     }
     return null;
   };
-  const syncJobFieldTechs = async (client2, jobId, jobArea, profileIds, assignedBy) => syncJobAssignmentsForRole(client2, jobId, jobArea, "field", profileIds, assignedBy);
-  const syncJobSupervisors = async (client2, jobId, jobArea, profileIds, assignedBy) => syncJobAssignmentsForRole(client2, jobId, jobArea, "super", profileIds, assignedBy);
+  const syncJobFieldTechs = async (client3, jobId, jobArea, profileIds, assignedBy) => syncJobAssignmentsForRole(client3, jobId, jobArea, "field", profileIds, assignedBy);
+  const syncJobSupervisors = async (client3, jobId, jobArea, profileIds, assignedBy) => syncJobAssignmentsForRole(client3, jobId, jobArea, "super", profileIds, assignedBy);
   app.post(
     "/api/jobs",
     requireAuth,
@@ -4450,8 +4545,8 @@ async function registerRoutes(httpServer, app) {
         return res.status(400).json({ message: parsed.error.errors[0].message });
       if (req.profile.role !== "admin" && parsed.data.area !== req.profile.area)
         return res.status(403).json({ message: "You can only create jobs in your area" });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("jobs").insert({
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("jobs").insert({
         job_number: parsed.data.job_number,
         area: parsed.data.area,
         customer_id: parsed.data.customer_id,
@@ -4472,14 +4567,14 @@ async function registerRoutes(httpServer, app) {
       }
       const assetIds = parsed.data.asset_ids ?? [];
       if (assetIds.length > 0) {
-        const { error: assignErr } = await client2.from("assets").update({ job_id: data.id, status: "On Job" }).in("id", assetIds).eq("area", data.area);
+        const { error: assignErr } = await client3.from("assets").update({ job_id: data.id, status: "On Job" }).in("id", assetIds).eq("area", data.area);
         if (assignErr)
           return res.status(201).json({ ...data, asset_assign_warning: assignErr.message });
       }
       const techIds = parsed.data.field_tech_ids ?? [];
       if (techIds.length > 0) {
         const warn = await syncJobFieldTechs(
-          client2,
+          client3,
           data.id,
           data.area,
           techIds,
@@ -4491,7 +4586,7 @@ async function registerRoutes(httpServer, app) {
       const supIds = parsed.data.supervisor_ids ?? [];
       if (supIds.length > 0) {
         const warn = await syncJobSupervisors(
-          client2,
+          client3,
           data.id,
           data.area,
           supIds,
@@ -4511,8 +4606,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = updateJobSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("*").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client3.from("jobs").select("*").eq("id", req.params.id).single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile.role !== "admin" && job.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
@@ -4529,7 +4624,7 @@ async function registerRoutes(httpServer, app) {
             message: "Only an Admin or Area Manager can change the job name"
           });
         else if (!job.archived_at) {
-          const { data: clash } = await client2.from("jobs").select("id").eq("area", job.area).ilike("job_number", patch.job_number.replace(/[%_\\]/g, (m) => "\\" + m)).is("archived_at", null).neq("id", job.id).limit(1);
+          const { data: clash } = await client3.from("jobs").select("id").eq("area", job.area).ilike("job_number", patch.job_number.replace(/[%_\\]/g, (m) => "\\" + m)).is("archived_at", null).neq("id", job.id).limit(1);
           if (clash && clash.length)
             return res.status(409).json({
               message: `Job ${patch.job_number} is already active in ${job.area}. Use a different name.`
@@ -4552,12 +4647,12 @@ async function registerRoutes(httpServer, app) {
       delete patch.supervisor_ids;
       let data;
       if (Object.keys(patch).length === 0) {
-        const { data: current, error: readErr } = await client2.from("jobs").select().eq("id", req.params.id).single();
+        const { data: current, error: readErr } = await client3.from("jobs").select().eq("id", req.params.id).single();
         if (readErr)
           return res.status(400).json({ message: readErr.message });
         data = current;
       } else {
-        const { data: updated, error } = await client2.from("jobs").update(patch).eq("id", req.params.id).select().single();
+        const { data: updated, error } = await client3.from("jobs").update(patch).eq("id", req.params.id).select().single();
         if (error) {
           if (error.code === "23505")
             return res.status(409).json({
@@ -4573,7 +4668,7 @@ async function registerRoutes(httpServer, app) {
       }
       if (fieldTechIds !== void 0) {
         const warn = await syncJobFieldTechs(
-          client2,
+          client3,
           data.id,
           data.area,
           fieldTechIds,
@@ -4583,7 +4678,7 @@ async function registerRoutes(httpServer, app) {
       }
       if (supervisorIds !== void 0) {
         const warn = await syncJobSupervisors(
-          client2,
+          client3,
           data.id,
           data.area,
           supervisorIds,
@@ -4599,16 +4694,16 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("area, archived_at").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client3.from("jobs").select("area, archived_at").eq("id", req.params.id).single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile.role !== "admin" && job.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
       if (job.archived_at)
         return res.status(409).json({ message: "Job is already archived" });
-      const { data, error } = await client2.from("jobs").update({ archived_at: (/* @__PURE__ */ new Date()).toISOString(), status: "Completed" }).eq("id", req.params.id).select().single();
+      const { data, error } = await client3.from("jobs").update({ archived_at: (/* @__PURE__ */ new Date()).toISOString(), status: "Completed" }).eq("id", req.params.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
-      const { error: relErr } = await client2.from("assets").update({ job_id: null, status: "Available" }).eq("job_id", req.params.id);
+      const { error: relErr } = await client3.from("assets").update({ job_id: null, status: "Available" }).eq("job_id", req.params.id);
       if (relErr)
         return res.json({ ...data, asset_release_warning: relErr.message });
       res.json(data);
@@ -4626,10 +4721,10 @@ async function registerRoutes(httpServer, app) {
     ["rig_up_reports", "Rig-up reports"],
     ["job_services", "Job services"]
   ];
-  async function jobDeleteCounts(client2, jobId) {
+  async function jobDeleteCounts(client3, jobId) {
     const out = {};
     for (const [t] of DELETE_COUNT_TABLES) {
-      const { count } = await client2.from(t).select("id", { count: "exact", head: true }).eq("job_id", jobId);
+      const { count } = await client3.from(t).select("id", { count: "exact", head: true }).eq("job_id", jobId);
       out[t] = count ?? 0;
     }
     return out;
@@ -4639,12 +4734,12 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("id, job_number, area, archived_at, customer_id").eq("id", req.params.id).maybeSingle();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client3.from("jobs").select("id, job_number, area, archived_at, customer_id").eq("id", req.params.id).maybeSingle();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (!job.archived_at) return res.status(409).json({ message: "Only archived jobs can be deleted. Archive it first." });
-      const counts = await jobDeleteCounts(client2, job.id);
-      const { data: live } = await client2.from("jobs").select("id, job_number, area, customer:customers(name)").is("archived_at", null).order("job_number");
+      const counts = await jobDeleteCounts(client3, job.id);
+      const { data: live } = await client3.from("jobs").select("id, job_number, area, customer:customers(name)").is("archived_at", null).order("job_number");
       res.json({
         job,
         counts: DELETE_COUNT_TABLES.map(([t, label]) => ({ table: t, label, count: counts[t] })),
@@ -4663,10 +4758,10 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const confirm = String(req.body?.confirm_job_number ?? "").trim();
       const moveTo = req.body?.move_to_job_id ? String(req.body.move_to_job_id) : null;
-      const { data: job } = await client2.from("jobs").select("id, job_number, area, archived_at").eq("id", req.params.id).maybeSingle();
+      const { data: job } = await client3.from("jobs").select("id, job_number, area, archived_at").eq("id", req.params.id).maybeSingle();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (!job.archived_at)
         return res.status(409).json({ message: "Only archived jobs can be deleted. Archive it first." });
@@ -4675,20 +4770,20 @@ async function registerRoutes(httpServer, app) {
       let target = null;
       if (moveTo) {
         if (moveTo === job.id) return res.status(400).json({ message: "Pick a different job to move the reports to." });
-        const { data: t } = await client2.from("jobs").select("id, job_number, area, customer_id, archived_at").eq("id", moveTo).maybeSingle();
+        const { data: t } = await client3.from("jobs").select("id, job_number, area, customer_id, archived_at").eq("id", moveTo).maybeSingle();
         if (!t) return res.status(404).json({ message: "The job to move reports to wasn't found" });
         if (t.archived_at) return res.status(409).json({ message: ARCHIVED_JOB_MSG });
         target = t;
       }
       const who = req.profile;
       const actor = { actor_id: who.id, actor_name: who.name ?? null, actor_role: who.role };
-      const { data: reps } = await client2.from("daily_reports").select("id").eq("job_id", job.id);
+      const { data: reps } = await client3.from("daily_reports").select("id").eq("job_id", job.id);
       const repIds = (reps || []).map((r) => r.id);
       if (repIds.length) {
         const patch = target ? { job_id: target.id, area: target.area, customer_id: target.customer_id } : { job_id: null, customer_id: null, status: "Needs job match" };
-        const { error } = await client2.from("daily_reports").update(patch).in("id", repIds);
+        const { error } = await client3.from("daily_reports").update(patch).in("id", repIds);
         if (error) return res.status(400).json({ message: `Couldn't move the daily reports: ${error.message}` });
-        await client2.from("daily_report_events").insert(
+        await client3.from("daily_report_events").insert(
           repIds.map((id) => ({
             report_id: id,
             ...actor,
@@ -4697,14 +4792,14 @@ async function registerRoutes(httpServer, app) {
           }))
         );
       }
-      const { data: jsas } = await client2.from("jsa_reports").select("id").eq("job_id", job.id);
+      const { data: jsas } = await client3.from("jsa_reports").select("id").eq("job_id", job.id);
       const jsaIds = (jsas || []).map((r) => r.id);
       if (jsaIds.length) {
         const patch = target ? { job_id: target.id, area: target.area, customer_id: target.customer_id } : { job_id: null, customer_id: null, status: "Needs job match" };
-        const { error } = await client2.from("jsa_reports").update(patch).in("id", jsaIds);
+        const { error } = await client3.from("jsa_reports").update(patch).in("id", jsaIds);
         if (error) return res.status(400).json({ message: `Couldn't move the intake JSAs: ${error.message}` });
       }
-      const { error: dErr } = await client2.from("jobs").delete().eq("id", job.id);
+      const { error: dErr } = await client3.from("jobs").delete().eq("id", job.id);
       if (dErr) return res.status(400).json({ message: `Couldn't delete the job: ${dErr.message}` });
       res.json({ ok: true, moved_reports: repIds.length, moved_jsas: jsaIds.length, moved_to: target?.job_number ?? null });
     }
@@ -4714,14 +4809,14 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("area, archived_at, status").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client3.from("jobs").select("area, archived_at, status").eq("id", req.params.id).single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile.role !== "admin" && job.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
       if (!job.archived_at)
         return res.status(409).json({ message: "Job is not archived" });
-      const { data, error } = await client2.from("jobs").update({
+      const { data, error } = await client3.from("jobs").update({
         archived_at: null,
         status: job.status === "Completed" ? "Active" : job.status
       }).eq("id", req.params.id).select().single();
@@ -4791,13 +4886,13 @@ async function registerRoutes(httpServer, app) {
     }
   );
   const loadFdrForWrite = async (req, res, opts) => {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: report } = await client2.from(FDR_TABLE).select("*").eq("id", req.params.id).single();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: report } = await client3.from(FDR_TABLE).select("*").eq("id", req.params.id).single();
     if (!report) {
       res.status(404).json({ message: "Daily report not found" });
       return null;
     }
-    const { data: job } = await client2.from("jobs").select("area,status").eq("id", report.job_id).single();
+    const { data: job } = await client3.from("jobs").select("area,status").eq("id", report.job_id).single();
     if (!job) {
       res.status(404).json({ message: "Job not found" });
       return null;
@@ -4812,7 +4907,7 @@ async function registerRoutes(httpServer, app) {
       });
       return null;
     }
-    return { report, job, client: client2 };
+    return { report, job, client: client3 };
   };
   app.patch(
     "/api/field-daily-reports/:id",
@@ -4947,7 +5042,7 @@ async function registerRoutes(httpServer, app) {
       res.json((data || []).map(flattenJsa));
     }
   );
-  const insertJsaSteps = async (client2, jsaId, steps) => {
+  const insertJsaSteps = async (client3, jsaId, steps) => {
     const rows = steps.map((s, i) => ({
       jsa_id: jsaId,
       step_order: i,
@@ -4955,7 +5050,7 @@ async function registerRoutes(httpServer, app) {
       hazards: s.hazards || null,
       controls: s.controls || null
     }));
-    return client2.from("jsa_steps").insert(rows);
+    return client3.from("jsa_steps").insert(rows);
   };
   app.post(
     "/api/jobs/:id/jsas",
@@ -4964,15 +5059,15 @@ async function registerRoutes(httpServer, app) {
       const parsed = createJsaSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("area,status").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client3.from("jobs").select("area,status").eq("id", req.params.id).single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (req.profile.role !== "admin" && job.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
       if (!isLiveJobStatus(job.status))
         return res.status(400).json({ message: "JSAs can only be created for active jobs." });
       const p = parsed.data;
-      const { data: jsa, error } = await client2.from("jsas").insert({
+      const { data: jsa, error } = await client3.from("jsas").insert({
         job_id: req.params.id,
         jsa_date: p.jsa_date,
         well_name: p.well_name || null,
@@ -4982,23 +5077,23 @@ async function registerRoutes(httpServer, app) {
         submitted_by: req.profile.id
       }).select().single();
       if (error) return res.status(400).json({ message: error.message });
-      const { error: stepErr } = await insertJsaSteps(client2, jsa.id, p.steps);
+      const { error: stepErr } = await insertJsaSteps(client3, jsa.id, p.steps);
       if (stepErr) {
-        await client2.from("jsas").delete().eq("id", jsa.id);
+        await client3.from("jsas").delete().eq("id", jsa.id);
         return res.status(400).json({ message: stepErr.message });
       }
-      const { data: full } = await client2.from("jsas").select(JSA_SELECT).eq("id", jsa.id).single();
+      const { data: full } = await client3.from("jsas").select(JSA_SELECT).eq("id", jsa.id).single();
       res.status(201).json(full ? flattenJsa(full) : jsa);
     }
   );
   const loadJsaForWrite = async (req, res, opts) => {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: jsa } = await client2.from("jsas").select("*").eq("id", req.params.id).single();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: jsa } = await client3.from("jsas").select("*").eq("id", req.params.id).single();
     if (!jsa) {
       res.status(404).json({ message: "JSA not found" });
       return null;
     }
-    const { data: job } = await client2.from("jobs").select("area,status").eq("id", jsa.job_id).single();
+    const { data: job } = await client3.from("jobs").select("area,status").eq("id", jsa.job_id).single();
     if (!job) {
       res.status(404).json({ message: "Job not found" });
       return null;
@@ -5013,7 +5108,7 @@ async function registerRoutes(httpServer, app) {
       });
       return null;
     }
-    return { jsa, job, client: client2 };
+    return { jsa, job, client: client3 };
   };
   app.patch(
     "/api/jsas/:id",
@@ -5108,8 +5203,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = createMaintenanceScheduleSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("maintenance_schedules").insert(parsed.data).select().single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("maintenance_schedules").insert(parsed.data).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json(data);
     }
@@ -5122,8 +5217,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = updateMaintenanceScheduleSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("maintenance_schedules").update(parsed.data).eq("id", req.params.id).select().single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("maintenance_schedules").update(parsed.data).eq("id", req.params.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       if (!data) return res.status(404).json({ message: "Schedule not found" });
       res.json(data);
@@ -5134,8 +5229,8 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { error } = await client2.from("maintenance_schedules").delete().eq("id", req.params.id);
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { error } = await client3.from("maintenance_schedules").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -5162,7 +5257,7 @@ async function registerRoutes(httpServer, app) {
     requireRole("admin", "area", "super"),
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const start = String(req.query.start || "");
       const end = String(req.query.end || "");
       const startD = /* @__PURE__ */ new Date(start + "T00:00:00Z");
@@ -5171,7 +5266,7 @@ async function registerRoutes(httpServer, app) {
         return res.status(400).json({ message: "Provide a valid start and end date (start <= end)" });
       const MS_DAY = 864e5;
       const windowDays = Math.round((endD.getTime() - startD.getTime()) / MS_DAY) + 1;
-      let aq = client2.from("assets").select(
+      let aq = client3.from("assets").select(
         "*, job:jobs(id,job_number,well_name,area,status,started_on,ended_on)"
       ).order("tag");
       if (scope) aq = aq.eq("area", scope);
@@ -5181,7 +5276,7 @@ async function registerRoutes(httpServer, app) {
       const assetIds = assets.map((a) => a.id);
       const mCount = /* @__PURE__ */ new Map();
       if (assetIds.length) {
-        const { data: reps } = await client2.from("maintenance_reports").select("asset_id, report_date").in("asset_id", assetIds).gte("report_date", start).lte("report_date", end);
+        const { data: reps } = await client3.from("maintenance_reports").select("asset_id, report_date").in("asset_id", assetIds).gte("report_date", start).lte("report_date", end);
         for (const r of reps || [])
           mCount.set(r.asset_id, (mCount.get(r.asset_id) || 0) + 1);
       }
@@ -5250,7 +5345,7 @@ async function registerRoutes(httpServer, app) {
     requireRole("admin", "area", "super"),
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const start = String(req.query.start || "");
       const end = String(req.query.end || "");
       const startD = /* @__PURE__ */ new Date(start + "T00:00:00Z");
@@ -5259,7 +5354,7 @@ async function registerRoutes(httpServer, app) {
         return res.status(400).json({ message: "Provide a valid start and end date (start <= end)" });
       const MS_DAY = 864e5;
       const windowDays = Math.round((endD.getTime() - startD.getTime()) / MS_DAY) + 1;
-      let aq = client2.from("assets").select(
+      let aq = client3.from("assets").select(
         "*, job:jobs(id,job_number,well_name,area,status,started_on,ended_on)"
       ).order("tag");
       if (scope) aq = aq.eq("area", scope);
@@ -5269,7 +5364,7 @@ async function registerRoutes(httpServer, app) {
       const assetIds = assets.map((a) => a.id);
       const mCount = /* @__PURE__ */ new Map();
       if (assetIds.length) {
-        const { data: reps } = await client2.from("maintenance_reports").select("asset_id, report_date").in("asset_id", assetIds).gte("report_date", start).lte("report_date", end);
+        const { data: reps } = await client3.from("maintenance_reports").select("asset_id, report_date").in("asset_id", assetIds).gte("report_date", start).lte("report_date", end);
         for (const r of reps || [])
           mCount.set(r.asset_id, (mCount.get(r.asset_id) || 0) + 1);
       }
@@ -5332,8 +5427,8 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset, error } = await client2.from("assets").select(
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset, error } = await client3.from("assets").select(
         "*, maintenance_schedule:maintenance_schedules(*), job:jobs(id,job_number,well_name,area,status)"
       ).eq("id", req.params.id).single();
       if (error || !asset)
@@ -5346,7 +5441,7 @@ async function registerRoutes(httpServer, app) {
         if (!assetJobId || !fieldJobIds.includes(assetJobId))
           return res.status(404).json({ message: "Asset not found" });
       }
-      const { data: reps } = await client2.from("maintenance_reports").select(
+      const { data: reps } = await client3.from("maintenance_reports").select(
         "id, work_type, status, report_date, filed_at, notes, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)"
       ).eq("asset_id", req.params.id).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
       const history = (reps || []).map((r) => ({
@@ -5360,7 +5455,7 @@ async function registerRoutes(httpServer, app) {
       }));
       let { hoursSince, interval, state } = serviceStatusFor(asset);
       if (tracksRunHours(asset.category)) {
-        const svc = (await hoursSinceServiceFor(client2, [asset])).get(asset.id);
+        const svc = (await hoursSinceServiceFor(client3, [asset])).get(asset.id);
         hoursSince = svc?.hoursSince ?? null;
         state = svc?.state ?? state;
         interval = SERVICE_INTERVAL_HOURS;
@@ -5391,13 +5486,13 @@ async function registerRoutes(httpServer, app) {
         return res.status(403).json({ message: "You can only add assets in your area" });
       }
       const runHours = tracksRunHours(parsed.data.category) ? parsed.data.run_hours ?? 0 : null;
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const insert = { ...parsed.data, run_hours: runHours };
       const rentalErr = applyRentalRules(insert, null);
       if (rentalErr) return res.status(400).json({ message: rentalErr });
       insert.status = assetStatusFor(insert.job_id ?? null, insert.status);
       if (!tracksRunHours(parsed.data.category)) delete insert.service_hours_interval;
-      const { data, error } = await client2.from("assets").insert(insert).select().single();
+      const { data, error } = await client3.from("assets").insert(insert).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json(data);
     }
@@ -5410,8 +5505,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = updateAssetSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client2.from("assets").select("*").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client3.from("assets").select("*").eq("id", req.params.id).single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       if (req.profile.role === "area" && asset.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
@@ -5424,9 +5519,9 @@ async function registerRoutes(httpServer, app) {
           message: "This asset is on a job. Unassign it from the job before changing its area."
         });
       if (patch.job_id) {
-        const { data: job } = await client2.from("jobs").select("area").eq("id", patch.job_id).single();
+        const { data: job } = await client3.from("jobs").select("area").eq("id", patch.job_id).single();
         if (!job) return res.status(404).json({ message: "Job not found" });
-        if (await jobIsArchived(client2, patch.job_id))
+        if (await jobIsArchived(client3, patch.job_id))
           return res.status(409).json({ message: ARCHIVED_JOB_MSG });
         if (job.area !== nextArea)
           return res.status(400).json({ message: "Asset and job must be in the same operating area" });
@@ -5439,7 +5534,7 @@ async function registerRoutes(httpServer, app) {
       const statusBase = patch.status !== void 0 ? patch.status : asset.status;
       if ("job_id" in patch || patch.status !== void 0 || asset.status !== assetStatusFor(nextJobId, statusBase))
         patch.status = assetStatusFor(nextJobId, statusBase);
-      const { data, error } = await client2.from("assets").update(patch).eq("id", req.params.id).select().single();
+      const { data, error } = await client3.from("assets").update(patch).eq("id", req.params.id).select().single();
       if (error) {
         const dup = /duplicate|unique/i.test(error.message) && /tag/i.test(error.message);
         return res.status(400).json({
@@ -5454,12 +5549,12 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client2.from("assets").select("area").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client3.from("assets").select("area").eq("id", req.params.id).single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       if (req.profile.role === "area" && asset.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
-      const { error } = await client2.from("assets").delete().eq("id", req.params.id);
+      const { error } = await client3.from("assets").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -5476,8 +5571,8 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
-      const client2 = supabaseAdmin || supabaseAnon;
-      let aq = client2.from("assets").select("*, job:jobs(id,job_number,area)").in("category", RUN_HOUR_CATEGORIES).order("tag");
+      const client3 = supabaseAdmin || supabaseAnon;
+      let aq = client3.from("assets").select("*, job:jobs(id,job_number,area)").in("category", RUN_HOUR_CATEGORIES).order("tag");
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
@@ -5489,7 +5584,7 @@ async function registerRoutes(httpServer, app) {
       const techByAsset = /* @__PURE__ */ new Map();
       const lastServiceByAsset = /* @__PURE__ */ new Map();
       if (assetIds.length) {
-        const { data: reps } = await client2.from("maintenance_reports").select("asset_id, report_date, filed_at, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").in("asset_id", assetIds).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
+        const { data: reps } = await client3.from("maintenance_reports").select("asset_id, report_date, filed_at, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").in("asset_id", assetIds).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
         for (const r of reps || []) {
           if (!lastServiceByAsset.has(r.asset_id) && r.report_date)
             lastServiceByAsset.set(r.asset_id, String(r.report_date));
@@ -5497,13 +5592,13 @@ async function registerRoutes(httpServer, app) {
             techByAsset.set(r.asset_id, r.supervisor.name);
         }
       }
-      const log2 = await loadRunHoursLog(client2, assetIds);
+      const log2 = await loadRunHoursLog(client3, assetIds);
       const logByAsset = /* @__PURE__ */ new Map();
       for (const r of log2.rows) {
         if (!logByAsset.has(r.asset_id)) logByAsset.set(r.asset_id, []);
         logByAsset.get(r.asset_id).push(r);
       }
-      const { data: repRows } = await client2.from("maintenance_reports").select("status, asset:assets(area, job_id)");
+      const { data: repRows } = await client3.from("maintenance_reports").select("status, asset:assets(area, job_id)");
       let reports = repRows || [];
       if (scope) reports = reports.filter((r) => r.asset?.area === scope);
       if (fieldJobIds)
@@ -5584,8 +5679,8 @@ async function registerRoutes(httpServer, app) {
     "/api/service/assets/:id",
     requireAuth,
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client2.from("assets").select("*, job:jobs(id,job_number)").eq("id", req.params.id).maybeSingle();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client3.from("assets").select("*, job:jobs(id,job_number)").eq("id", req.params.id).maybeSingle();
       if (!asset || !tracksRunHours(asset.category))
         return res.status(404).json({ message: "Centrifuge not found" });
       const a = asset;
@@ -5597,7 +5692,7 @@ async function registerRoutes(httpServer, app) {
         if (!a.job_id || !fieldJobIds.includes(a.job_id))
           return res.status(404).json({ message: "Centrifuge not found" });
       }
-      const { data: reps } = await client2.from("maintenance_reports").select("id, report_date, filed_at, status, score_pass, score_total, flagged_count, checklist, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").eq("asset_id", a.id).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
+      const { data: reps } = await client3.from("maintenance_reports").select("id, report_date, filed_at, status, score_pass, score_total, flagged_count, checklist, supervisor:profiles!maintenance_reports_supervisor_id_fkey(name)").eq("asset_id", a.id).order("report_date", { ascending: false }).order("filed_at", { ascending: false });
       const history = (reps || []).map((r) => ({
         id: r.id,
         report_date: r.report_date,
@@ -5610,7 +5705,7 @@ async function registerRoutes(httpServer, app) {
         has_form: r.checklist != null
       }));
       const lastService = history[0]?.report_date ? String(history[0].report_date) : null;
-      const log2 = await loadRunHoursLog(client2, [a.id]);
+      const log2 = await loadRunHoursLog(client3, [a.id]);
       let since;
       if (log2.ready) since = hoursAfter(log2.rows, lastService);
       else {
@@ -5780,8 +5875,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = uploadServiceReportSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job } = await client2.from("jobs").select("id, area").eq("id", parsed.data.job_id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job } = await client3.from("jobs").select("id, area").eq("id", parsed.data.job_id).single();
       if (!job) return res.status(404).json({ message: "Job not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && job.area !== scope)
@@ -5789,7 +5884,7 @@ async function registerRoutes(httpServer, app) {
       const bytes = Buffer.from(parsed.data.file_base64, "base64");
       if (bytes.length === 0)
         return res.status(400).json({ message: "Uploaded file is empty" });
-      const { data: created, error } = await client2.from("service_reports").insert({
+      const { data: created, error } = await client3.from("service_reports").insert({
         job_id: parsed.data.job_id,
         file_name: parsed.data.file_name,
         file_mime: parsed.data.file_mime ?? "application/pdf",
@@ -5835,7 +5930,7 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const { data: existing } = await supabaseAnon.from("service_reports").select("id, job:jobs!service_reports_job_id_fkey(area)").eq("id", req.params.id).single();
       if (!existing)
         return res.status(404).json({ message: "Service report not found" });
@@ -5843,7 +5938,7 @@ async function registerRoutes(httpServer, app) {
       const jobArea = existing.job?.area ?? null;
       if (scope && jobArea !== scope)
         return res.status(404).json({ message: "Service report not found" });
-      const { error } = await client2.from("service_reports").delete().eq("id", req.params.id);
+      const { error } = await client3.from("service_reports").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -5867,8 +5962,8 @@ async function registerRoutes(httpServer, app) {
     "/api/service-forms",
     requireAuth,
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("maintenance_reports").select(SERVICE_FORM_SELECT).not("checklist", "is", null).order("filed_at", { ascending: false });
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("maintenance_reports").select(SERVICE_FORM_SELECT).not("checklist", "is", null).order("filed_at", { ascending: false });
       if (error) return res.status(500).json({ message: error.message });
       let rows = (data || []).map(flattenServiceForm);
       const scope = areaScopeOf(req.profile);
@@ -5882,8 +5977,8 @@ async function registerRoutes(httpServer, app) {
     "/api/service-forms/:id",
     requireAuth,
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("maintenance_reports").select(SERVICE_FORM_SELECT).eq("id", req.params.id).not("checklist", "is", null).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("maintenance_reports").select(SERVICE_FORM_SELECT).eq("id", req.params.id).not("checklist", "is", null).single();
       if (error || !data)
         return res.status(404).json({ message: "Service report not found" });
       const row = flattenServiceForm(data);
@@ -5893,7 +5988,7 @@ async function registerRoutes(httpServer, app) {
       const fieldAssets = await fieldAssetIdsOf(req);
       if (fieldAssets && !fieldAssets.has(row.asset_id))
         return res.status(404).json({ message: "Service report not found" });
-      const { data: files } = await client2.from("maintenance_report_files").select("id, file_name, file_mime, file_base64, notes").eq("report_id", req.params.id).order("created_at", { ascending: true });
+      const { data: files } = await client3.from("maintenance_report_files").select("id, file_name, file_mime, file_base64, notes").eq("report_id", req.params.id).order("created_at", { ascending: true });
       const photos = (files || []).map((f) => ({
         id: f.id,
         file_name: f.file_name,
@@ -5908,7 +6003,7 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const { data: existing } = await supabaseAnon.from("maintenance_reports").select("id, asset:assets!maintenance_reports_asset_id_fkey(area)").eq("id", req.params.id).not("checklist", "is", null).single();
       if (!existing)
         return res.status(404).json({ message: "Service report not found" });
@@ -5916,7 +6011,7 @@ async function registerRoutes(httpServer, app) {
       const area = existing.asset?.area ?? null;
       if (scope && area !== scope)
         return res.status(404).json({ message: "Service report not found" });
-      const { error } = await client2.from("maintenance_reports").delete().eq("id", req.params.id);
+      const { error } = await client3.from("maintenance_reports").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -5930,8 +6025,8 @@ async function registerRoutes(httpServer, app) {
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const input = parsed.data;
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: asset } = await client2.from("assets").select("*").eq("id", input.asset_id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client3.from("assets").select("*").eq("id", input.asset_id).single();
       if (!asset) return res.status(404).json({ message: "Asset not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && asset.area !== scope)
@@ -5955,7 +6050,7 @@ async function registerRoutes(httpServer, app) {
       }
       if (answered.length === 0)
         return res.status(400).json({ message: "Answer at least one checklist item" });
-      const { data: report, error } = await client2.from("maintenance_reports").insert({
+      const { data: report, error } = await client3.from("maintenance_reports").insert({
         asset_id: asset.id,
         supervisor_id: req.profile.id,
         work_type: "Inspection",
@@ -5976,7 +6071,7 @@ async function registerRoutes(httpServer, app) {
         if (input.run_hours != null) patch.run_hours = input.run_hours;
         if (meterAtService != null) patch.run_hours_at_service = meterAtService;
       }
-      await client2.from("assets").update(patch).eq("id", asset.id);
+      await client3.from("assets").update(patch).eq("id", asset.id);
       if (input.photos && input.photos.length) {
         const rows = input.photos.map((p) => {
           const bytes = Buffer.from(p.file_base64, "base64");
@@ -5991,9 +6086,9 @@ async function registerRoutes(httpServer, app) {
             uploaded_by: req.profile.id
           };
         });
-        await client2.from("maintenance_report_files").insert(rows);
+        await client3.from("maintenance_report_files").insert(rows);
       }
-      await client2.from("audit_events").insert({
+      await client3.from("audit_events").insert({
         report_id: report.id,
         asset_id: asset.id,
         actor_id: req.profile.id,
@@ -6011,8 +6106,8 @@ async function registerRoutes(httpServer, app) {
       });
     }
   );
-  async function assetAreaOf(client2, assetId) {
-    const { data } = await client2.from("assets").select("id, area").eq("id", assetId).single();
+  async function assetAreaOf(client3, assetId) {
+    const { data } = await client3.from("assets").select("id, area").eq("id", assetId).single();
     return data ? data.area : null;
   }
   const WORK_ORDER_SELECT = "id, wo_number, asset_id, area, title, wo_type, priority, status, vendor, sent_on, due_date, est_hours, notes, created_by, completed_at, created_at, returned_on, work_performed, invoice_number, invoice_total, invoice_file_name, invoice_mime, invoice_size, asset:assets(tag, category), creator:profiles!work_orders_created_by_fkey(name), closer:profiles!work_orders_closed_by_fkey(name)";
@@ -6034,12 +6129,12 @@ async function registerRoutes(httpServer, app) {
     if (WORK_ORDER_MANAGE_ROLES.includes(req.profile.role)) return row;
     return { ...row, invoice_total: null, invoice_number: null };
   }
-  async function nextWorkOrderNumber(client2) {
-    const { data: seqData, error: seqErr } = await client2.rpc("nextval", {
+  async function nextWorkOrderNumber(client3) {
+    const { data: seqData, error: seqErr } = await client3.rpc("nextval", {
       seq: "work_order_seq"
     });
     if (!seqErr && seqData != null) return `WO-${seqData}`;
-    const { count } = await client2.from("work_orders").select("id", { count: "exact", head: true });
+    const { count } = await client3.from("work_orders").select("id", { count: "exact", head: true });
     return `WO-${5001 + (count || 0)}`;
   }
   async function loadWorkOrderForWrite(req) {
@@ -6081,9 +6176,9 @@ async function registerRoutes(httpServer, app) {
         return res.status(404).json({ message: "Asset not found" });
       if (input.due_date && input.due_date < input.sent_on)
         return res.status(400).json({ message: "Expected back can't be before the date sent" });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const woNumber = await nextWorkOrderNumber(client2);
-      const { data, error } = await client2.from("work_orders").insert({
+      const client3 = supabaseAdmin || supabaseAnon;
+      const woNumber = await nextWorkOrderNumber(client3);
+      const { data, error } = await client3.from("work_orders").insert({
         wo_number: woNumber,
         asset_id: input.asset_id,
         area,
@@ -6131,8 +6226,8 @@ async function registerRoutes(httpServer, app) {
       }
       if (Object.keys(patch).length === 0)
         return res.status(400).json({ message: "No changes provided" });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("work_orders").update(patch).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("work_orders").update(patch).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
       if (error) return woErr(res, 400, error.message);
       res.json(flattenWorkOrder(data));
     }
@@ -6175,8 +6270,8 @@ async function registerRoutes(httpServer, app) {
         patch.invoice_size = bytes.length;
         patch.invoice_base64 = input.invoice_file.base64;
       }
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("work_orders").update(patch).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("work_orders").update(patch).eq("id", req.params.id).select(WORK_ORDER_SELECT).single();
       if (error) return woErr(res, 400, error.message);
       res.json(flattenWorkOrder(data));
     }
@@ -6195,8 +6290,8 @@ async function registerRoutes(httpServer, app) {
       if (!bytes.length) return res.status(400).json({ message: "The invoice file is empty" });
       if (bytes.length > WORK_ORDER_INVOICE_MAX_BYTES)
         return res.status(400).json({ message: "The invoice file is over 3 MB. Save a smaller PDF or photo and try again." });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("work_orders").update({
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("work_orders").update({
         invoice_file_name: f.data.name.slice(0, 200),
         invoice_mime: f.data.mime.slice(0, 100),
         invoice_size: bytes.length,
@@ -6269,11 +6364,11 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole(...WORK_ORDER_MANAGE_ROLES),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const existing = await loadWorkOrderForWrite(req);
       if (!existing)
         return res.status(404).json({ message: "Work order not found" });
-      const { error } = await client2.from("work_orders").delete().eq("id", req.params.id);
+      const { error } = await client3.from("work_orders").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -6283,20 +6378,20 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("area", "admin"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report } = await client2.from("maintenance_reports").select("*, asset:assets(*)").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report } = await client3.from("maintenance_reports").select("*, asset:assets(*)").eq("id", req.params.id).single();
       if (!report) return res.status(404).json({ message: "Report not found" });
       if (report.status === "Signed off")
         return res.status(400).json({ message: "Already signed off" });
       if (req.profile.role === "area" && report.asset?.area !== req.profile.area)
         return res.status(403).json({ message: "Outside your area" });
-      const { error: sErr } = await client2.from("sign_offs").insert({
+      const { error: sErr } = await client3.from("sign_offs").insert({
         report_id: report.id,
         area_mgr_id: req.profile.id
       });
       if (sErr) return res.status(400).json({ message: sErr.message });
-      await client2.from("maintenance_reports").update({ status: "Signed off" }).eq("id", report.id);
-      await client2.from("audit_events").insert({
+      await client3.from("maintenance_reports").update({ status: "Signed off" }).eq("id", report.id);
+      await client3.from("audit_events").insert({
         report_id: report.id,
         asset_id: report.asset_id,
         actor_id: req.profile.id,
@@ -6331,8 +6426,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = notifPrefsSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("notification_prefs").upsert({ user_id: req.profile.id, ...parsed.data }).select().single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("notification_prefs").upsert({ user_id: req.profile.id, ...parsed.data }).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(data);
     }
@@ -6345,11 +6440,11 @@ async function registerRoutes(httpServer, app) {
     const parsed = ingestDailyReportSchema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ message: parsed.error.errors[0].message });
-    const client2 = supabaseAdmin || supabaseAnon;
+    const client3 = supabaseAdmin || supabaseAnon;
     const p = parsed.data;
-    const { data: existing } = await client2.from("daily_reports").select("*").eq("email_message_id", p.email_message_id).maybeSingle();
+    const { data: existing } = await client3.from("daily_reports").select("*").eq("email_message_id", p.email_message_id).maybeSingle();
     if (existing) return res.status(200).json({ ...existing, deduped: true });
-    const { data: supersededBy } = await client2.from("daily_reports").select("id, status, report_day, well_name").contains("analysis", { superseded_email_ids: [p.email_message_id] }).limit(1);
+    const { data: supersededBy } = await client3.from("daily_reports").select("id, status, report_day, well_name").contains("analysis", { superseded_email_ids: [p.email_message_id] }).limit(1);
     if (supersededBy && supersededBy.length)
       return res.status(200).json({ ...supersededBy[0], deduped: true, superseded: true });
     let excel;
@@ -6362,7 +6457,7 @@ async function registerRoutes(httpServer, app) {
       return res.status(422).json({ message: `Failed to parse Excel attachment: ${e?.message ?? e}` });
     }
     const resolved = await resolveJobForWell(
-      client2,
+      client3,
       excel.well_name,
       excel.job_number,
       excel.well_context?.operator ?? null
@@ -6372,7 +6467,7 @@ async function registerRoutes(httpServer, app) {
     let customer_id = resolved.customer_id;
     const matchedByJobNumber = !!job_id && !!excel.job_number && normJobId(excel.job_number).length > 0;
     const status = job_id ? "Pending Review" : "Needs job match";
-    const missingFields = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client2)).map(
+    const missingFields = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client3)).map(
       (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
     );
     const row = {
@@ -6403,11 +6498,11 @@ async function registerRoutes(httpServer, app) {
       job_id,
       status
     };
-    const prior = await findPriorSameDay(client2, job_id, excel.report_day, excel.well_name);
+    const prior = await findPriorSameDay(client3, job_id, excel.report_day, excel.well_name);
     if (prior) {
       const incomingAt = row.received_at;
       if (isOlderEmail(p.email_message_id, incomingAt, prior.email_message_id, prior.received_at)) {
-        await addSupersededEmail(client2, prior, p.email_message_id);
+        await addSupersededEmail(client3, prior, p.email_message_id);
         return res.status(200).json({ id: prior.id, deduped: true, superseded: true });
       }
       const changes = describeReportChanges(prior, row);
@@ -6416,12 +6511,12 @@ async function registerRoutes(httpServer, app) {
       if (prior.status === "Signed off") {
         const prevPendingId = prior.analysis?.pending_correction_id;
         if (prevPendingId) {
-          const { data: prev } = await client2.from("daily_reports").select("id, email_message_id, status").eq("id", prevPendingId).maybeSingle();
+          const { data: prev } = await client3.from("daily_reports").select("id, email_message_id, status").eq("id", prevPendingId).maybeSingle();
           if (prev && prev.status === "Correction pending") {
             const ids = Array.isArray(prior.analysis?.superseded_email_ids) ? [...prior.analysis.superseded_email_ids] : [];
             if (!ids.includes(prev.email_message_id)) ids.push(prev.email_message_id);
             prior.analysis = { ...prior.analysis || {}, superseded_email_ids: ids };
-            await client2.from("daily_reports").delete().eq("id", prev.id);
+            await client3.from("daily_reports").delete().eq("id", prev.id);
           }
         }
         const held = {
@@ -6435,11 +6530,11 @@ async function registerRoutes(httpServer, app) {
             correction_changes: changes
           }
         };
-        const { data: c, error: cErr } = await client2.from("daily_reports").insert(held).select().single();
+        const { data: c, error: cErr } = await client3.from("daily_reports").insert(held).select().single();
         if (cErr) return res.status(400).json({ message: cErr.message });
-        await client2.from("daily_reports").update({ analysis: { ...prior.analysis || {}, pending_correction_id: c.id } }).eq("id", prior.id);
+        await client3.from("daily_reports").update({ analysis: { ...prior.analysis || {}, pending_correction_id: c.id } }).eq("id", prior.id);
         const changeText = changes.length ? ` Changes: ${changes.join("; ")}.` : " No values changed.";
-        await client2.from("daily_report_events").insert([
+        await client3.from("daily_report_events").insert([
           {
             report_id: c.id,
             actor_name: who,
@@ -6458,7 +6553,7 @@ async function registerRoutes(httpServer, app) {
         return res.status(201).json({ ...c, correction_pending: true });
       }
       if (sameDate || prior.status === "Changes requested") {
-        const { data: upd, error: uErr } = await client2.from("daily_reports").update({
+        const { data: upd, error: uErr } = await client3.from("daily_reports").update({
           ...correctionFields(row),
           status: "Pending Review",
           reviewed_by: null,
@@ -6470,7 +6565,7 @@ async function registerRoutes(httpServer, app) {
           analysis: correctedAnalysis(prior, row.analysis, changes, prior.email_message_id)
         }).eq("id", prior.id).select().single();
         if (uErr) return res.status(400).json({ message: uErr.message });
-        await client2.from("daily_report_events").insert({
+        await client3.from("daily_report_events").insert({
           report_id: prior.id,
           actor_name: who,
           actor_role: "field",
@@ -6478,7 +6573,7 @@ async function registerRoutes(httpServer, app) {
           detail: `Replaced with corrected workbook "${p.attachment_name}" (${excel.source_sheet})` + (prior.status === "Changes requested" ? " after changes were requested" : "") + `. ${changes.length ? `Changes: ${changes.join("; ")}.` : "No values changed."} Back to Pending Review.`
         });
         if (missingFields.length) {
-          await client2.from("daily_report_events").insert({
+          await client3.from("daily_report_events").insert({
             report_id: prior.id,
             actor_name: "System",
             actor_role: "field",
@@ -6489,9 +6584,9 @@ async function registerRoutes(httpServer, app) {
         return res.status(201).json({ ...upd, corrected: true });
       }
     }
-    const { data, error } = await client2.from("daily_reports").insert(row).select().single();
+    const { data, error } = await client3.from("daily_reports").insert(row).select().single();
     if (error) return res.status(400).json({ message: error.message });
-    await client2.from("daily_report_events").insert({
+    await client3.from("daily_report_events").insert({
       report_id: data.id,
       actor_name: p.sender_name || p.sender_email,
       actor_role: "field",
@@ -6499,7 +6594,7 @@ async function registerRoutes(httpServer, app) {
       detail: `Imported ${excel.source_sheet} from "${p.attachment_name}"` + (job_id ? matchedByJobNumber ? ` and matched job "${excel.job_number}" (from workbook cell V8) to this report.` : ` and matched well "${excel.well_name}" to a job.` : ` \u2014 ${excel.job_number ? `job number "${excel.job_number}" (V8) and ` : ""}well "${excel.well_name ?? "(none)"}" did not match any job; awaiting assignment.`)
     });
     if (missingFields.length) {
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_report_events").insert({
         report_id: data.id,
         actor_name: "System",
         actor_role: "field",
@@ -6517,7 +6612,7 @@ async function registerRoutes(httpServer, app) {
       const parsed = backfillDailyReportSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const p = parsed.data;
       const scope = areaScopeOf(req.profile);
       let days;
@@ -6534,7 +6629,7 @@ async function registerRoutes(httpServer, app) {
       const wellName = days.find((d) => d.well_name)?.well_name ?? null;
       const jobNumber = days.find((d) => d.job_number)?.job_number ?? null;
       const operator = days.find((d) => d.well_context?.operator)?.well_context?.operator ?? null;
-      const resolved = await resolveJobForWell(client2, wellName, jobNumber, operator);
+      const resolved = await resolveJobForWell(client3, wellName, jobNumber, operator);
       let job_id = resolved.job_id;
       let area = resolved.area;
       let customer_id = resolved.customer_id;
@@ -6545,7 +6640,7 @@ async function registerRoutes(httpServer, app) {
       }
       let centrifuges = [];
       if (job_id) {
-        const { data: centAssets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", job_id).in("category", RUN_HOUR_CATEGORIES);
+        const { data: centAssets } = await client3.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", job_id).in("category", RUN_HOUR_CATEGORIES);
         centrifuges = centAssets || [];
       }
       const backfillNeedsMapping = !!job_id && centrifuges.length >= 2 && centrifuges.some((c) => !isMappedSlot(c.centrifuge_slot));
@@ -6556,7 +6651,7 @@ async function registerRoutes(httpServer, app) {
       for (const excel of days) {
         const dedupeKey = `backfill:${(wellName || "unknown").toLowerCase()}:${excel.report_day}:${p.attachment_name}`;
         try {
-          const { data: existing } = await client2.from("daily_reports").select("id, status").eq("email_message_id", dedupeKey).maybeSingle();
+          const { data: existing } = await client3.from("daily_reports").select("id, status").eq("email_message_id", dedupeKey).maybeSingle();
           if (existing) {
             results.push({
               report_day: excel.report_day,
@@ -6574,7 +6669,7 @@ async function registerRoutes(httpServer, app) {
           const dayWell = String(excel.well_name ?? wellName ?? "").trim();
           if (dayWell && (excel.report_day != null || excel.report_date)) {
             const likeWell = dayWell.replace(/[\\%_]/g, (c) => `\\${c}`);
-            let q = client2.from("daily_reports").select("id, status, sender_name, email_message_id").ilike("well_name", likeWell);
+            let q = client3.from("daily_reports").select("id, status, sender_name, email_message_id").ilike("well_name", likeWell);
             q = excel.report_day != null ? q.eq("report_day", excel.report_day) : q.eq("report_date", excel.report_date);
             q = job_id ? q.eq("job_id", job_id) : q.is("job_id", null);
             const { data: same } = await q.limit(1);
@@ -6626,11 +6721,11 @@ async function registerRoutes(httpServer, app) {
             for (const a of dayAlloc) {
               let base = runHourTally.get(a.id);
               if (base == null) {
-                const { data: cur } = await client2.from("assets").select("run_hours").eq("id", a.id).single();
+                const { data: cur } = await client3.from("assets").select("run_hours").eq("id", a.id).single();
                 base = Number(cur?.run_hours ?? 0) || 0;
               }
               const next = base + a.add;
-              const { error: uErr } = await client2.from("assets").update({ run_hours: next }).eq("id", a.id);
+              const { error: uErr } = await client3.from("assets").update({ run_hours: next }).eq("id", a.id);
               if (uErr) throw new Error(`run hours for ${a.tag}: ${uErr.message}`);
               runHourTally.set(a.id, next);
               applied.push(`${a.tag} +${Math.round(a.add * 100) / 100} hrs`);
@@ -6672,11 +6767,11 @@ async function registerRoutes(httpServer, app) {
             reviewed_at: job_id ? now : null,
             run_hours_applied: willAccrue
           };
-          const { data: inserted, error } = await client2.from("daily_reports").insert(row).select().single();
+          const { data: inserted, error } = await client3.from("daily_reports").insert(row).select().single();
           if (error) throw new Error(error.message);
           if (willAccrue)
             await logRunHours(
-              client2,
+              client3,
               {
                 id: inserted.id,
                 job_id,
@@ -6685,7 +6780,7 @@ async function registerRoutes(httpServer, app) {
               },
               dayAlloc.map((x) => ({ asset_id: x.id, add: x.add }))
             );
-          await client2.from("daily_report_events").insert({
+          await client3.from("daily_report_events").insert({
             report_id: inserted.id,
             actor_id: reviewer.id,
             actor_name: reviewer.name,
@@ -6694,7 +6789,7 @@ async function registerRoutes(httpServer, app) {
             detail: `Historical backfill of ${excel.source_sheet} from "${p.attachment_name}"` + (job_id ? ` \u2014 matched well "${excel.well_name}" and imported as signed off.` : ` \u2014 well "${excel.well_name ?? "(none)"}" did not match any job; awaiting assignment.`)
           });
           if (job_id) {
-            await client2.from("daily_report_events").insert({
+            await client3.from("daily_report_events").insert({
               report_id: inserted.id,
               actor_id: reviewer.id,
               actor_name: reviewer.name,
@@ -6750,13 +6845,13 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const jobId = typeof req.body?.job_id === "string" && req.body.job_id.trim() ? req.body.job_id.trim() : null;
       const rawLimit = Number(req.body?.limit);
       const batchLimit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.floor(rawLimit), 25) : 12;
       const rawOffset = Number(req.body?.offset);
       const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
-      let listQ = client2.from("daily_reports").select("id, report_day, kpis, well_context", { count: "exact" }).not("attachment_base64", "is", null).order("created_at", { ascending: true }).range(offset, offset + batchLimit - 1);
+      let listQ = client3.from("daily_reports").select("id, report_day, kpis, well_context", { count: "exact" }).not("attachment_base64", "is", null).order("created_at", { ascending: true }).range(offset, offset + batchLimit - 1);
       if (jobId) listQ = listQ.eq("job_id", jobId);
       const { data: rows, error, count } = await listQ;
       if (error) return res.status(400).json({ message: error.message });
@@ -6767,7 +6862,7 @@ async function registerRoutes(httpServer, app) {
       const problems = [];
       for (const r of rows || []) {
         try {
-          const { data: full, error: fErr } = await client2.from("daily_reports").select("attachment_base64").eq("id", r.id).single();
+          const { data: full, error: fErr } = await client3.from("daily_reports").select("attachment_base64").eq("id", r.id).single();
           if (fErr) {
             errors += 1;
             problems.push({ id: r.id, message: fErr.message });
@@ -6791,7 +6886,7 @@ async function registerRoutes(httpServer, app) {
           }
           const patch = { kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map };
           if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud };
-          const { error: upErr } = await client2.from("daily_reports").update(patch).eq("id", r.id);
+          const { error: upErr } = await client3.from("daily_reports").update(patch).eq("id", r.id);
           if (upErr) {
             errors += 1;
             problems.push({ id: r.id, message: upErr.message });
@@ -6831,26 +6926,26 @@ async function registerRoutes(httpServer, app) {
       const parsed = assignDailyReportJobSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report, error: rErr } = await client2.from("daily_reports").select("*").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client3.from("daily_reports").select("*").eq("id", req.params.id).single();
       if (rErr || !report)
         return res.status(404).json({ message: "Report not found" });
-      const { data: job, error: jErr } = await client2.from("jobs").select("id, area, customer_id, job_number").eq("id", parsed.data.job_id).single();
+      const { data: job, error: jErr } = await client3.from("jobs").select("id, area, customer_id, job_number").eq("id", parsed.data.job_id).single();
       if (jErr || !job)
         return res.status(404).json({ message: "Job not found" });
-      if (await jobIsArchived(client2, job.id))
+      if (await jobIsArchived(client3, job.id))
         return res.status(409).json({ message: ARCHIVED_JOB_MSG });
       const scope = areaScopeOf(req.profile);
       if (scope && job.area !== scope)
         return res.status(403).json({ message: "You can only assign reports to jobs in your area." });
-      const { data, error } = await client2.from("daily_reports").update({
+      const { data, error } = await client3.from("daily_reports").update({
         job_id: job.id,
         area: job.area,
         customer_id: job.customer_id,
         status: "Pending Review"
       }).eq("id", report.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_report_events").insert({
         report_id: report.id,
         actor_id: req.profile.id,
         actor_name: req.profile.name,
@@ -7073,8 +7168,8 @@ async function registerRoutes(httpServer, app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report, error: rErr } = await client2.from("daily_reports").select("id, area, job_id, kpis, run_hours_applied").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client3.from("daily_reports").select("id, area, job_id, kpis, run_hours_applied").eq("id", req.params.id).single();
       if (rErr || !report)
         return res.status(404).json({ message: "Report not found" });
       const scope = areaScopeOf(req.profile);
@@ -7090,7 +7185,7 @@ async function registerRoutes(httpServer, app) {
       const daily_run_hours_cent4 = bySlot[4];
       let centrifuges = [];
       if (report.job_id) {
-        const { data: assets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot, is_rental, rental_vendor").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+        const { data: assets } = await client3.from("assets").select("id, tag, category, run_hours, centrifuge_slot, is_rental, rental_vendor").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
         centrifuges = (assets || []).map((a) => ({
           id: a.id,
           tag: a.tag,
@@ -7121,10 +7216,10 @@ async function registerRoutes(httpServer, app) {
       });
     }
   );
-  async function emailChangeRequest(client2, report, reviewerName, notes) {
+  async function emailChangeRequest(client3, report, reviewerName, notes) {
     let jobNumber = null;
     if (report.job_id) {
-      const { data: job } = await client2.from("jobs").select("job_number").eq("id", report.job_id).maybeSingle();
+      const { data: job } = await client3.from("jobs").select("job_number").eq("id", report.job_id).maybeSingle();
       jobNumber = job?.job_number ?? null;
     }
     return sendDailyReportChanges({
@@ -7147,8 +7242,8 @@ async function registerRoutes(httpServer, app) {
       const parsed = reviewDailyReportSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report, error: rErr } = await client2.from("daily_reports").select("*").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client3.from("daily_reports").select("*").eq("id", req.params.id).single();
       if (rErr || !report)
         return res.status(404).json({ message: "Report not found" });
       const scope = areaScopeOf(req.profile);
@@ -7170,7 +7265,7 @@ async function registerRoutes(httpServer, app) {
         const slot1Hours = bySlot[1];
         const anyHours = dailyHours != null && dailyHours > 0 || Object.values(bySlot).some((h) => h != null && h > 0);
         if (!report.run_hours_applied && report.job_id && anyHours) {
-          const { data: centAssets } = await client2.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
+          const { data: centAssets } = await client3.from("assets").select("id, tag, category, run_hours, centrifuge_slot").eq("job_id", report.job_id).in("category", RUN_HOUR_CATEGORIES);
           const centrifuges = centAssets || [];
           let allocation = [];
           if (centrifuges.length === 1) {
@@ -7202,7 +7297,7 @@ async function registerRoutes(httpServer, app) {
             const cur = centrifuges.find((x) => x.id === a.asset_id);
             const base = Number(cur?.run_hours ?? 0) || 0;
             const next = base + a.add;
-            const { error: uErr } = await client2.from("assets").update({ run_hours: next }).eq("id", a.asset_id);
+            const { error: uErr } = await client3.from("assets").update({ run_hours: next }).eq("id", a.asset_id);
             if (uErr)
               return res.status(400).json({
                 message: `Could not update run hours for ${a.tag}: ${uErr.message}`
@@ -7212,7 +7307,7 @@ async function registerRoutes(httpServer, app) {
           if (applied.length > 0)
             runHourDetail = `Run hours applied: ${applied.join(", ")}`;
           await logRunHours(
-            client2,
+            client3,
             {
               id: report.id,
               job_id: report.job_id,
@@ -7222,7 +7317,7 @@ async function registerRoutes(httpServer, app) {
             allocation.map((x) => ({ asset_id: x.asset_id, add: x.add }))
           );
         }
-        const { data: data2, error: error2 } = await client2.from("daily_reports").update({
+        const { data: data2, error: error2 } = await client3.from("daily_reports").update({
           status: "Signed off",
           reviewed_by: reviewer.id,
           reviewed_by_name: reviewer.name,
@@ -7231,7 +7326,7 @@ async function registerRoutes(httpServer, app) {
           run_hours_applied: runHourDetail ? true : report.run_hours_applied
         }).eq("id", report.id).select().single();
         if (error2) return res.status(400).json({ message: error2.message });
-        await client2.from("daily_report_events").insert({
+        await client3.from("daily_report_events").insert({
           report_id: report.id,
           actor_id: reviewer.id,
           actor_name: reviewer.name,
@@ -7248,8 +7343,8 @@ async function registerRoutes(httpServer, app) {
 ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         typed
       ].filter(Boolean).join("\n\n");
-      const sent = await emailChangeRequest(client2, report, reviewer.name, fullNotes);
-      const { data, error } = await client2.from("daily_reports").update({
+      const sent = await emailChangeRequest(client3, report, reviewer.name, fullNotes);
+      const { data, error } = await client3.from("daily_reports").update({
         status: "Changes requested",
         reviewed_by: reviewer.id,
         reviewed_by_name: reviewer.name,
@@ -7264,7 +7359,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         email_out_at: sent.ok ? now : null
       }).eq("id", report.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_report_events").insert({
         report_id: report.id,
         actor_id: reviewer.id,
         actor_name: reviewer.name,
@@ -7280,23 +7375,23 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report, error: rErr } = await client2.from("daily_reports").select("*").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client3.from("daily_reports").select("*").eq("id", req.params.id).single();
       if (rErr || !report) return res.status(404).json({ message: "Report not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && report.area !== scope) return res.status(404).json({ message: "Report not found" });
       if (report.status !== "Changes requested" || !report.change_notes)
         return res.status(400).json({ message: "Only reports with changes requested can be re-sent." });
       const reviewerName = report.reviewed_by_name || req.profile.name;
-      const sent = await emailChangeRequest(client2, report, reviewerName, report.change_notes);
+      const sent = await emailChangeRequest(client3, report, reviewerName, report.change_notes);
       const now = (/* @__PURE__ */ new Date()).toISOString();
-      const { data, error } = await client2.from("daily_reports").update({
+      const { data, error } = await client3.from("daily_reports").update({
         analysis: { ...report.analysis || {}, email_out_error: sent.ok ? null : sent.error ?? null },
         email_out_status: sent.ok ? "Sent" : "Not sent",
         email_out_at: sent.ok ? now : report.email_out_at
       }).eq("id", report.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_report_events").insert({
         report_id: report.id,
         actor_id: req.profile.id,
         actor_name: req.profile.name,
@@ -7323,8 +7418,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       res.status(400).json({ message: "Upload the daily report Excel workbook (.xlsx)." });
       return null;
     }
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: report } = await client2.from("daily_reports").select("*").eq("id", req.params.id).maybeSingle();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: report } = await client3.from("daily_reports").select("*").eq("id", req.params.id).maybeSingle();
     const scope = areaScopeOf(req.profile);
     if (!report || scope && report.area !== scope) {
       res.status(404).json({ message: "Report not found" });
@@ -7375,7 +7470,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       summary: excel.summary
     };
     const changes = describeReportChanges(report, next);
-    const missingFields = dropManualRateField(excel.missing_fields || [], report.job_id, await manualRateJobIds(client2)).map(
+    const missingFields = dropManualRateField(excel.missing_fields || [], report.job_id, await manualRateJobIds(client3)).map(
       (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
     );
     const warnings = [];
@@ -7386,7 +7481,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       );
     if (excel.incomplete)
       warnings.push(`${excel.source_sheet} in this file doesn't look filled in yet.`);
-    return { client: client2, report, next, changes, missingFields, warnings, excel };
+    return { client: client3, report, next, changes, missingFields, warnings, excel };
   }
   app.post(
     "/api/daily-reports/:id/replace-workbook/preview",
@@ -7412,7 +7507,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const prep = await prepareReplaceWorkbook(req, res);
       if (!prep) return;
-      const { client: client2, report, next, changes, missingFields } = prep;
+      const { client: client3, report, next, changes, missingFields } = prep;
       const actor = req.profile;
       const analysis = correctedAnalysis(
         report,
@@ -7426,7 +7521,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       analysis.workbook_replaced_by_name = actor.name;
       analysis.workbook_replaced_at = (/* @__PURE__ */ new Date()).toISOString();
       const status = report.status === "Needs job match" ? "Needs job match" : "Pending Review";
-      const { data: upd, error } = await client2.from("daily_reports").update({
+      const { data: upd, error } = await client3.from("daily_reports").update({
         ...next,
         status,
         reviewed_by: null,
@@ -7439,7 +7534,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       }).eq("id", report.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       const hoursChanged = changes.some((x) => x.startsWith("Run hours"));
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_report_events").insert({
         report_id: report.id,
         actor_id: actor.id,
         actor_name: actor.name,
@@ -7448,7 +7543,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         detail: `Uploaded "${next.attachment_name}" (${next.source_sheet}) to replace "${report.attachment_name ?? "the original workbook"}". ` + (changes.length ? `Changes: ${changes.join("; ")}. ` : "No values changed. ") + (report.status === "Signed off" ? "The sign-off was cleared; " : "") + `${status === "Pending Review" ? "Back to Pending Review." : "Still needs a job match."}` + (report.run_hours_applied && hoursChanged ? " Run hours from the original sign-off were already added to the centrifuges and were not changed; adjust the asset's run hours by hand if needed." : "")
       });
       if (missingFields.length) {
-        await client2.from("daily_report_events").insert({
+        await client3.from("daily_report_events").insert({
           report_id: report.id,
           actor_name: "System",
           actor_role: "field",
@@ -7460,8 +7555,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     }
   );
   async function loadCorrection(req, res) {
-    const client2 = supabaseAdmin || supabaseAnon;
-    const { data: c } = await client2.from("daily_reports").select("*").eq("id", req.params.id).maybeSingle();
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: c } = await client3.from("daily_reports").select("*").eq("id", req.params.id).maybeSingle();
     const scope = areaScopeOf(req.profile);
     if (!c || scope && c.area !== scope) {
       res.status(404).json({ message: "Report not found" });
@@ -7472,14 +7567,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       res.status(400).json({ message: "This report is not a pending correction." });
       return null;
     }
-    const { data: orig } = await client2.from("daily_reports").select("*").eq("id", originalId).maybeSingle();
+    const { data: orig } = await client3.from("daily_reports").select("*").eq("id", originalId).maybeSingle();
     if (!orig) {
       res.status(404).json({
         message: "The original report no longer exists. Discard this correction, or assign it to a job instead."
       });
       return null;
     }
-    return { client: client2, c, orig };
+    return { client: client3, c, orig };
   }
   app.post(
     "/api/daily-reports/:id/apply-correction",
@@ -7488,12 +7583,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const loaded = await loadCorrection(req, res);
       if (!loaded) return;
-      const { client: client2, c, orig } = loaded;
+      const { client: client3, c, orig } = loaded;
       const actor = req.profile;
       const changes = Array.isArray(c.analysis?.correction_changes) ? c.analysis.correction_changes : describeReportChanges(orig, c);
       const origEmailId = orig.email_message_id;
       const newEmailId = c.email_message_id;
-      const { error: e1 } = await client2.from("daily_reports").update({ email_message_id: `superseded:${c.id}` }).eq("id", c.id);
+      const { error: e1 } = await client3.from("daily_reports").update({ email_message_id: `superseded:${c.id}` }).eq("id", c.id);
       if (e1) return res.status(400).json({ message: e1.message });
       const analysis = correctedAnalysis(
         orig,
@@ -7505,7 +7600,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       delete analysis.pending_correction_id;
       const fields = correctionFields(c);
       fields.email_message_id = newEmailId;
-      const { data: upd, error: e2 } = await client2.from("daily_reports").update({
+      const { data: upd, error: e2 } = await client3.from("daily_reports").update({
         ...fields,
         status: "Pending Review",
         reviewed_by: null,
@@ -7515,12 +7610,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         analysis
       }).eq("id", orig.id).select().single();
       if (e2) {
-        await client2.from("daily_reports").update({ email_message_id: newEmailId }).eq("id", c.id);
+        await client3.from("daily_reports").update({ email_message_id: newEmailId }).eq("id", c.id);
         return res.status(400).json({ message: e2.message });
       }
-      await client2.from("daily_reports").delete().eq("id", c.id);
+      await client3.from("daily_reports").delete().eq("id", c.id);
       const hoursChanged = changes.some((x) => x.startsWith("Run hours"));
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_report_events").insert({
         report_id: orig.id,
         actor_id: actor.id,
         actor_name: actor.name,
@@ -7538,17 +7633,17 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const loaded = await loadCorrection(req, res);
       if (!loaded) return;
-      const { client: client2, c, orig } = loaded;
+      const { client: client3, c, orig } = loaded;
       const actor = req.profile;
       const analysis = { ...orig.analysis || {} };
       const ids = Array.isArray(analysis.superseded_email_ids) ? analysis.superseded_email_ids : [];
       if (!ids.includes(c.email_message_id)) ids.push(c.email_message_id);
       analysis.superseded_email_ids = ids;
       delete analysis.pending_correction_id;
-      const { error } = await client2.from("daily_reports").update({ analysis }).eq("id", orig.id);
+      const { error } = await client3.from("daily_reports").update({ analysis }).eq("id", orig.id);
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("daily_reports").delete().eq("id", c.id);
-      await client2.from("daily_report_events").insert({
+      await client3.from("daily_reports").delete().eq("id", c.id);
+      await client3.from("daily_report_events").insert({
         report_id: orig.id,
         actor_id: actor.id,
         actor_name: actor.name,
@@ -7577,10 +7672,10 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const parsed = updateDailyReportConfigSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const patch = { ...parsed.data, updated_at: (/* @__PURE__ */ new Date()).toISOString() };
       if (patch.inbox_email === "") patch.inbox_email = null;
-      const { data, error } = await client2.from("daily_report_config").update(patch).eq("id", 1).select().single();
+      const { data, error } = await client3.from("daily_report_config").update(patch).eq("id", 1).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(data);
     }
@@ -7687,9 +7782,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     const parsed = ingestJsaSchema.safeParse(req.body);
     if (!parsed.success)
       return res.status(400).json({ message: parsed.error.errors[0].message });
-    const client2 = supabaseAdmin || supabaseAnon;
+    const client3 = supabaseAdmin || supabaseAnon;
     const p = parsed.data;
-    const { data: existing } = await client2.from("jsa_reports").select(JSA_LIST_COLS).eq("email_message_id", p.email_message_id).maybeSingle();
+    const { data: existing } = await client3.from("jsa_reports").select(JSA_LIST_COLS).eq("email_message_id", p.email_message_id).maybeSingle();
     if (existing) return res.status(200).json({ ...existing, deduped: true });
     const word = isWordJsa(p.attachment_name, p.attachment_mime);
     const rigFromWorkbook = word ? null : readJsaRigNameFromWorkbook(p.attachment_base64, p.attachment_mime);
@@ -7705,7 +7800,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     let customer_id = null;
     let jobNumber = candidates[0]?.value ?? subjectNumber ?? null;
     let matchSource = candidates[0]?.source ?? (subjectNumber ? "email subject" : null);
-    const { data: allJobs } = await client2.from("jobs").select("id, area, customer_id, job_number").is("archived_at", null);
+    const { data: allJobs } = await client3.from("jobs").select("id, area, customer_id, job_number").is("archived_at", null);
     const findJob = (v) => (allJobs || []).find((j) => normJobId(j.job_number) === normJobId(v));
     for (const c of candidates) {
       const m = findJob(c.value);
@@ -7729,7 +7824,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       }
     }
     if (!job_id) {
-      const { data: sib } = await client2.from("daily_reports").select("job_id, area, customer_id, job:jobs(job_number)").eq("email_message_id", p.email_message_id).not("job_id", "is", null).limit(1);
+      const { data: sib } = await client3.from("daily_reports").select("job_id, area, customer_id, job:jobs(job_number)").eq("email_message_id", p.email_message_id).not("job_id", "is", null).limit(1);
       const r = (sib || [])[0];
       if (r?.job_id) {
         job_id = r.job_id;
@@ -7780,9 +7875,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       job_id,
       status
     };
-    const { data, error } = await client2.from("jsa_reports").insert(row).select(JSA_LIST_COLS).single();
+    const { data, error } = await client3.from("jsa_reports").insert(row).select(JSA_LIST_COLS).single();
     if (error) return res.status(400).json({ message: error.message });
-    await client2.from("jsa_report_events").insert({
+    await client3.from("jsa_report_events").insert({
       jsa_id: data.id,
       actor_name: p.sender_name || p.sender_email,
       actor_role: "field",
@@ -7981,24 +8076,24 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const parsed = assignJsaJobSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: jsa, error: jErr } = await client2.from("jsa_reports").select(JSA_LIST_COLS).eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: jsa, error: jErr } = await client3.from("jsa_reports").select(JSA_LIST_COLS).eq("id", req.params.id).single();
       if (jErr || !jsa) return res.status(404).json({ message: "JSA not found" });
-      const { data: job, error: jobErr } = await client2.from("jobs").select("id, area, customer_id, job_number").eq("id", parsed.data.job_id).single();
+      const { data: job, error: jobErr } = await client3.from("jobs").select("id, area, customer_id, job_number").eq("id", parsed.data.job_id).single();
       if (jobErr || !job) return res.status(404).json({ message: "Job not found" });
-      if (await jobIsArchived(client2, job.id))
+      if (await jobIsArchived(client3, job.id))
         return res.status(409).json({ message: ARCHIVED_JOB_MSG });
       const scope = areaScopeOf(req.profile);
       if (scope && job.area !== scope)
         return res.status(403).json({ message: "You can only assign JSAs to jobs in your area." });
-      const { data, error } = await client2.from("jsa_reports").update({
+      const { data, error } = await client3.from("jsa_reports").update({
         job_id: job.id,
         area: job.area,
         customer_id: job.customer_id,
         status: "Pending sign-off"
       }).eq("id", jsa.id).select(JSA_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("jsa_report_events").insert({
+      await client3.from("jsa_report_events").insert({
         jsa_id: jsa.id,
         actor_id: req.profile.id,
         actor_name: req.profile.name,
@@ -8014,8 +8109,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: jsa, error: jErr } = await client2.from("jsa_reports").select(JSA_LIST_COLS).eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: jsa, error: jErr } = await client3.from("jsa_reports").select(JSA_LIST_COLS).eq("id", req.params.id).single();
       if (jErr || !jsa) return res.status(404).json({ message: "JSA not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && jsa.area !== scope)
@@ -8026,14 +8121,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         return res.status(409).json({ message: "This JSA is already signed off." });
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const signer = req.profile;
-      const { data, error } = await client2.from("jsa_reports").update({
+      const { data, error } = await client3.from("jsa_reports").update({
         status: "Signed off",
         signed_off_by: signer.id,
         signed_off_by_name: signer.name,
         signed_off_at: now
       }).eq("id", jsa.id).select(JSA_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("jsa_report_events").insert({
+      await client3.from("jsa_report_events").insert({
         jsa_id: jsa.id,
         actor_id: signer.id,
         actor_name: signer.name,
@@ -8083,14 +8178,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const p = parsed.data;
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job, error: jobErr } = await client2.from("jobs").select("id, area, customer_id, job_number").eq("id", p.job_id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job, error: jobErr } = await client3.from("jobs").select("id, area, customer_id, job_number").eq("id", p.job_id).single();
       if (jobErr || !job) return res.status(404).json({ message: "Job not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && job.area !== scope)
         return res.status(403).json({ message: "You can only upload rig-up reports for jobs in your area." });
       const bytes = Buffer.from(p.attachment_base64, "base64");
-      const { data, error } = await client2.from("rig_up_reports").insert({
+      const { data, error } = await client3.from("rig_up_reports").insert({
         job_id: job.id,
         area: job.area,
         customer_id: job.customer_id,
@@ -8106,7 +8201,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         uploaded_by_name: req.profile.name
       }).select(RIG_UP_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("rig_up_report_events").insert({
+      await client3.from("rig_up_report_events").insert({
         rig_up_id: data.id,
         actor_id: req.profile.id,
         actor_name: req.profile.name,
@@ -8148,8 +8243,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const p = parsed.data;
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: job, error: jobErr } = await client2.from("jobs").select("id, area, customer_id, job_number").eq("id", p.job_id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: job, error: jobErr } = await client3.from("jobs").select("id, area, customer_id, job_number").eq("id", p.job_id).single();
       if (jobErr || !job) return res.status(404).json({ message: "Job not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && job.area !== scope)
@@ -8184,7 +8279,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           message: `Answer all required questions (${missing.length} left). First one: "${missing[0]}"`
         });
       const reportDate = /^\d{4}-\d{2}-\d{2}/.test(p.conducted_on) ? p.conducted_on.slice(0, 10) : null;
-      const { data, error } = await client2.from("rig_up_reports").insert({
+      const { data, error } = await client3.from("rig_up_reports").insert({
         job_id: job.id,
         area: job.area,
         customer_id: job.customer_id,
@@ -8205,7 +8300,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         uploaded_by_name: req.profile.name
       }).select(RIG_UP_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("rig_up_report_events").insert({
+      await client3.from("rig_up_report_events").insert({
         rig_up_id: data.id,
         actor_id: req.profile.id,
         actor_name: req.profile.name,
@@ -8221,15 +8316,15 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     async (req, res) => {
       const rid = String(req.params.id);
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data, error } = await client2.from("rig_up_reports").select(
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client3.from("rig_up_reports").select(
         `${RIG_UP_LIST_COLS}, checklist, jobs:jobs!rig_up_reports_job_id_fkey(job_number, well_name), customers:customers!rig_up_reports_customer_id_fkey(name)`
       ).eq("id", rid).single();
       if (error || !data) return res.status(404).json({ message: "Rig-up report not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && data.area !== scope)
         return res.status(404).json({ message: "Rig-up report not found" });
-      const { data: photos } = await client2.from("rig_up_report_photos").select("id, file_name, file_mime, caption, created_at").eq("rig_up_id", rid).order("created_at", { ascending: true });
+      const { data: photos } = await client3.from("rig_up_report_photos").select("id, file_name, file_mime, caption, created_at").eq("rig_up_id", rid).order("created_at", { ascending: true });
       const { jobs, customers, ...rest } = data;
       res.json({
         ...rest,
@@ -8252,19 +8347,19 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         return res.status(400).json({ message: parsed.error.errors[0].message });
       if (!parsed.data.file_mime.startsWith("image/"))
         return res.status(400).json({ message: "Photos must be images." });
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: rep } = await client2.from("rig_up_reports").select("id, area, status, kind").eq("id", rid).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: rep } = await client3.from("rig_up_reports").select("id, area, status, kind").eq("id", rid).single();
       if (!rep) return res.status(404).json({ message: "Rig-up report not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && rep.area !== scope)
         return res.status(404).json({ message: "Rig-up report not found" });
       if (rep.status === "Signed off")
         return res.status(409).json({ message: "This report is already signed off." });
-      const { count } = await client2.from("rig_up_report_photos").select("id", { count: "exact", head: true }).eq("rig_up_id", rid);
+      const { count } = await client3.from("rig_up_report_photos").select("id", { count: "exact", head: true }).eq("rig_up_id", rid);
       if ((count || 0) >= 24)
         return res.status(400).json({ message: "A report can have up to 24 photos." });
       const bytes = Buffer.from(parsed.data.file_base64, "base64");
-      const { data, error } = await client2.from("rig_up_report_photos").insert({
+      const { data, error } = await client3.from("rig_up_report_photos").insert({
         rig_up_id: rid,
         file_name: parsed.data.file_name,
         file_mime: parsed.data.file_mime,
@@ -8282,12 +8377,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     async (req, res) => {
       const rid = String(req.params.id);
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: rep } = await client2.from("rig_up_reports").select("area").eq("id", rid).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: rep } = await client3.from("rig_up_reports").select("area").eq("id", rid).single();
       const scope = areaScopeOf(req.profile);
       if (!rep || scope && rep.area !== scope)
         return res.status(404).json({ message: "Photo not found" });
-      const { data: ph } = await client2.from("rig_up_report_photos").select("file_mime, file_base64").eq("id", String(req.params.photoId)).eq("rig_up_id", rid).single();
+      const { data: ph } = await client3.from("rig_up_report_photos").select("file_mime, file_base64").eq("id", String(req.params.photoId)).eq("rig_up_id", rid).single();
       if (!ph) return res.status(404).json({ message: "Photo not found" });
       res.setHeader("Content-Type", ph.file_mime || "image/jpeg");
       res.setHeader("Cache-Control", "private, max-age=3600");
@@ -8299,8 +8394,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report, error: rErr } = await client2.from("rig_up_reports").select(RIG_UP_LIST_COLS).eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client3.from("rig_up_reports").select(RIG_UP_LIST_COLS).eq("id", req.params.id).single();
       if (rErr || !report)
         return res.status(404).json({ message: "Rig-up report not found" });
       const scope = areaScopeOf(req.profile);
@@ -8312,14 +8407,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         return res.status(409).json({ message: "This rig-up report is already signed off." });
       const now = (/* @__PURE__ */ new Date()).toISOString();
       const signer = req.profile;
-      const { data, error } = await client2.from("rig_up_reports").update({
+      const { data, error } = await client3.from("rig_up_reports").update({
         status: "Signed off",
         signed_off_by: signer.id,
         signed_off_by_name: signer.name,
         signed_off_at: now
       }).eq("id", report.id).select(RIG_UP_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
-      await client2.from("rig_up_report_events").insert({
+      await client3.from("rig_up_report_events").insert({
         rig_up_id: report.id,
         actor_id: signer.id,
         actor_name: signer.name,
@@ -8335,14 +8430,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
-      const { data: report, error: rErr } = await client2.from("rig_up_reports").select("id, area").eq("id", req.params.id).single();
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: report, error: rErr } = await client3.from("rig_up_reports").select("id, area").eq("id", req.params.id).single();
       if (rErr || !report)
         return res.status(404).json({ message: "Rig-up report not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && report.area !== scope)
         return res.status(404).json({ message: "Rig-up report not found" });
-      const { error } = await client2.from("rig_up_reports").delete().eq("id", report.id);
+      const { error } = await client3.from("rig_up_reports").delete().eq("id", report.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -8400,7 +8495,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const p = parsed.data;
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const { data: emp, error: eErr } = await supabaseAnon.from("profiles").select("id, role, area").eq("id", p.profile_id).single();
       if (eErr || !emp)
         return res.status(404).json({ message: "Employee not found" });
@@ -8425,7 +8520,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         row.attachment_mime = p.attachment_mime ?? "application/octet-stream";
         row.attachment_size = bytes.length;
       }
-      const { data, error } = await client2.from("certifications").insert(row).select(CERT_LIST_COLS).single();
+      const { data, error } = await client3.from("certifications").insert(row).select(CERT_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json(data);
     }
@@ -8438,7 +8533,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const parsed = updateCertificationSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const { data: existing, error: exErr } = await supabaseAnon.from("certifications").select("id, profile_id, profiles:profiles!certifications_profile_id_fkey(area)").eq("id", req.params.id).single();
       if (exErr || !existing)
         return res.status(404).json({ message: "Certification not found" });
@@ -8446,7 +8541,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const empArea = existing.profiles?.area ?? null;
       if (scope && empArea !== scope)
         return res.status(404).json({ message: "Certification not found" });
-      const { data, error } = await client2.from("certifications").update(parsed.data).eq("id", req.params.id).select(CERT_LIST_COLS).single();
+      const { data, error } = await client3.from("certifications").update(parsed.data).eq("id", req.params.id).select(CERT_LIST_COLS).single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(data);
     }
@@ -8456,7 +8551,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const client2 = supabaseAdmin || supabaseAnon;
+      const client3 = supabaseAdmin || supabaseAnon;
       const { data: existing, error: exErr } = await supabaseAnon.from("certifications").select("id, profiles:profiles!certifications_profile_id_fkey(area)").eq("id", req.params.id).single();
       if (exErr || !existing)
         return res.status(404).json({ message: "Certification not found" });
@@ -8464,7 +8559,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const empArea = existing.profiles?.area ?? null;
       if (scope && empArea !== scope)
         return res.status(404).json({ message: "Certification not found" });
-      const { error } = await client2.from("certifications").delete().eq("id", req.params.id);
+      const { error } = await client3.from("certifications").delete().eq("id", req.params.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -8532,8 +8627,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
   async function resolveServiceWell(jobId, wellId) {
     if (wellId === null || wellId === void 0)
       return { ok: true, well_id: null, well_name: null };
-    const client2 = padClient();
-    const { data: well } = await client2.from("wells").select("id, name, job_id").eq("id", wellId).eq("job_id", jobId).maybeSingle();
+    const client3 = padClient();
+    const { data: well } = await client3.from("wells").select("id, name, job_id").eq("id", wellId).eq("job_id", jobId).maybeSingle();
     if (!well)
       return { ok: false, message: "That well does not belong to this job" };
     const { byName, currentKey } = await wellReportStats(jobId);
@@ -8695,8 +8790,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : null;
   };
   async function wellReportStats(jobId) {
-    const client2 = padClient();
-    const { data: reports } = await client2.from("daily_reports").select("well_name, report_date, received_at, report_day, kpis").eq("job_id", jobId);
+    const client3 = padClient();
+    const { data: reports } = await client3.from("daily_reports").select("well_name, report_date, received_at, report_day, kpis").eq("job_id", jobId);
     const accruedOf = (r) => {
       const raw = r?.kpis?.accrued_current_well;
       if (raw == null) return null;
@@ -8772,11 +8867,11 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const job = await loadScopedJob(req, res, req.params.jobId);
       if (!job) return;
-      const client2 = padClient();
-      const { data: pads, error } = await client2.from("pads").select("*").eq("job_id", job.id).order("created_at", { ascending: true });
+      const client3 = padClient();
+      const { data: pads, error } = await client3.from("pads").select("*").eq("job_id", job.id).order("created_at", { ascending: true });
       if (error) return res.status(400).json({ message: error.message });
-      const { data: wells } = await client2.from("wells").select("*").eq("job_id", job.id).order("created_at", { ascending: true });
-      const { data: jobRow } = await client2.from("jobs").select("id, day_rate, status, manual_day_rate").eq("id", job.id).single();
+      const { data: wells } = await client3.from("wells").select("*").eq("job_id", job.id).order("created_at", { ascending: true });
+      const { data: jobRow } = await client3.from("jobs").select("id, day_rate, status, manual_day_rate").eq("id", job.id).single();
       const manualBill = jobRow?.manual_day_rate ? (await computeManualBilling([jobRow])).get(job.id) : void 0;
       const dayRate = jobRow && jobRow.day_rate != null && !isNaN(Number(jobRow.day_rate)) ? Number(jobRow.day_rate) : null;
       const { byName, currentKey } = await wellReportStats(job.id);
@@ -8829,8 +8924,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const job = await loadScopedJob(req, res, req.params.jobId);
       if (!job) return;
-      const client2 = padClient();
-      const { data: wells } = await client2.from("wells").select("name").eq("job_id", job.id);
+      const client3 = padClient();
+      const { data: wells } = await client3.from("wells").select("name").eq("job_id", job.id);
       const attached = new Set(
         (wells ?? []).map((w) => normWellName(w.name))
       );
@@ -8843,6 +8938,104 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         is_current: currentKey != null && key === currentKey
       })).sort((a, b) => a.last_report < b.last_report ? 1 : -1);
       res.json(out);
+    }
+  );
+  const isoDay = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  async function loadStandbyJob(req, res) {
+    const { data, error } = await padClient().from("jobs").select("id, area, job_number, archived_at, manual_day_rate, manual_billing_mode").eq("id", String(req.params.id)).single();
+    if (error || !data) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    const scope = areaScopeOf(req.profile);
+    if (scope && data.area !== scope) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    return data;
+  }
+  app.get("/api/jobs/:id/standby", requireAuth, async (req, res) => {
+    const job = await loadScopedJob(req, res, req.params.id);
+    if (!job) return;
+    res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
+  });
+  app.post(
+    "/api/jobs/:id/standby",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      if (job.archived_at)
+        return res.status(400).json({ message: "This job is archived. Unarchive it first." });
+      if (job.manual_day_rate && ["calendar", "spud_to_latest"].includes(job.manual_billing_mode))
+        return res.status(400).json({
+          message: "This job already bills every calendar day at its set day rate, so standby would double-bill. Change the rate on the job instead."
+        });
+      const rate = Number(req.body?.rate);
+      if (!Number.isFinite(rate) || rate <= 0 || rate > 1e6)
+        return res.status(400).json({ message: "Enter a standby day rate greater than $0" });
+      const today = todayCentral();
+      const start = isoDay(req.body?.start_date) ?? today;
+      if (start > today)
+        return res.status(400).json({ message: "The standby start date can't be in the future" });
+      const current = (await standbyByJob([job.id])).get(job.id);
+      if (current?.active)
+        return res.status(409).json({ message: "This job is already on standby. End it first." });
+      if (current?.periods.some((p) => p.end_date && p.end_date >= start && p.start_date <= start))
+        return res.status(400).json({
+          message: "That start date falls inside an earlier standby period. Pick a later day."
+        });
+      const { data, error } = await padClient().from("job_standby_periods").insert({
+        job_id: job.id,
+        rate: Math.round(rate * 100) / 100,
+        start_date: start,
+        created_by: req.profile.id,
+        created_by_name: req.profile.name
+      }).select().single();
+      if (error) {
+        if (error.code === "23505")
+          return res.status(409).json({ message: "This job is already on standby." });
+        if (/does not exist|schema cache/i.test(error.message))
+          return res.status(500).json({ message: "Standby isn't set up yet \u2014 run the Job standby setup SQL in Supabase." });
+        return res.status(400).json({ message: error.message });
+      }
+      const after = (await standbyByJob([job.id])).get(job.id);
+      res.status(201).json({ period: data, standby: publicStandby(after) });
+    }
+  );
+  app.post(
+    "/api/jobs/:id/standby/end",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      const current = (await standbyByJob([job.id])).get(job.id);
+      if (!current?.active)
+        return res.status(400).json({ message: "This job isn't on standby." });
+      const open = current.periods.find((p) => !p.end_date);
+      const today = todayCentral();
+      const end = isoDay(req.body?.end_date) ?? today;
+      if (end > today)
+        return res.status(400).json({ message: "The last standby day can't be in the future" });
+      if (end < addDaysIso(open.start_date, -1))
+        return res.status(400).json({ message: "The last standby day can't be before the start date" });
+      const { error } = await padClient().from("job_standby_periods").update({ end_date: end, ended_reason: "manual", ended_by_name: req.profile.name }).eq("id", open.id).is("end_date", null);
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
+    }
+  );
+  app.delete(
+    "/api/jobs/:id/standby/:periodId",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      const { error } = await padClient().from("job_standby_periods").delete().eq("id", String(req.params.periodId)).eq("job_id", job.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
     }
   );
   async function serviceChargesByJob(jobIds) {
@@ -8868,8 +9061,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     const out = /* @__PURE__ */ new Map();
     for (const id of jobIds) out.set(id, { revenue: null, hasAccrued: false });
     if (jobIds.length === 0) return out;
-    const client2 = padClient();
-    const { data: reports } = await client2.from("daily_reports").select("job_id, well_name, report_date, received_at, report_day, kpis").in("job_id", jobIds);
+    const client3 = padClient();
+    const { data: reports } = await client3.from("daily_reports").select("job_id, well_name, report_date, received_at, report_day, kpis").in("job_id", jobIds);
     const accruedOf = (r) => {
       const raw = r?.kpis?.accrued_current_well;
       if (raw == null) return null;
@@ -8909,8 +9102,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireRole("admin", "area"),
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
-      const client2 = padClient();
-      let jq = client2.from("jobs").select("id, job_number, area, day_rate, customer_id, well_name, status, manual_day_rate").is("archived_at", null);
+      const client3 = padClient();
+      let jq = client3.from("jobs").select("id, job_number, area, day_rate, customer_id, well_name, status, manual_day_rate").is("archived_at", null);
       if (scope) jq = jq.eq("area", scope);
       const { data: jobs, error: jErr } = await jq;
       if (jErr) return res.status(500).json({ message: jErr.message });
@@ -8921,7 +9114,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       );
       const custName = /* @__PURE__ */ new Map();
       if (custIds.length) {
-        const { data: custs } = await client2.from("customers").select("id, name").in("id", custIds);
+        const { data: custs } = await client3.from("customers").select("id, name").in("id", custIds);
         for (const c of custs ?? []) custName.set(c.id, c.name);
       }
       const accrued = await jobAccruedRevenue(jobIds);
@@ -8937,7 +9130,17 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           hasAccrued: true
         });
       }
-      const { data: reps } = await client2.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
+      const standby = await standbyByJob(jobIds);
+      for (const [jid, sb] of Array.from(standby.entries())) {
+        if (!sb.total) continue;
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sb.total) * 100) / 100,
+          hasAccrued: true
+        });
+      }
+      const { data: reps } = await client3.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
       const jobFallbackRate = /* @__PURE__ */ new Map();
       for (const j of jobRows) {
         const dr = j.day_rate != null && !isNaN(Number(j.day_rate)) ? Number(j.day_rate) : null;
@@ -9009,6 +9212,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           const mon = day.slice(0, 7);
           monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
         }
+      for (const [jid, sb] of Array.from(standby.entries()))
+        for (const [day, amt] of Array.from(sb.byDay.entries())) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + amt);
+          if (!dailyJobsMap.has(day)) dailyJobsMap.set(day, /* @__PURE__ */ new Set());
+          dailyJobsMap.get(day).add(jid);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
+        }
       const dayRateOf = /* @__PURE__ */ new Map();
       for (const j of jobRows)
         dayRateOf.set(
@@ -9033,7 +9244,11 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           // has report activity
           last_report: lastReportByJob.get(j.id) ?? null,
           billing_basis: "reports",
-          service_charges: svcCharges.get(j.id)?.total ?? 0
+          service_charges: svcCharges.get(j.id)?.total ?? 0,
+          standby_total: standby.get(j.id)?.total ?? 0,
+          standby_days: standby.get(j.id)?.days ?? 0,
+          on_standby: !!standby.get(j.id)?.active,
+          standby_rate: standby.get(j.id)?.active ? standby.get(j.id).rate : null
         };
         const mb = manualBill.get(j.id);
         if (mb?.mode === "calendar") {
@@ -9041,6 +9256,10 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           row.report_days = Number(mb.billable_days ?? 0);
           row.last_report = mb.last_billed_date ?? null;
           row.billing_basis = "calendar";
+        }
+        if (row.on_standby) {
+          row.active = true;
+          row.day_rate = row.standby_rate;
         }
         return row;
       });
@@ -9113,7 +9332,20 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const activeStatusJobs = jobRows.filter(
         (j) => manualBill.has(j.id) ? j.status === "Active" : isLiveJobStatus(j.status)
       );
+      for (const j of jobRows)
+        if (standby.get(j.id)?.active && !activeStatusJobs.includes(j)) activeStatusJobs.push(j);
       const currentJobs = activeStatusJobs.map((j) => {
+        const sb = standby.get(j.id);
+        if (sb?.active)
+          return {
+            job_id: j.id,
+            job_number: j.job_number,
+            area: j.area,
+            day_rate: sb.rate,
+            source: "standby",
+            report_date: null,
+            report_day: null
+          };
         const mb = manualBill.get(j.id);
         if (mb)
           return {
@@ -9185,8 +9417,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireRole("admin", "area"),
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
-      const client2 = padClient();
-      let jq = client2.from("jobs").select("id, job_number, area, day_rate, customer_id, status, manual_day_rate").is("archived_at", null);
+      const client3 = padClient();
+      let jq = client3.from("jobs").select("id, job_number, area, day_rate, customer_id, status, manual_day_rate").is("archived_at", null);
       if (scope) jq = jq.eq("area", scope);
       const { data: jobs, error } = await jq;
       if (error) return res.status(500).json({ message: error.message });
@@ -9197,7 +9429,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       );
       const custName = /* @__PURE__ */ new Map();
       if (custIds.length) {
-        const { data: custs } = await client2.from("customers").select("id, name").in("id", custIds);
+        const { data: custs } = await client3.from("customers").select("id, name").in("id", custIds);
         for (const c of custs ?? []) custName.set(c.id, c.name);
       }
       const accrued = await jobAccruedRevenue(jobIds);
@@ -9213,7 +9445,17 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           hasAccrued: true
         });
       }
-      const { data: reps } = await client2.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
+      const standby = await standbyByJob(jobIds);
+      for (const [jid, sb] of Array.from(standby.entries())) {
+        if (!sb.total) continue;
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sb.total) * 100) / 100,
+          hasAccrued: true
+        });
+      }
+      const { data: reps } = await client3.from("daily_reports").select("job_id, report_date, received_at, report_day, kpis").in("job_id", jobIds.length ? jobIds : ["00000000-0000-0000-0000-000000000000"]);
       const reportDaysByJob = /* @__PURE__ */ new Map();
       const currentRateByJob = /* @__PURE__ */ new Map();
       const currentRateDayByJob = /* @__PURE__ */ new Map();
@@ -9246,13 +9488,15 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         "Customer",
         "Day Rate",
         "Report Days",
-        "Revenue (Accrued AS57)"
+        "Revenue (Accrued AS57)",
+        "Standby Days",
+        "Standby Revenue"
       ];
       const lines = [header.join(",")];
       for (const j of jobRows) {
         const acc = accrued.get(j.id) ?? { revenue: null };
         const fallback = j.day_rate != null && !isNaN(Number(j.day_rate)) ? Number(j.day_rate) : null;
-        const dr = manualBill.has(j.id) ? fallback : currentRateByJob.get(j.id) ?? fallback;
+        const dr = standby.get(j.id)?.active ? standby.get(j.id).rate : manualBill.has(j.id) ? fallback : currentRateByJob.get(j.id) ?? fallback;
         lines.push(
           [
             esc(j.job_number),
@@ -9260,7 +9504,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
             esc(j.customer_id ? custName.get(j.customer_id) ?? "" : ""),
             esc(dr ?? ""),
             esc(reportDaysByJob.get(j.id) ?? 0),
-            esc(acc.revenue ?? "")
+            esc(acc.revenue ?? ""),
+            esc(standby.get(j.id)?.days ?? 0),
+            esc(standby.get(j.id)?.total ?? 0)
           ].join(",")
         );
       }
@@ -9283,14 +9529,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const parsed = createPadSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = padClient();
-      const { data: existingPads } = await client2.from("pads").select("name").eq("job_id", job.id);
+      const client3 = padClient();
+      const { data: existingPads } = await client3.from("pads").select("name").eq("job_id", job.id);
       const maxN = (existingPads ?? []).reduce((m, p) => {
         const mm = /^Pad\s+(\d+)$/i.exec(String(p.name ?? "").trim());
         return mm ? Math.max(m, Number(mm[1])) : m;
       }, 0);
       const padName = `Pad ${Math.max(maxN, (existingPads ?? []).length) + 1}`;
-      const { data: pad, error } = await client2.from("pads").insert({
+      const { data: pad, error } = await client3.from("pads").insert({
         job_id: job.id,
         name: padName,
         status: "Open",
@@ -9314,7 +9560,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           created_by: req.profile.id,
           created_by_name: req.profile.name
         }));
-        const { data: inserted, error: wErr } = await client2.from("wells").insert(rows).select();
+        const { data: inserted, error: wErr } = await client3.from("wells").insert(rows).select();
         if (wErr) return res.status(400).json({ message: wErr.message });
         wells = inserted ?? [];
       }
@@ -9329,13 +9575,13 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const parsed = renamePadSchema.safeParse(req.body);
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
-      const client2 = padClient();
-      const { data: existing, error: loadErr } = await client2.from("pads").select("id, job_id").eq("id", req.params.padId).single();
+      const client3 = padClient();
+      const { data: existing, error: loadErr } = await client3.from("pads").select("id, job_id").eq("id", req.params.padId).single();
       if (loadErr || !existing)
         return res.status(404).json({ message: "Pad not found" });
       const job = await loadScopedJob(req, res, existing.job_id);
       if (!job) return;
-      const { data: pad, error } = await client2.from("pads").update({ name: parsed.data.name }).eq("id", req.params.padId).select().single();
+      const { data: pad, error } = await client3.from("pads").update({ name: parsed.data.name }).eq("id", req.params.padId).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(pad);
     }
@@ -9345,12 +9591,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const client2 = padClient();
-      const { data: pad } = await client2.from("pads").select("id, job_id, name").eq("id", req.params.padId).single();
+      const client3 = padClient();
+      const { data: pad } = await client3.from("pads").select("id, job_id, name").eq("id", req.params.padId).single();
       if (!pad) return res.status(404).json({ message: "Pad not found" });
       const job = await loadScopedJob(req, res, pad.job_id);
       if (!job) return;
-      const { error } = await client2.from("pads").delete().eq("id", pad.id);
+      const { error } = await client3.from("pads").delete().eq("id", pad.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -9365,8 +9611,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         return res.status(400).json({ message: "into_pad_id is required" });
       if (intoId === req.params.padId)
         return res.status(400).json({ message: "Pick a different pad" });
-      const client2 = padClient();
-      const { data: pads } = await client2.from("pads").select("id, job_id, name").in("id", [req.params.padId, intoId]);
+      const client3 = padClient();
+      const { data: pads } = await client3.from("pads").select("id, job_id, name").in("id", [req.params.padId, intoId]);
       const src = (pads ?? []).find((p) => p.id === req.params.padId);
       const dst = (pads ?? []).find((p) => p.id === intoId);
       if (!src || !dst) return res.status(404).json({ message: "Pad not found" });
@@ -9374,9 +9620,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         return res.status(400).json({ message: "Pads must be on the same job" });
       const job = await loadScopedJob(req, res, src.job_id);
       if (!job) return;
-      const { error: mErr } = await client2.from("wells").update({ pad_id: dst.id }).eq("pad_id", src.id);
+      const { error: mErr } = await client3.from("wells").update({ pad_id: dst.id }).eq("pad_id", src.id);
       if (mErr) return res.status(400).json({ message: mErr.message });
-      const { error: dErr } = await client2.from("pads").delete().eq("id", src.id);
+      const { error: dErr } = await client3.from("pads").delete().eq("id", src.id);
       if (dErr) return res.status(400).json({ message: dErr.message });
       res.json({ merged: true, into: dst });
     }
@@ -9386,8 +9632,8 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area", "super", "field"),
     async (req, res) => {
-      const client2 = padClient();
-      const { data: pad, error: pErr } = await client2.from("pads").select("id, job_id").eq("id", req.params.padId).single();
+      const client3 = padClient();
+      const { data: pad, error: pErr } = await client3.from("pads").select("id, job_id").eq("id", req.params.padId).single();
       if (pErr || !pad)
         return res.status(404).json({ message: "Pad not found" });
       const job = await loadScopedJob(req, res, pad.job_id);
@@ -9396,18 +9642,18 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       if (!parsed.success)
         return res.status(400).json({ message: parsed.error.errors[0].message });
       const key = normWellName(parsed.data.name);
-      const { data: jobWells } = await client2.from("wells").select("id, pad_id, name").eq("job_id", pad.job_id);
+      const { data: jobWells } = await client3.from("wells").select("id, pad_id, name").eq("job_id", pad.job_id);
       const existingWell = (jobWells ?? []).find(
         (w) => normWellName(w.name) === key
       );
       if (existingWell) {
         if (existingWell.pad_id === pad.id)
           return res.json({ ...existingWell, stints: [], unchanged: true });
-        const { data: moved, error: mErr } = await client2.from("wells").update({ pad_id: pad.id }).eq("id", existingWell.id).select().single();
+        const { data: moved, error: mErr } = await client3.from("wells").update({ pad_id: pad.id }).eq("id", existingWell.id).select().single();
         if (mErr) return res.status(400).json({ message: mErr.message });
         return res.json({ ...moved, stints: [], moved: true });
       }
-      const { data: well, error } = await client2.from("wells").insert({
+      const { data: well, error } = await client3.from("wells").insert({
         pad_id: pad.id,
         job_id: pad.job_id,
         name: parsed.data.name,
@@ -9426,15 +9672,15 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     async (req, res) => {
       const padId = typeof req.body?.pad_id === "string" ? req.body.pad_id : "";
       if (!padId) return res.status(400).json({ message: "pad_id is required" });
-      const client2 = padClient();
-      const { data: well } = await client2.from("wells").select("id, job_id, pad_id").eq("id", req.params.wellId).single();
+      const client3 = padClient();
+      const { data: well } = await client3.from("wells").select("id, job_id, pad_id").eq("id", req.params.wellId).single();
       if (!well) return res.status(404).json({ message: "Well not found" });
       const job = await loadScopedJob(req, res, well.job_id);
       if (!job) return;
-      const { data: target } = await client2.from("pads").select("id, job_id").eq("id", padId).single();
+      const { data: target } = await client3.from("pads").select("id, job_id").eq("id", padId).single();
       if (!target || target.job_id !== well.job_id)
         return res.status(400).json({ message: "Pad must be on the same job" });
-      const { data: moved, error } = await client2.from("wells").update({ pad_id: padId }).eq("id", well.id).select().single();
+      const { data: moved, error } = await client3.from("wells").update({ pad_id: padId }).eq("id", well.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.json(moved);
     }
@@ -9444,12 +9690,12 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const client2 = padClient();
-      const { data: well } = await client2.from("wells").select("id, job_id").eq("id", req.params.wellId).single();
+      const client3 = padClient();
+      const { data: well } = await client3.from("wells").select("id, job_id").eq("id", req.params.wellId).single();
       if (!well) return res.status(404).json({ message: "Well not found" });
       const job = await loadScopedJob(req, res, well.job_id);
       if (!job) return;
-      const { error } = await client2.from("wells").delete().eq("id", well.id);
+      const { error } = await client3.from("wells").delete().eq("id", well.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }

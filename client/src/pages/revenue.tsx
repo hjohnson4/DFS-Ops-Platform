@@ -43,6 +43,10 @@ type JobRow = {
   last_report: string | null;
   billing_basis?: "reports" | "calendar";
   service_charges?: number; // billed service charges included in revenue
+  standby_total?: number; // standby days billed, included in revenue
+  standby_days?: number;
+  on_standby?: boolean;
+  standby_rate?: number | null;
 };
 type AreaRow = { area: string; revenue: number | null; jobs: number };
 type CustomerRow = {
@@ -58,7 +62,7 @@ type CurrentDailyJob = {
   job_number: string;
   area: string;
   day_rate: number | null;
-  source: "report" | "job" | null;
+  source: "report" | "job" | "standby" | null;
   report_date: string | null;
   report_day: number | null;
 };
@@ -340,7 +344,9 @@ export default function RevenuePage() {
                             ? `${fmtDate(j.report_date)}${j.report_day ? ` · Day ${j.report_day}` : ""}`
                             : j.source === "job"
                               ? "Job day rate (no AL57 on reports)"
-                              : "—"}
+                              : j.source === "standby"
+                                ? "Standby rate (no crew on location)"
+                                : "—"}
                         </td>
                         <td className="px-4 py-2 text-right tabular-nums font-medium">{money(j.day_rate)}</td>
                       </tr>
@@ -593,6 +599,14 @@ export default function RevenuePage() {
                               <CheckCircle2 className="h-3 w-3" /> Not billing
                             </span>
                           )
+                        ) : j.on_standby ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-400"
+                            title={`On standby at ${money(j.standby_rate ?? null)}/day until daily reports start`}
+                            data-testid={`job-on-standby-${j.job_id}`}
+                          >
+                            <Activity className="h-3 w-3" /> Standby
+                          </span>
                         ) : j.active ? (
                           <span className="inline-flex items-center gap-1 text-xs text-primary">
                             <Activity className="h-3 w-3" /> Active
@@ -612,6 +626,15 @@ export default function RevenuePage() {
                             data-testid={`job-service-charges-${j.job_id}`}
                           >
                             incl. {money(j.service_charges ?? 0)} service
+                          </div>
+                        )}
+                        {(j.standby_total ?? 0) > 0 && (
+                          <div
+                            className="text-[11px] font-normal text-muted-foreground"
+                            title={`${j.standby_days ?? 0} standby days, included in this revenue`}
+                            data-testid={`job-standby-total-${j.job_id}`}
+                          >
+                            incl. {money(j.standby_total ?? 0)} standby
                           </div>
                         )}
                       </td>

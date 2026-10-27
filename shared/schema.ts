@@ -106,6 +106,30 @@ export interface Job {
   manual_billing_mode?: ManualBillingMode | null;
   billing_start_date?: string | null; // calendar mode (Mud Plant)
   manual_billing?: ManualBilling | null;
+  // Standby billing (equipment on location, no crew). See server/standby.ts.
+  standby?: JobStandby | null;
+}
+
+export interface JobStandbyPeriod {
+  id: string;
+  rate: number;
+  start_date: string; // first standby day
+  end_date: string | null; // last standby day; null = still on standby
+  ended_reason: "report" | "manual" | null;
+  created_by_name: string | null;
+  ended_by_name: string | null;
+  created_at: string | null;
+  days: number;
+  total: number;
+}
+
+export interface JobStandby {
+  active: boolean;
+  rate: number | null; // current standby day rate (when active)
+  start_date: string | null;
+  days: number; // every standby day so far
+  total: number; // standby revenue so far
+  periods: JobStandbyPeriod[]; // newest first
 }
 
 export interface ManualBillingEvent {

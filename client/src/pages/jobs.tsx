@@ -140,13 +140,15 @@ function JobRow({
   // Set day rate jobs (e.g. Verdun): the job's own rate, billed every Active
   // day — not read from the daily report.
   const mb = job.manual_day_rate ? job.manual_billing : null;
-  const r = job.manual_day_rate
+  let r = job.manual_day_rate
     ? {
         ...rollup,
         currentDayRate: job.day_rate == null ? null : Number(job.day_rate),
         accruedCurrent: mb ? mb.current_well_revenue : null,
       }
     : rollup;
+  const onStandby = !!job.standby?.active;
+  if (onStandby) r = { ...r, currentDayRate: job.standby!.rate };
 
   return (
     <tr
@@ -183,7 +185,11 @@ function JobRow({
         ) : (
           <span className="inline-flex flex-col leading-tight">
             {dayRateFmt(r.currentDayRate)}
-            {job.manual_day_rate && (
+            {onStandby ? (
+              <span className="text-xs font-medium text-amber-600 dark:text-amber-400" data-testid={`job-standby-rate-${job.id}`}>
+                Standby rate
+              </span>
+            ) : job.manual_day_rate && (
               <span className="text-xs text-muted-foreground" data-testid={`job-set-rate-${job.id}`}>
                 {job.status === "Active" ? "Set rate" : `Set rate · $0 on ${job.status}`}
               </span>

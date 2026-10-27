@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { RentalBadge } from "@/components/Rental";
 import { MudPlantBilling, DailyCentrifugeHours } from "@/components/MudPlantCards";
+import { JobStandbyCard, StandbyBadge } from "@/components/JobStandby";
 import { useRoute, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -387,6 +388,7 @@ export default function JobDetailPage() {
                   {job.status}
                 </span>
                 <CrewingBadge crewing={job.crewing ?? "Manned"} />
+                <StandbyBadge standby={job.standby} />
                 {job.archived_at && (
                   <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground" data-testid="badge-archived">
                     <Archive className="h-3 w-3" /> Archived
@@ -696,6 +698,7 @@ export default function JobDetailPage() {
       ) : (
         job.manual_day_rate && <SetRateBilling job={job} />
       )}
+      <JobStandbyCard job={job} canManage={canManageAssets} />
       {canEdit && <JobBidDocs jobId={job.id} canEdit={canManageAssets} />}
 
       {job.description && (

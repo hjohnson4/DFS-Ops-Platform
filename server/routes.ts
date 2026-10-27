@@ -17,6 +17,7 @@ import { registerFieldTicketRoutes } from "./fieldTickets";
 import { registerRentalRoutes, stripRentalMoney } from "./rentals";
 import { AREAS, isLiveJobStatus, assetStatusFor } from "@shared/schema";
 import { computeManualBilling, publicBilling, recordRateChange, todayCentral } from "./manualBilling";
+import { standbyByJob, publicStandby, addDaysIso } from "./standby";
 import {
   createUserSchema,
   updateUserSchema,
@@ -1867,11 +1868,13 @@ export async function registerRoutes(
     if (error) return res.status(500).json({ message: error.message });
     // flatten the joined customer name
     const billing = await computeManualBilling(data || []);
+    const standby = await standbyByJob((data || []).map((j: any) => j.id));
     const rows = (data || []).map((j: any) => ({
       ...j,
       customer_name: j.customer?.name ?? "",
       customer: undefined,
       manual_billing: j.manual_day_rate ? publicBilling(billing.get(j.id)) : null,
+      standby: publicStandby(standby.get(j.id)),
     }));
     res.json(rows);
   });
@@ -2474,6 +2477,7 @@ export async function registerRoutes(
       field_tech_ids: assignments.map((a: any) => a.profile_id),
       assignments,
       manual_billing: billing,
+      standby: publicStandby((await standbyByJob([rest.id])).get(rest.id)),
     });
   });
 
@@ -8946,6 +8950,137 @@ export async function registerRoutes(
     },
   );
 
+  // ---- Job standby billing ----------------------------------------------
+  // Equipment on location with no crew (no daily reports): admin / area
+  // managers put the job on standby at a standby day rate. Every standby day
+  // bills that rate until the first daily report arrives (standby then ends
+  // automatically the day before that report) or it is ended by hand.
+  const isoDay = (v: unknown) =>
+    typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  async function loadStandbyJob(req: Request, res: Response) {
+    const { data, error } = await padClient()
+      .from("jobs")
+      .select("id, area, job_number, archived_at, manual_day_rate, manual_billing_mode")
+      .eq("id", String(req.params.id))
+      .single();
+    if (error || !data) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    const scope = areaScopeOf(req.profile!);
+    if (scope && data.area !== scope) {
+      res.status(404).json({ message: "Job not found" });
+      return null;
+    }
+    return data as any;
+  }
+
+  app.get("/api/jobs/:id/standby", requireAuth, async (req: Request, res: Response) => {
+    const job = await loadScopedJob(req, res, req.params.id);
+    if (!job) return;
+    res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
+  });
+
+  // Put a job on standby: { rate, start_date }.
+  app.post(
+    "/api/jobs/:id/standby",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      if (job.archived_at)
+        return res.status(400).json({ message: "This job is archived. Unarchive it first." });
+      if (job.manual_day_rate && ["calendar", "spud_to_latest"].includes(job.manual_billing_mode))
+        return res.status(400).json({
+          message:
+            "This job already bills every calendar day at its set day rate, so standby would double-bill. Change the rate on the job instead.",
+        });
+      const rate = Number(req.body?.rate);
+      if (!Number.isFinite(rate) || rate <= 0 || rate > 1_000_000)
+        return res.status(400).json({ message: "Enter a standby day rate greater than $0" });
+      const today = todayCentral();
+      const start = isoDay(req.body?.start_date) ?? today;
+      if (start > today)
+        return res.status(400).json({ message: "The standby start date can't be in the future" });
+      const current = (await standbyByJob([job.id])).get(job.id);
+      if (current?.active)
+        return res.status(409).json({ message: "This job is already on standby. End it first." });
+      if (current?.periods.some((p) => p.end_date && p.end_date >= start && p.start_date <= start))
+        return res.status(400).json({
+          message: "That start date falls inside an earlier standby period. Pick a later day.",
+        });
+      const { data, error } = await padClient()
+        .from("job_standby_periods")
+        .insert({
+          job_id: job.id,
+          rate: Math.round(rate * 100) / 100,
+          start_date: start,
+          created_by: req.profile!.id,
+          created_by_name: req.profile!.name,
+        })
+        .select()
+        .single();
+      if (error) {
+        if ((error as any).code === "23505")
+          return res.status(409).json({ message: "This job is already on standby." });
+        if (/does not exist|schema cache/i.test(error.message))
+          return res.status(500).json({ message: "Standby isn't set up yet — run the Job standby setup SQL in Supabase." });
+        return res.status(400).json({ message: error.message });
+      }
+      // A report already on/after the start closes it right away (back-dated
+      // standby); return the refreshed standby either way.
+      const after = (await standbyByJob([job.id])).get(job.id);
+      res.status(201).json({ period: data, standby: publicStandby(after) });
+    },
+  );
+
+  // End standby by hand: { end_date } = the LAST standby day (default today).
+  app.post(
+    "/api/jobs/:id/standby/end",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      const current = (await standbyByJob([job.id])).get(job.id);
+      if (!current?.active)
+        return res.status(400).json({ message: "This job isn't on standby." });
+      const open = current.periods.find((p) => !p.end_date)!;
+      const today = todayCentral();
+      const end = isoDay(req.body?.end_date) ?? today;
+      if (end > today)
+        return res.status(400).json({ message: "The last standby day can't be in the future" });
+      if (end < addDaysIso(open.start_date, -1))
+        return res.status(400).json({ message: "The last standby day can't be before the start date" });
+      const { error } = await padClient()
+        .from("job_standby_periods")
+        .update({ end_date: end, ended_reason: "manual", ended_by_name: req.profile!.name })
+        .eq("id", open.id)
+        .is("end_date", null);
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
+    },
+  );
+
+  // Remove a standby period entered by mistake (admin / area).
+  app.delete(
+    "/api/jobs/:id/standby/:periodId",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req: Request, res: Response) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      const { error } = await padClient()
+        .from("job_standby_periods")
+        .delete()
+        .eq("id", String(req.params.periodId))
+        .eq("job_id", job.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
+    },
+  );
+
   // ---- Revenue module ----------------------------------------------------
   // Admin sees all areas; area managers see only their own area's jobs.
   // Revenue = the ACCRUED (cell AS57) cumulative figure from the most recent
@@ -9082,6 +9217,17 @@ export async function registerRoutes(
           hasAccrued: true,
         });
       }
+      // Standby days bill the standby rate: add them to job revenue too.
+      const standby = await standbyByJob(jobIds);
+      for (const [jid, sb] of Array.from(standby.entries())) {
+        if (!sb.total) continue;
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sb.total) * 100) / 100,
+          hasAccrued: true,
+        });
+      }
 
       // All in-scope reports once, for daily/monthly day-rate revenue and
       // active detection (a job is active if it has a most-recent-dated well).
@@ -9182,6 +9328,15 @@ export async function registerRoutes(
           const mon = day.slice(0, 7);
           monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
         }
+      // Standby days land on each standby day at the standby rate.
+      for (const [jid, sb] of Array.from(standby.entries()))
+        for (const [day, amt] of Array.from(sb.byDay.entries())) {
+          dailyMap.set(day, (dailyMap.get(day) ?? 0) + amt);
+          if (!dailyJobsMap.has(day)) dailyJobsMap.set(day, new Set());
+          dailyJobsMap.get(day)!.add(jid);
+          const mon = day.slice(0, 7);
+          monthlyMap.set(mon, (monthlyMap.get(mon) ?? 0) + amt);
+        }
       // The rate shown on a job row: latest report's AL57 rate, else fallback.
       const dayRateOf = new Map<string, number | null>();
       for (const j of jobRows)
@@ -9212,6 +9367,10 @@ export async function registerRoutes(
           last_report: lastReportByJob.get(j.id) ?? null,
           billing_basis: "reports" as "reports" | "calendar",
           service_charges: svcCharges.get(j.id)?.total ?? 0,
+          standby_total: standby.get(j.id)?.total ?? 0,
+          standby_days: standby.get(j.id)?.days ?? 0,
+          on_standby: !!standby.get(j.id)?.active,
+          standby_rate: standby.get(j.id)?.active ? standby.get(j.id)!.rate : null,
         };
         // Calendar-billed jobs (Mud Plant) have no daily reports: their status,
         // day count and last day come from the job's billing calendar.
@@ -9221,6 +9380,11 @@ export async function registerRoutes(
           row.report_days = Number(mb.billable_days ?? 0);
           row.last_report = mb.last_billed_date ?? null;
           row.billing_basis = "calendar";
+        }
+        // On standby = still working (equipment on location, billing).
+        if (row.on_standby) {
+          row.active = true;
+          row.day_rate = row.standby_rate;
         }
         return row;
       });
@@ -9323,7 +9487,21 @@ export async function registerRoutes(
       const activeStatusJobs = jobRows.filter((j: any) =>
         manualBill.has(j.id) ? j.status === "Active" : isLiveJobStatus(j.status),
       );
+      // Jobs on standby count at their standby rate, whatever their status.
+      for (const j of jobRows)
+        if (standby.get(j.id)?.active && !activeStatusJobs.includes(j)) activeStatusJobs.push(j);
       const currentJobs = activeStatusJobs.map((j: any) => {
+        const sb = standby.get(j.id);
+        if (sb?.active)
+          return {
+            job_id: j.id,
+            job_number: j.job_number,
+            area: j.area,
+            day_rate: sb.rate,
+            source: "standby",
+            report_date: null,
+            report_day: null,
+          };
         const mb = manualBill.get(j.id);
         if (mb)
           return {
@@ -9442,6 +9620,17 @@ export async function registerRoutes(
           hasAccrued: true,
         });
       }
+      // Standby days bill the standby rate: add them to job revenue too.
+      const standby = await standbyByJob(jobIds);
+      for (const [jid, sb] of Array.from(standby.entries())) {
+        if (!sb.total) continue;
+        const cur = accrued.get(jid) ?? { revenue: null, hasAccrued: false };
+        accrued.set(jid, {
+          ...cur,
+          revenue: Math.round(((cur.revenue ?? 0) + sb.total) * 100) / 100,
+          hasAccrued: true,
+        });
+      }
       const { data: reps } = await client
         .from("daily_reports")
         .select("job_id, report_date, received_at, report_day, kpis")
@@ -9481,6 +9670,8 @@ export async function registerRoutes(
         "Day Rate",
         "Report Days",
         "Revenue (Accrued AS57)",
+        "Standby Days",
+        "Standby Revenue",
       ];
       const lines = [header.join(",")];
       for (const j of jobRows) {
@@ -9490,9 +9681,11 @@ export async function registerRoutes(
             ? Number(j.day_rate)
             : null;
         // Prefer the current AL57 rate from the latest report; else fallback.
-        const dr = manualBill.has(j.id)
-          ? fallback
-          : currentRateByJob.get(j.id) ?? fallback;
+        const dr = standby.get(j.id)?.active
+          ? standby.get(j.id)!.rate
+          : manualBill.has(j.id)
+            ? fallback
+            : currentRateByJob.get(j.id) ?? fallback;
         lines.push(
           [
             esc(j.job_number),
@@ -9501,6 +9694,8 @@ export async function registerRoutes(
             esc(dr ?? ""),
             esc(reportDaysByJob.get(j.id) ?? 0),
             esc(acc.revenue ?? ""),
+            esc(standby.get(j.id)?.days ?? 0),
+            esc(standby.get(j.id)?.total ?? 0),
           ].join(","),
         );
       }
