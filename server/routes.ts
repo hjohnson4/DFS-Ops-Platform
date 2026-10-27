@@ -4614,7 +4614,7 @@ export async function registerRoutes(
 
   // ---- Structured centrifuge service reports (in-app form) ----------------
   // Digital replacement for the Mitti/SafetyCulture centrifuge report. The
-  // supervisor fills the 13-item checklist in-app; we store it on a
+  // supervisor fills the centrifuge checklist in-app; we store it on a
   // maintenance_reports row (checklist jsonb + score) so it drives the same
   // sign-off flow and service-baseline reset as a maintenance report, and any
   // flagged item can spawn a work order. Photos are stored as linked
@@ -4767,13 +4767,21 @@ export async function registerRoutes(
       for (const def of CENTRIFUGE_SERVICE_CHECKLIST) {
         const a = byKey.get(def.key);
         if (!a) continue;
-        const flagged = a.answer === def.flagOn;
-        if (a.answer !== "N/A") {
+        const kind = def.kind ?? "yes_no";
+        const allowed =
+          kind === "yes_no" ? ["Yes", "No", "N/A"] : kind === "condition" ? [...(def.options ?? [])] : null;
+        if (allowed && !allowed.includes(a.answer))
+          return res.status(400).json({
+            message: `"${def.label}" must be one of: ${allowed.join(", ")}`,
+          });
+        // Fill-in answers (e.g. pond depth) are recorded but not scored.
+        const flagged = kind !== "text" && a.answer === def.flagOn;
+        if (kind !== "text" && a.answer !== "N/A") {
           total += 1;
           if (!flagged) pass += 1;
         }
         const note = a.note?.trim() ? a.note.trim() : null;
-        answered.push({ key: def.key, label: def.label, answer: a.answer, flagged, note });
+        answered.push({ key: def.key, label: def.label, kind, answer: a.answer, flagged, note });
         if (flagged) flaggedItems.push({ key: def.key, label: def.label, note });
       }
       if (answered.length === 0)

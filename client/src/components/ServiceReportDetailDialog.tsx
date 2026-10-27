@@ -202,8 +202,10 @@ export function ServiceReportDetailDialog({
                   </div>
                   <div
                     className={[
-                      "w-24 shrink-0 flex items-center justify-center text-sm font-medium text-white",
-                      c.answer === "N/A"
+                      "w-24 shrink-0 flex items-center justify-center px-1 text-center text-sm font-medium text-white break-words",
+                      c.kind === "text"
+                        ? "bg-sky-700"
+                        : c.answer === "N/A"
                         ? "bg-muted-foreground/70"
                         : c.flagged
                           ? "bg-red-600"

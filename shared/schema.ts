@@ -1375,10 +1375,19 @@ export interface ServiceChecklistItemDef {
 // The 13-item centrifuge inspection, in the same order as the Mitti report.
 // `flagOn` is the answer that indicates a problem (drives flagged-item count
 // and auto work-order creation).
+//
+// `kind` (default "yes_no"):
+//   yes_no    → Yes / No / N/A buttons; flagOn is the problem answer.
+//   condition → the item's `options` (e.g. Good / OK / Poor); flagOn = "Poor".
+//   text      → fill-in answer (e.g. pond depth). Not scored, never flagged.
+export type ServiceChecklistKind = "yes_no" | "condition" | "text";
 export const CENTRIFUGE_SERVICE_CHECKLIST: {
   key: string;
   label: string;
-  flagOn: "Yes" | "No";
+  flagOn: string | null;
+  kind?: ServiceChecklistKind;
+  options?: readonly string[];
+  placeholder?: string;
 }[] = [
   { key: "gearbox_oil", label: "Was gear box oil checked?", flagOn: "No" },
   { key: "back_drive_bearings", label: "Back drive bearings greased", flagOn: "No" },
@@ -1393,6 +1402,21 @@ export const CENTRIFUGE_SERVICE_CHECKLIST: {
   { key: "coffin_clamps", label: "Coffin clamps close coffin lid properly?", flagOn: "No" },
   { key: "no_coffin_cracks", label: "No cracks on coffin or abnormal damage?", flagOn: "No" },
   { key: "coffin_gasket", label: "Coffin gasket seals properly?", flagOn: "No" },
+  // Added 2026-10-27.
+  {
+    key: "plow_condition",
+    label: "Plow condition",
+    kind: "condition",
+    options: ["Good", "OK", "Poor"],
+    flagOn: "Poor",
+  },
+  {
+    key: "pond_depth",
+    label: "Pond depth",
+    kind: "text",
+    flagOn: null,
+    placeholder: "e.g. 2.5 in",
+  },
 ];
 
 export const SERVICE_ANSWERS = ["Yes", "No", "N/A"] as const;
@@ -1402,14 +1426,17 @@ export type ServiceAnswer = (typeof SERVICE_ANSWERS)[number];
 export interface ServiceChecklistAnswer {
   key: string;
   label: string;
-  answer: ServiceAnswer;
+  // Yes / No / N/A, a condition (Good / OK / Poor) or a fill-in value.
+  answer: string;
+  kind?: ServiceChecklistKind; // missing on older reports = yes_no
   flagged: boolean; // computed server-side from flagOn
   note: string | null;
 }
 
 const serviceChecklistAnswerSchema = z.object({
   key: z.string().min(1),
-  answer: z.enum(SERVICE_ANSWERS),
+  // Checked against the item's kind on the server.
+  answer: z.string().trim().min(1).max(200),
   note: z.string().trim().max(2000).nullable().optional(),
 });
 

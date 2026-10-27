@@ -43,7 +43,7 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-type Answer = "Yes" | "No" | "N/A";
+type Answer = string;
 const MAX_PHOTO_BYTES = 8 * 1024 * 1024; // 8 MB each
 const MAX_PHOTOS = 24;
 
@@ -54,7 +54,7 @@ interface PendingPhoto {
 }
 
 // In-app digital centrifuge service report. Replaces the external Mitti /
-// SafetyCulture PDF: the supervisor fills the 13-item inspection here, records
+// SafetyCulture PDF: the supervisor fills the centrifuge inspection here, records
 // the run-hours meter reading (which resets the service baseline), and any
 // "No" answer on a good/bad question is flagged on the report.
 export function NewServiceReportDialog({
@@ -105,10 +105,10 @@ export function NewServiceReportDialog({
     let pass = 0;
     let flagged = 0;
     for (const def of CENTRIFUGE_SERVICE_CHECKLIST) {
-      const a = answers[def.key];
+      const a = answers[def.key]?.trim();
       if (!a) continue;
       answered += 1;
-      if (a === "N/A") continue;
+      if (a === "N/A" || def.kind === "text") continue;
       if (a === def.flagOn) flagged += 1;
       else pass += 1;
     }
@@ -160,7 +160,7 @@ export function NewServiceReportDialog({
       if (!assetId) throw new Error("Choose a centrifuge");
       if (!reportDate) throw new Error("Choose a service date");
       const unanswered = CENTRIFUGE_SERVICE_CHECKLIST.filter(
-        (d) => !answers[d.key],
+        (d) => !answers[d.key]?.trim(),
       );
       if (unanswered.length)
         throw new Error(
@@ -169,7 +169,7 @@ export function NewServiceReportDialog({
 
       const checklist = CENTRIFUGE_SERVICE_CHECKLIST.map((d) => ({
         key: d.key,
-        answer: answers[d.key],
+        answer: answers[d.key].trim(),
         note: itemNotes[d.key]?.trim() ? itemNotes[d.key].trim() : null,
       }));
 
@@ -321,13 +321,25 @@ export function NewServiceReportDialog({
             <div className="divide-y divide-card-border">
               {CENTRIFUGE_SERVICE_CHECKLIST.map((def) => {
                 const a = answers[def.key];
-                const isFlagged = a && a === def.flagOn;
+                const isFlagged = def.kind !== "text" && !!a && a === def.flagOn;
                 return (
                   <div key={def.key} className="px-3 py-2.5">
                     <div className="flex items-start justify-between gap-3">
                       <span className="text-sm">{def.label}</span>
+                      {def.kind === "text" ? (
+                        <Input
+                          className="h-8 w-36 shrink-0 text-sm"
+                          placeholder={def.placeholder ?? ""}
+                          value={a ?? ""}
+                          maxLength={200}
+                          onChange={(e) =>
+                            setAnswers((prev) => ({ ...prev, [def.key]: e.target.value }))
+                          }
+                          data-testid={`answer-${def.key}`}
+                        />
+                      ) : (
                       <div className="flex gap-1 shrink-0">
-                        {(["Yes", "No", "N/A"] as Answer[]).map((opt) => {
+                        {((def.kind === "condition" ? def.options : ["Yes", "No", "N/A"]) ?? []).map((opt) => {
                           const active = a === opt;
                           const bad = active && opt === def.flagOn;
                           const good =
@@ -359,6 +371,7 @@ export function NewServiceReportDialog({
                           );
                         })}
                       </div>
+                      )}
                     </div>
                     {isFlagged && (
                       <Input

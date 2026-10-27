@@ -853,12 +853,28 @@ var CENTRIFUGE_SERVICE_CHECKLIST = [
   { key: "electrical_wires", label: "Electrical wires in good condition?", flagOn: "No" },
   { key: "coffin_clamps", label: "Coffin clamps close coffin lid properly?", flagOn: "No" },
   { key: "no_coffin_cracks", label: "No cracks on coffin or abnormal damage?", flagOn: "No" },
-  { key: "coffin_gasket", label: "Coffin gasket seals properly?", flagOn: "No" }
+  { key: "coffin_gasket", label: "Coffin gasket seals properly?", flagOn: "No" },
+  // Added 2026-10-27.
+  {
+    key: "plow_condition",
+    label: "Plow condition",
+    kind: "condition",
+    options: ["Good", "OK", "Poor"],
+    flagOn: "Poor"
+  },
+  {
+    key: "pond_depth",
+    label: "Pond depth",
+    kind: "text",
+    flagOn: null,
+    placeholder: "e.g. 2.5 in"
+  }
 ];
 var SERVICE_ANSWERS = ["Yes", "No", "N/A"];
 var serviceChecklistAnswerSchema = z.object({
   key: z.string().min(1),
-  answer: z.enum(SERVICE_ANSWERS),
+  // Checked against the item's kind on the server.
+  answer: z.string().trim().min(1).max(200),
   note: z.string().trim().max(2e3).nullable().optional()
 });
 var serviceReportPhotoSchema = z.object({
@@ -6039,13 +6055,19 @@ async function registerRoutes(httpServer, app) {
       for (const def of CENTRIFUGE_SERVICE_CHECKLIST) {
         const a = byKey.get(def.key);
         if (!a) continue;
-        const flagged = a.answer === def.flagOn;
-        if (a.answer !== "N/A") {
+        const kind = def.kind ?? "yes_no";
+        const allowed = kind === "yes_no" ? ["Yes", "No", "N/A"] : kind === "condition" ? [...def.options ?? []] : null;
+        if (allowed && !allowed.includes(a.answer))
+          return res.status(400).json({
+            message: `"${def.label}" must be one of: ${allowed.join(", ")}`
+          });
+        const flagged = kind !== "text" && a.answer === def.flagOn;
+        if (kind !== "text" && a.answer !== "N/A") {
           total += 1;
           if (!flagged) pass += 1;
         }
         const note = a.note?.trim() ? a.note.trim() : null;
-        answered.push({ key: def.key, label: def.label, answer: a.answer, flagged, note });
+        answered.push({ key: def.key, label: def.label, kind, answer: a.answer, flagged, note });
         if (flagged) flaggedItems.push({ key: def.key, label: def.label, note });
       }
       if (answered.length === 0)
