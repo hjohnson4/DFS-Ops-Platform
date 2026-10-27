@@ -2724,10 +2724,36 @@ export async function registerRoutes(
           message: "Only an Admin or Area Manager can change set day rate billing",
         });
       if (patch.manual_day_rate === !!job.manual_day_rate) delete patch.manual_day_rate;
+      // Job name: Admin / Area Manager only. Dropped when unchanged so a
+      // supervisor's normal edit still saves.
+      if (patch.job_number !== undefined) {
+        if (patch.job_number === job.job_number) delete patch.job_number;
+        else if (!["admin", "area"].includes(req.profile!.role))
+          return res.status(403).json({
+            message: "Only an Admin or Area Manager can change the job name",
+          });
+        else if (!job.archived_at) {
+          const { data: clash } = await client
+            .from("jobs")
+            .select("id")
+            .eq("area", job.area)
+            .ilike("job_number", patch.job_number.replace(/[%_\\]/g, (m: string) => "\\" + m))
+            .is("archived_at", null)
+            .neq("id", job.id)
+            .limit(1);
+          if (clash && clash.length)
+            return res.status(409).json({
+              message: `Job ${patch.job_number} is already active in ${job.area}. Use a different name.`,
+            });
+        }
+      }
       // Billing mode: Admin / Area Manager only; drop it when unchanged so an
       // edit still works before the manual_billing_mode column exists.
       if (patch.manual_billing_mode !== undefined) {
-        const cur = job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days";
+        const cur =
+          job.manual_billing_mode === "spud_to_latest" || job.manual_billing_mode === "calendar"
+            ? job.manual_billing_mode
+            : "report_days";
         if (patch.manual_billing_mode === cur) delete patch.manual_billing_mode;
         else if (!["admin", "area"].includes(req.profile!.role))
           return res.status(403).json({
@@ -2762,7 +2788,13 @@ export async function registerRoutes(
           .eq("id", req.params.id)
           .select()
           .single();
-        if (error) return res.status(400).json({ message: error.message });
+        if (error) {
+          if (error.code === "23505")
+            return res.status(409).json({
+              message: `Job ${patch.job_number ?? job.job_number} is already active in ${job.area}. Use a different name.`,
+            });
+          return res.status(400).json({ message: error.message });
+        }
         data = updated;
         // Set day rate jobs: log the rate/status change (applies from today).
         await recordRateChange(job as any, data as any, {

@@ -1504,6 +1504,8 @@ export const createJobSchema = z.object({
 export type CreateJobInput = z.infer<typeof createJobSchema>;
 
 export const updateJobSchema = z.object({
+  // Rename the job (Admin / Area Manager only — enforced on the server).
+  job_number: z.string().trim().min(1, "Job name can't be blank").max(100).optional(),
   description: z.string().nullable().optional(),
   status: z.enum(JOB_STATUS).optional(),
   crewing: z.enum(CREWING).optional(),

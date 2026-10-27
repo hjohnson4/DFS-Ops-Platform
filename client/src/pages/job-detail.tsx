@@ -157,6 +157,7 @@ export default function JobDetailPage() {
     (allAssets || []).find((a) => a.id === aid)?.tag ?? "asset";
 
   const [editing, setEditing] = useState(false);
+  const [jobName, setJobName] = useState("");
   const [status, setStatus] = useState<JobStatus>("Active");
   const [crewing, setCrewing] = useState<Crewing>("Manned");
   const [startedOn, setStartedOn] = useState("");
@@ -168,6 +169,7 @@ export default function JobDetailPage() {
   // seed edit fields whenever the job loads / changes
   useEffect(() => {
     if (job) {
+      setJobName(job.job_number ?? "");
       setStatus(job.status);
       setCrewing(job.crewing ?? "Manned");
       setStartedOn(toDateInput(job.started_on));
@@ -185,6 +187,9 @@ export default function JobDetailPage() {
   const save = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("PATCH", `/api/jobs/${id}`, {
+        ...(canManageAssets && jobName.trim() && jobName.trim() !== job?.job_number
+          ? { job_number: jobName.trim() }
+          : {}),
         status,
         crewing,
         started_on: startedOn || null,
@@ -209,6 +214,7 @@ export default function JobDetailPage() {
 
   const cancelEdit = () => {
     if (job) {
+      setJobName(job.job_number ?? "");
       setStatus(job.status);
       setCrewing(job.crewing ?? "Manned");
       setStartedOn(toDateInput(job.started_on));
@@ -361,7 +367,20 @@ export default function JobDetailPage() {
       <div className="mt-4 flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-xl font-semibold">Job {job.job_number}</h1>
+            {editing && canManageAssets ? (
+              <div>
+                <Label className="text-xs text-muted-foreground mb-1 block">Job name</Label>
+                <Input
+                  value={jobName}
+                  onChange={(e) => setJobName(e.target.value)}
+                  className="h-9 w-64 max-w-full text-base font-semibold"
+                  maxLength={100}
+                  data-testid="input-job-name"
+                />
+              </div>
+            ) : (
+              <h1 className="text-xl font-semibold">Job {job.job_number}</h1>
+            )}
             {!editing && (
               <>
                 <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${STATUS_TONE[job.status]}`}>
@@ -394,7 +413,7 @@ export default function JobDetailPage() {
                 <Button
                   size="sm"
                   onClick={() => save.mutate()}
-                  disabled={save.isPending || dateError}
+                  disabled={save.isPending || dateError || (canManageAssets && !jobName.trim())}
                   data-testid="button-save-job-edit"
                 >
                   {save.isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
@@ -1216,6 +1235,8 @@ function ServiceFormDialog({
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: servicesKey });
+      queryClient.invalidateQueries({ queryKey: ["/api/jobs", job.id, "billing-calendar"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/revenue/summary"] });
       toast({ title: service ? "Service charge updated" : "Service charge logged" });
       setOpen(false);
       if (!service) reset();
@@ -1407,6 +1428,8 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
       apiRequest("DELETE", `/api/jobs/${job.id}/services/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: servicesKey });
+      queryClient.invalidateQueries({ queryKey: ["/api/jobs", job.id, "billing-calendar"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/revenue/summary"] });
       toast({ title: "Service charge deleted" });
     },
     onError: (e: any) =>

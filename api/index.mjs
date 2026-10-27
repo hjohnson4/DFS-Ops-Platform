@@ -922,6 +922,8 @@ var createJobSchema = z.object({
   supervisor_ids: z.array(z.string().uuid()).optional()
 });
 var updateJobSchema = z.object({
+  // Rename the job (Admin / Area Manager only — enforced on the server).
+  job_number: z.string().trim().min(1, "Job name can't be blank").max(100).optional(),
   description: z.string().nullable().optional(),
   status: z.enum(JOB_STATUS).optional(),
   crewing: z.enum(CREWING).optional(),
@@ -4520,8 +4522,22 @@ async function registerRoutes(httpServer, app) {
           message: "Only an Admin or Area Manager can change set day rate billing"
         });
       if (patch.manual_day_rate === !!job.manual_day_rate) delete patch.manual_day_rate;
+      if (patch.job_number !== void 0) {
+        if (patch.job_number === job.job_number) delete patch.job_number;
+        else if (!["admin", "area"].includes(req.profile.role))
+          return res.status(403).json({
+            message: "Only an Admin or Area Manager can change the job name"
+          });
+        else if (!job.archived_at) {
+          const { data: clash } = await client2.from("jobs").select("id").eq("area", job.area).ilike("job_number", patch.job_number.replace(/[%_\\]/g, (m) => "\\" + m)).is("archived_at", null).neq("id", job.id).limit(1);
+          if (clash && clash.length)
+            return res.status(409).json({
+              message: `Job ${patch.job_number} is already active in ${job.area}. Use a different name.`
+            });
+        }
+      }
       if (patch.manual_billing_mode !== void 0) {
-        const cur = job.manual_billing_mode === "spud_to_latest" ? "spud_to_latest" : "report_days";
+        const cur = job.manual_billing_mode === "spud_to_latest" || job.manual_billing_mode === "calendar" ? job.manual_billing_mode : "report_days";
         if (patch.manual_billing_mode === cur) delete patch.manual_billing_mode;
         else if (!["admin", "area"].includes(req.profile.role))
           return res.status(403).json({
@@ -4542,7 +4558,13 @@ async function registerRoutes(httpServer, app) {
         data = current;
       } else {
         const { data: updated, error } = await client2.from("jobs").update(patch).eq("id", req.params.id).select().single();
-        if (error) return res.status(400).json({ message: error.message });
+        if (error) {
+          if (error.code === "23505")
+            return res.status(409).json({
+              message: `Job ${patch.job_number ?? job.job_number} is already active in ${job.area}. Use a different name.`
+            });
+          return res.status(400).json({ message: error.message });
+        }
         data = updated;
         await recordRateChange(job, data, {
           id: req.profile.id,
