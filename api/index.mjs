@@ -6408,7 +6408,7 @@ async function registerRoutes(httpServer, app) {
   app.post(
     "/api/daily-reports/backfill",
     requireAuth,
-    requireRole("admin", "area"),
+    requireRole("admin", "area", "super"),
     async (req, res) => {
       const parsed = backfillDailyReportSchema.safeParse(req.body);
       if (!parsed.success)

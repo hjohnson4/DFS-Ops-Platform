@@ -72,7 +72,7 @@ function fileToBase64(file: File): Promise<string> {
   });
 }
 
-// Admin / area manager "Import workbook" dialog: uploads a daily-report
+// Admin / area manager / supervisor "Import workbook" dialog: uploads a daily-report
 // workbook that already has completed day tabs and backfills every completed
 // day (day 1 .. latest) in one shot. Historical days import already signed off
 // and their centrifuge run hours accrue automatically.
@@ -295,7 +295,10 @@ export default function DailyReportsPage() {
     profile?.role === "admin" ||
     profile?.role === "area" ||
     profile?.role === "super";
-  const canManage = profile?.role === "admin" || profile?.role === "area";
+  // Import workbook: admins, area managers and supervisors (supervisors added
+  // 2026-10-27; the server keeps them to their own area).
+  const canManage =
+    profile?.role === "admin" || profile?.role === "area" || profile?.role === "super";
   const [importOpen, setImportOpen] = useState(false);
   // Which row's document is currently loading, keyed as `${id}:${mode}`.
   const [docBusy, setDocBusy] = useState<string | null>(null);

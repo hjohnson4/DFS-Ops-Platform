@@ -5551,7 +5551,8 @@ export async function registerRoutes(
   });
 
   // ---- Daily-report backfill (manual rollout import) ----------------------
-  // Admin / area manager uploads a workbook that ALREADY has several completed
+  // Admin / area manager / supervisor (added 2026-10-27; area-scoped like area
+  // managers) uploads a workbook that ALREADY has several completed
   // day tabs and we load EVERY completed day (day 1 .. latest) in one upload.
   // Backfilled days are imported already signed off (historical) and their
   // centrifuge run hours are accrued. For a job with 2+ centrifuges the day's
@@ -5561,7 +5562,7 @@ export async function registerRoutes(
   app.post(
     "/api/daily-reports/backfill",
     requireAuth,
-    requireRole("admin", "area"),
+    requireRole("admin", "area", "super"),
     async (req: Request, res: Response) => {
       const parsed = backfillDailyReportSchema.safeParse(req.body);
       if (!parsed.success)
