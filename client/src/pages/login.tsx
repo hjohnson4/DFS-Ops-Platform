@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Loader2 } from "lucide-react";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, getRememberedEmail } from "@/lib/queryClient";
+import { Checkbox } from "@/components/ui/checkbox";
 import logoUrl from "@/assets/dfs-logo.png";
 
 function Logo() {
@@ -27,8 +28,10 @@ function Logo() {
 
 export default function Login() {
   const { login } = useAuth();
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => getRememberedEmail());
   const [password, setPassword] = useState("");
+  // Stay signed in on this device. On by default; untick on shared computers.
+  const [remember, setRemember] = useState(true);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -45,7 +48,7 @@ export default function Login() {
     setErr("");
     setBusy(true);
     try {
-      await login(email.trim(), password);
+      await login(email.trim(), password, remember);
     } catch (e: any) {
       setErr(e.message || "Login failed");
     } finally {
@@ -107,6 +110,17 @@ export default function Login() {
                 required
                 data-testid="input-password"
               />
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="remember"
+                checked={remember}
+                onCheckedChange={(v) => setRemember(v === true)}
+                data-testid="checkbox-remember"
+              />
+              <Label htmlFor="remember" className="text-sm font-normal cursor-pointer">
+                Remember me
+              </Label>
             </div>
             {err && (
               <p className="text-sm text-destructive" data-testid="text-login-error">

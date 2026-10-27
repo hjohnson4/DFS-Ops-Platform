@@ -38,6 +38,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
+import { WorkbookViewer, downloadReportWorkbook } from "@/components/WorkbookViewer";
 import { useToast } from "@/hooks/use-toast";
 import { parseDisplayDate } from "@/lib/utils";
 
@@ -299,33 +300,24 @@ export default function DailyReportsPage() {
   // Which row's document is currently loading, keyed as `${id}:${mode}`.
   const [docBusy, setDocBusy] = useState<string | null>(null);
 
-  // Fetch a report's stored workbook (authenticated) and either open it in a
-  // new tab or download it. Row clicks navigate to the detail page, so callers
+  // View opens the in-app workbook viewer (works on phones); Download goes
+  // through a short-lived signed link so phones get their normal download /
+  // "Open in Excel" sheet. Row clicks navigate to the detail page, so callers
   // must stopPropagation on these buttons.
+  const [viewer, setViewer] = useState<{ id: string; name: string | null; sheet: string | null } | null>(null);
   async function openReportDoc(
     reportId: string,
     name: string | null,
     mode: "view" | "download",
+    sheet?: string | null,
   ) {
+    if (mode === "view") {
+      setViewer({ id: reportId, name, sheet: sheet ?? null });
+      return;
+    }
     setDocBusy(`${reportId}:${mode}`);
     try {
-      const res = await apiRequest(
-        "GET",
-        `/api/daily-reports/${reportId}/attachment`,
-      );
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      if (mode === "view") {
-        window.open(url, "_blank", "noopener,noreferrer");
-      } else {
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = name || "daily-report.xlsx";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      await downloadReportWorkbook(reportId);
     } catch (e: any) {
       toast({
         title: "Could not open the document",
@@ -621,6 +613,15 @@ export default function DailyReportsPage() {
       {canManage && (
         <ImportWorkbookDialog open={importOpen} onOpenChange={setImportOpen} />
       )}
+      {viewer && (
+        <WorkbookViewer
+          reportId={viewer.id}
+          fileName={viewer.name}
+          sourceSheet={viewer.sheet}
+          open={!!viewer}
+          onOpenChange={(v) => !v && setViewer(null)}
+        />
+      )}
 
       <p className="text-sm text-muted-foreground mb-4">
         Every crew's daily report in one place. Reports are emailed in to the
@@ -873,7 +874,7 @@ export default function DailyReportsPage() {
                             variant="ghost"
                             className="h-7 px-2"
                             disabled={docBusy !== null}
-                            onClick={() => openReportDoc(r.id, r.attachment_name, "view")}
+                            onClick={() => openReportDoc(r.id, r.attachment_name, "view", (r as any).source_sheet)}
                             data-testid={`button-view-doc-${r.id}`}
                           >
                             {docBusy === `${r.id}:view` ? (
@@ -999,7 +1000,7 @@ export default function DailyReportsPage() {
                       variant="outline"
                       className="h-7"
                       disabled={docBusy !== null}
-                      onClick={() => openReportDoc(r.id, r.attachment_name, "view")}
+                      onClick={() => openReportDoc(r.id, r.attachment_name, "view", (r as any).source_sheet)}
                       data-testid={`button-view-doc-card-${r.id}`}
                     >
                       {docBusy === `${r.id}:view` ? (

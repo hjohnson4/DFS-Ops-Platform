@@ -24,6 +24,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import LockedKpiTable from "@/components/LockedKpiTable";
 import { ReplaceWorkbookDialog } from "@/components/ReplaceWorkbookDialog";
+import { WorkbookViewer, downloadReportWorkbook } from "@/components/WorkbookViewer";
 import {
   ArrowLeft,
   Building2,
@@ -107,28 +108,18 @@ export default function DailyReportDetailPage() {
   const [assignJobId, setAssignJobId] = useState("");
   const [docBusy, setDocBusy] = useState<"view" | "download" | null>(null);
 
-  // Open the stored source workbook. Requests are authenticated, so we fetch
-  // the bytes as a blob (not a plain <a href>) and either open them in a new
-  // tab (view) or save them (download).
+  // View opens the in-app workbook viewer (works on phones). Download uses a
+  // short-lived signed link so phones show their normal download sheet.
+  const [viewerOpen, setViewerOpen] = useState(false);
   async function openSourceDocument(mode: "view" | "download") {
     if (!id) return;
+    if (mode === "view") {
+      setViewerOpen(true);
+      return;
+    }
     setDocBusy(mode);
     try {
-      const res = await apiRequest("GET", `/api/daily-reports/${id}/attachment`);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      if (mode === "view") {
-        window.open(url, "_blank", "noopener,noreferrer");
-      } else {
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = report?.attachment_name || "daily-report.xlsx";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
-      // Give the new tab / download a moment to grab the URL before revoking.
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      await downloadReportWorkbook(id);
     } catch (e: any) {
       toast({
         title: "Could not open the document",
@@ -668,6 +659,15 @@ export default function DailyReportDetailPage() {
                   <span className="text-xs text-muted-foreground">
                     Original file not stored for this report.
                   </span>
+                )}
+                {viewerOpen && (
+                  <WorkbookViewer
+                    reportId={report.id}
+                    fileName={report.attachment_name}
+                    sourceSheet={report.source_sheet}
+                    open={viewerOpen}
+                    onOpenChange={setViewerOpen}
+                  />
                 )}
                 {canReview &&
                   report.status !== "Correction pending" &&

@@ -96,5 +96,11 @@ export const supabaseAdmin = SERVICE_ROLE_KEY
 
 export const hasAdmin = () => supabaseAdmin !== null;
 
+/**
+ * A brand-new anon client for one request. Used by /api/auth/refresh so that
+ * exchanging one user's refresh token never touches the shared client above.
+ */
+export const freshAnonClient = () => createClient(SUPABASE_URL, ANON_KEY, clientOpts);
+
 export const SUPABASE_URL_PUBLIC = SUPABASE_URL;
 export const SUPABASE_ANON_PUBLIC = ANON_KEY;

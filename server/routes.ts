@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import type { Server } from "node:http";
 import crypto from "node:crypto";
-import { supabaseAnon, supabaseAdmin, hasAdmin } from "./supabase";
+import { supabaseAnon, supabaseAdmin, hasAdmin, freshAnonClient } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf, jobScopeOf } from "./auth";
 import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, gmailConfigured, sendInviteEmail, sendPasswordResetEmail } from "./email";
 import {
@@ -701,6 +701,56 @@ export async function registerRoutes(
       refresh_token: data.session.refresh_token,
       profile: { ...profile, must_change_password: mustChange },
     });
+  });
+
+  // "Remember me": swap a saved refresh token for a fresh session so users
+  // don't have to type their email and password every time. Supabase rotates
+  // the refresh token, so the client saves the new one each time.
+  //   401 = token no longer valid (signed out elsewhere / expired) -> sign in.
+  //   403 = account deactivated or has no profile.
+  //   503 = Supabase unreachable; the client keeps its token and tries later.
+  app.post("/api/auth/refresh", async (req: Request, res: Response) => {
+    const rt = String((req.body || {}).refresh_token || "");
+    if (!rt) return res.status(401).json({ message: "Please sign in again." });
+    try {
+      const client = freshAnonClient();
+      const { data, error } = await client.auth.refreshSession({ refresh_token: rt });
+      if (error || !data.session || !data.user) {
+        const st = Number((error as any)?.status) || 0;
+        return res
+          .status(st >= 500 ? 503 : 401)
+          .json({ message: "Your session has ended. Please sign in again." });
+      }
+      const { data: profile } = await client
+        .from("profiles")
+        .select("id,active")
+        .eq("id", data.user.id)
+        .single();
+      if (!profile)
+        return res.status(403).json({ message: "No profile for this account" });
+      if (!profile.active)
+        return res.status(403).json({ message: "Account deactivated" });
+      res.json({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token,
+      });
+    } catch (e) {
+      console.error("[auth/refresh]", e);
+      res.status(503).json({ message: "Could not refresh the session." });
+    }
+  });
+
+  // Sign out: revoke this device's session so a remembered login can't be
+  // reused after the user clicks Sign out. Best effort — always 200.
+  app.post("/api/auth/logout", async (req: Request, res: Response) => {
+    try {
+      const h = String(req.headers.authorization || "");
+      const token = h.startsWith("Bearer ") ? h.slice(7) : "";
+      if (token && supabaseAdmin) await supabaseAdmin.auth.admin.signOut(token, "local");
+    } catch {
+      /* ignore */
+    }
+    res.json({ ok: true });
   });
 
   // ---- Invite tokens --------------------------------------------------------
@@ -6201,6 +6251,83 @@ export async function registerRoutes(
       res.send(buf);
     },
   );
+
+  // Phone-friendly download. Phones ignore blob downloads, so the app asks for
+  // a short-lived signed link (10 minutes, this report only) and simply
+  // navigates to it. The link carries no login token; the HMAC signature (same
+  // secret as invite links) proves the signed-in user was allowed to see it.
+  function signFileToken(payload: { id: string; exp: number }): string {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const body = Buffer.from(JSON.stringify({ ...payload, k: "dr-file" })).toString("base64url");
+    const sig = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    return `${body}.${sig}`;
+  }
+  function verifyFileToken(token: string, id: string): boolean {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const [body, sig] = String(token || "").split(".");
+    if (!body || !sig) return false;
+    const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+    try {
+      const p = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+      return p.k === "dr-file" && p.id === id && typeof p.exp === "number" && Date.now() <= p.exp;
+    } catch {
+      return false;
+    }
+  }
+
+  app.post(
+    "/api/daily-reports/:id/attachment-link",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const rid = String(req.params.id);
+      const { data, error } = await supabaseAnon
+        .from("daily_reports")
+        .select("area, job_id, attachment_size")
+        .eq("id", rid)
+        .single();
+      if (error || !data || !data.attachment_size)
+        return res.status(404).json({ message: "No document on file for this report" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && data.area !== scope)
+        return res.status(404).json({ message: "Report not found" });
+      const jobIds = await jobScopeOf(req.profile!);
+      if (jobIds && !jobIds.includes(data.job_id))
+        return res.status(404).json({ message: "Report not found" });
+      const t = signFileToken({ id: rid, exp: Date.now() + 10 * 60 * 1000 });
+      res.json({ url: `/api/daily-reports/${encodeURIComponent(rid)}/file?t=${t}` });
+    },
+  );
+
+  app.get("/api/daily-reports/:id/file", async (req: Request, res: Response) => {
+    const rid = String(req.params.id);
+    if (!verifyFileToken(String(req.query.t || ""), rid))
+      return res
+        .status(403)
+        .type("text/plain")
+        .send("This download link has expired. Go back to DFS Ops and tap Download again.");
+    const { data, error } = await (supabaseAdmin || supabaseAnon)
+      .from("daily_reports")
+      .select("attachment_name, attachment_mime, attachment_base64")
+      .eq("id", rid)
+      .single();
+    if (error || !data || !data.attachment_base64)
+      return res.status(404).type("text/plain").send("No document on file for this report.");
+    const name = (data.attachment_name || "daily-report.xlsx").replace(/[\r\n"]/g, "");
+    const ascii = name.replace(/[^\x20-\x7E]/g, "_");
+    res.setHeader(
+      "Content-Type",
+      data.attachment_mime || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`,
+    );
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(Buffer.from(data.attachment_base64, "base64"));
+  });
 
   // Run-hours context for the sign-off UI: the day's hours (M33) plus the
   // centrifuges on the report's matched job. The frontend uses this to decide

@@ -3,18 +3,97 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
 // ---- Auth token store -----------------------------------------------------
-// In-memory only. Browser storage (localStorage/sessionStorage/cookies) is
-// blocked in the sandboxed preview iframe, so the token lives in a module
-// variable. A full page reload requires signing in again — acceptable for both
-// the preview and production.
+// The access token lives in memory. The refresh token is kept in memory too
+// (so a long session survives the ~1 hour access-token expiry), and when the
+// user ticks "Remember me" it is ALSO saved in localStorage so they stay
+// signed in after closing the browser. Storage is wrapped in try/catch because
+// it is blocked in some sandboxed previews — there we fall back to memory.
 let accessToken: string | null = null;
+let refreshToken: string | null = null;
+let remember = false;
+const RT_KEY = "dfs-ops-remember-token";
+const EMAIL_KEY = "dfs-ops-remember-email";
+
+function store(): Storage | null {
+  try {
+    const s = window.localStorage;
+    s.setItem("__dfs_t", "1");
+    s.removeItem("__dfs_t");
+    return s;
+  } catch {
+    return null;
+  }
+}
+
+export function setSession(
+  access: string | null,
+  refresh?: string | null,
+  rememberMe?: boolean,
+) {
+  accessToken = access;
+  refreshToken = refresh ?? null;
+  if (rememberMe !== undefined) remember = rememberMe;
+  const s = store();
+  if (s) {
+    if (remember && refreshToken) s.setItem(RT_KEY, refreshToken);
+    else s.removeItem(RT_KEY);
+  }
+}
 
 export function setAccessToken(token: string | null) {
-  accessToken = token;
+  if (token === null) setSession(null, null, false);
+  else accessToken = token;
 }
 export function getAccessToken(): string | null {
   return accessToken;
 }
+export function hasRememberedLogin(): boolean {
+  return !!store()?.getItem(RT_KEY);
+}
+export function getRememberedEmail(): string {
+  return store()?.getItem(EMAIL_KEY) || "";
+}
+export function setRememberedEmail(email: string | null) {
+  const s = store();
+  if (!s) return;
+  if (email) s.setItem(EMAIL_KEY, email);
+  else s.removeItem(EMAIL_KEY);
+}
+
+// Swap the refresh token for a new session. Single-flight so parallel 401s
+// share one refresh. Returns true when a new access token is in place.
+let inflight: Promise<boolean> | null = null;
+export function refreshSession(): Promise<boolean> {
+  if (inflight) return inflight;
+  const saved = store()?.getItem(RT_KEY) || null;
+  const rt = refreshToken || saved;
+  if (!rt) return Promise.resolve(false);
+  const keep = remember || (!refreshToken && !!saved);
+  inflight = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: rt }),
+      });
+      if (res.status === 401 || res.status === 403) {
+        setSession(null, null, false); // token is dead — sign in again
+        return false;
+      }
+      if (!res.ok) return false; // temporary problem — keep the token
+      const d = await res.json();
+      setSession(d.access_token, d.refresh_token, keep);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      inflight = null;
+    }
+  })();
+  return inflight;
+}
+
+const isAuthUrl = (url: string) => url.startsWith("/api/auth/");
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const t = getAccessToken();
@@ -30,7 +109,9 @@ async function throwIfResNotOk(res: Response) {
     } catch {
       /* non-json */
     }
-    throw new Error(msg);
+    const err = new Error(msg) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
 }
 
@@ -39,11 +120,15 @@ export async function apiRequest(
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetch(`${API_BASE}${url}`, {
-    method,
-    headers: authHeaders(data ? { "Content-Type": "application/json" } : {}),
-    body: data ? JSON.stringify(data) : undefined,
-  });
+  const send = () =>
+    fetch(`${API_BASE}${url}`, {
+      method,
+      headers: authHeaders(data ? { "Content-Type": "application/json" } : {}),
+      body: data ? JSON.stringify(data) : undefined,
+    });
+  let res = await send();
+  // Expired access token: refresh once and retry.
+  if (res.status === 401 && !isAuthUrl(url) && (await refreshSession())) res = await send();
   await throwIfResNotOk(res);
   return res;
 }
@@ -54,9 +139,10 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(`${API_BASE}${queryKey.join("/")}`, {
-      headers: authHeaders(),
-    });
+    const url = queryKey.join("/");
+    const send = () => fetch(`${API_BASE}${url}`, { headers: authHeaders() });
+    let res = await send();
+    if (res.status === 401 && !isAuthUrl(url) && (await refreshSession())) res = await send();
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;
     }

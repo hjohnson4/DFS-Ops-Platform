@@ -50,6 +50,7 @@ var clientOpts = {
 var supabaseAnon = createClient(SUPABASE_URL, ANON_KEY, clientOpts);
 var supabaseAdmin = SERVICE_ROLE_KEY ? createClient(SUPABASE_URL, SERVICE_ROLE_KEY, clientOpts) : null;
 var hasAdmin = () => supabaseAdmin !== null;
+var freshAnonClient = () => createClient(SUPABASE_URL, ANON_KEY, clientOpts);
 
 // server/auth.ts
 async function requireAuth(req, res, next) {
@@ -3053,6 +3054,39 @@ async function registerRoutes(httpServer, app) {
       refresh_token: data.session.refresh_token,
       profile: { ...profile, must_change_password: mustChange }
     });
+  });
+  app.post("/api/auth/refresh", async (req, res) => {
+    const rt = String((req.body || {}).refresh_token || "");
+    if (!rt) return res.status(401).json({ message: "Please sign in again." });
+    try {
+      const client2 = freshAnonClient();
+      const { data, error } = await client2.auth.refreshSession({ refresh_token: rt });
+      if (error || !data.session || !data.user) {
+        const st = Number(error?.status) || 0;
+        return res.status(st >= 500 ? 503 : 401).json({ message: "Your session has ended. Please sign in again." });
+      }
+      const { data: profile } = await client2.from("profiles").select("id,active").eq("id", data.user.id).single();
+      if (!profile)
+        return res.status(403).json({ message: "No profile for this account" });
+      if (!profile.active)
+        return res.status(403).json({ message: "Account deactivated" });
+      res.json({
+        access_token: data.session.access_token,
+        refresh_token: data.session.refresh_token
+      });
+    } catch (e) {
+      console.error("[auth/refresh]", e);
+      res.status(503).json({ message: "Could not refresh the session." });
+    }
+  });
+  app.post("/api/auth/logout", async (req, res) => {
+    try {
+      const h = String(req.headers.authorization || "");
+      const token = h.startsWith("Bearer ") ? h.slice(7) : "";
+      if (token && supabaseAdmin) await supabaseAdmin.auth.admin.signOut(token, "local");
+    } catch {
+    }
+    res.json({ ok: true });
   });
   function genTempPassword() {
     const upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -6871,6 +6905,65 @@ async function registerRoutes(httpServer, app) {
       res.send(buf);
     }
   );
+  function signFileToken(payload) {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const body = Buffer.from(JSON.stringify({ ...payload, k: "dr-file" })).toString("base64url");
+    const sig = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    return `${body}.${sig}`;
+  }
+  function verifyFileToken(token, id) {
+    const secret = process.env.SUPABASE_SERVICE_ROLE_KEY || "dfs-invite-fallback-secret";
+    const [body, sig] = String(token || "").split(".");
+    if (!body || !sig) return false;
+    const expected = crypto.createHmac("sha256", secret).update(body).digest("base64url");
+    const a = Buffer.from(sig);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+    try {
+      const p = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+      return p.k === "dr-file" && p.id === id && typeof p.exp === "number" && Date.now() <= p.exp;
+    } catch {
+      return false;
+    }
+  }
+  app.post(
+    "/api/daily-reports/:id/attachment-link",
+    requireAuth,
+    async (req, res) => {
+      const rid = String(req.params.id);
+      const { data, error } = await supabaseAnon.from("daily_reports").select("area, job_id, attachment_size").eq("id", rid).single();
+      if (error || !data || !data.attachment_size)
+        return res.status(404).json({ message: "No document on file for this report" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && data.area !== scope)
+        return res.status(404).json({ message: "Report not found" });
+      const jobIds = await jobScopeOf(req.profile);
+      if (jobIds && !jobIds.includes(data.job_id))
+        return res.status(404).json({ message: "Report not found" });
+      const t = signFileToken({ id: rid, exp: Date.now() + 10 * 60 * 1e3 });
+      res.json({ url: `/api/daily-reports/${encodeURIComponent(rid)}/file?t=${t}` });
+    }
+  );
+  app.get("/api/daily-reports/:id/file", async (req, res) => {
+    const rid = String(req.params.id);
+    if (!verifyFileToken(String(req.query.t || ""), rid))
+      return res.status(403).type("text/plain").send("This download link has expired. Go back to DFS Ops and tap Download again.");
+    const { data, error } = await (supabaseAdmin || supabaseAnon).from("daily_reports").select("attachment_name, attachment_mime, attachment_base64").eq("id", rid).single();
+    if (error || !data || !data.attachment_base64)
+      return res.status(404).type("text/plain").send("No document on file for this report.");
+    const name = (data.attachment_name || "daily-report.xlsx").replace(/[\r\n"]/g, "");
+    const ascii = name.replace(/[^\x20-\x7E]/g, "_");
+    res.setHeader(
+      "Content-Type",
+      data.attachment_mime || "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`
+    );
+    res.setHeader("Cache-Control", "private, no-store");
+    res.send(Buffer.from(data.attachment_base64, "base64"));
+  });
   app.get(
     "/api/daily-reports/:id/centrifuges",
     requireAuth,
