@@ -2018,10 +2018,19 @@ export interface RigUpReport {
   report_date: string | null;
   title: string | null;
   notes: string | null;
-  attachment_name: string;
+  attachment_name: string | null; // null for in-app inspections
   attachment_mime: string | null;
   attachment_size: number | null;
   status: RigUpStatus;
+  // In-app rig inspection fields (kind = "inspection"); null for uploads.
+  kind: RigUpKind;
+  site_conducted: string | null;
+  rig_number: string | null;
+  conducted_on: string | null;
+  prepared_by: string | null;
+  score_pass: number | null;
+  score_total: number | null;
+  flagged_count: number | null;
   uploaded_by: string | null;
   uploaded_by_name: string | null;
   signed_off_by: string | null;
@@ -2035,6 +2044,14 @@ export interface RigUpReport {
 export interface RigUpReportWithLinks extends RigUpReport {
   customer_name: string | null;
   job_number: string | null;
+  photo_count?: number;
+}
+
+// Full rig-up report for the inspection detail view.
+export interface RigUpReportDetail extends RigUpReportWithLinks {
+  well_name: string | null;
+  checklist: RigInspectionAnswer[] | null;
+  photos: { id: string; file_name: string; file_mime: string; caption: string | null; created_at: string }[];
 }
 
 export interface RigUpReportEvent {
@@ -2060,6 +2077,124 @@ export const createRigUpReportSchema = z.object({
   attachment_mime: z.string().nullable().optional(),
 });
 export type CreateRigUpReportInput = z.infer<typeof createRigUpReportSchema>;
+
+// ---- In-app rig inspection (rig-up report form) ----------------------------
+// Digital version of the "Official Rig Inspection" Mitti template (added
+// 2026-10-27). Same questions, same order, same Yes / No / N/A answers. Items
+// marked * on the paper form are required; the two without * are optional.
+// `flagOn` is the answer that means a problem: "No" for every item except the
+// last ("Are there any other findings...?"), where "Yes" is the flag. Sections
+// are only visual groupings for the phone form - the paper form has one
+// "RIG INSPECTION" section. `key` is stable so items can be trended later.
+export const RIG_INSPECTION_CHECKLIST: {
+  key: string;
+  section: string;
+  label: string;
+  required: boolean;
+  flagOn: "Yes" | "No";
+}[] = [
+  { key: "inspector_signed_in", section: "Paperwork & safety", label: "Did inspector sign in on location?", required: true, flagOn: "No" },
+  { key: "jsas_daily", section: "Paperwork & safety", label: "Are JSA,s being performed and documented daily?", required: true, flagOn: "No" },
+  { key: "h2s_monitor", section: "Paperwork & safety", label: "Is employee wearing H2S monitor?", required: true, flagOn: "No" },
+  { key: "covid_supplies", section: "Paperwork & safety", label: "Does the rig have all of the needed COVID Supplies?", required: true, flagOn: "No" },
+  { key: "msds_book", section: "Paperwork & safety", label: "MSDS book on location?", required: true, flagOn: "No" },
+  { key: "emergency_plan_posted", section: "Paperwork & safety", label: "Emergency contact information/evacuation plan with muster area marked and posted in trailer?", required: false, flagOn: "No" },
+  { key: "lanyard_fits", section: "Paperwork & safety", label: "Is there a lanyard on location? Does lanyard fit all employees on location?", required: true, flagOn: "No" },
+  { key: "first_aid_kit", section: "Paperwork & safety", label: "First Aid kit on location?", required: true, flagOn: "No" },
+  { key: "safety_meetings", section: "Paperwork & safety", label: "All employees are attending safety meetings?", required: true, flagOn: "No" },
+  { key: "boss_cards", section: "Paperwork & safety", label: "Are BOSS cards being completed and turned in?", required: true, flagOn: "No" },
+  { key: "excavator_checklist", section: "Paperwork & safety", label: "Excavator inspection checklist are being done daily?", required: true, flagOn: "No" },
+  { key: "loto_followed", section: "Paperwork & safety", label: "Are lock out tag out procedures being followed and documented?", required: true, flagOn: "No" },
+  { key: "ppe_stored", section: "Paperwork & safety", label: "Job specific PPE are properly stored and readily available?", required: true, flagOn: "No" },
+  { key: "equipment_grounded", section: "Grounding & SALA block", label: "All equipment is properly grounded, with tight connections and impalement caps on ground rods?", required: true, flagOn: "No" },
+  { key: "sala_tested", section: "Grounding & SALA block", label: "Has the SALA block been tested and made sure it is in good working order?", required: true, flagOn: "No" },
+  { key: "sala_in_place", section: "Grounding & SALA block", label: "Is the SALA block in place?", required: true, flagOn: "No" },
+  { key: "stand_pins_keepers", section: "Centrifuge stands", label: "Centrifuge stands/handrails have all pins and keepers properly installed?", required: true, flagOn: "No" },
+  { key: "stand_grounded", section: "Centrifuge stands", label: "Centrifuge stand are properly grounded?", required: true, flagOn: "No" },
+  { key: "stand_no_trip_hazards", section: "Centrifuge stands", label: "Is the Centrifuge stand free of any trip hazards?", required: true, flagOn: "No" },
+  { key: "stand_opening_closes", section: "Centrifuge stands", label: "Can the opening on the Centrifuge stands be closed?", required: true, flagOn: "No" },
+  { key: "cuttings_slides_secured", section: "Centrifuge stands", label: "Cuttings slides/Barite boxes are properly secured?", required: true, flagOn: "No" },
+  { key: "effluent_piping_secured", section: "Centrifuge stands", label: "Effluent piping secured?", required: true, flagOn: "No" },
+  { key: "effluent_no_leaks", section: "Centrifuge stands", label: "Effluent pipe is free from leaks?", required: true, flagOn: "No" },
+  { key: "handrails_kickplates", section: "Centrifuge stands", label: "Handrails and kickplates on stands are properly secured with no damage?", required: true, flagOn: "No" },
+  { key: "stand_grating_secure", section: "Centrifuge stands", label: "Grating on centrifuge stand secure?", required: true, flagOn: "No" },
+  { key: "machine_guards", section: "Centrifuge stands", label: "All machine gaurds are in place and properly secured?", required: true, flagOn: "No" },
+  { key: "vfd_placement", section: "VFDs & electrical", label: "VFD is set in correct place to minimize exposure to dust, fluids, and chemicals?", required: true, flagOn: "No" },
+  { key: "vfd_doors", section: "VFDs & electrical", label: "VFD doors in working order, properly closed, and sealed?", required: true, flagOn: "No" },
+  { key: "high_voltage_marked", section: "VFDs & electrical", label: "All electrical panels and VFDs marked \"HIGH VOLTAGE\"", required: true, flagOn: "No" },
+  { key: "plugs_connected_clean", section: "VFDs & electrical", label: "Electrical plugs are connected securely and free of excess dirt and debris?", required: true, flagOn: "No" },
+  { key: "plug_strain_relief", section: "VFDs & electrical", label: "Electrical plugs strain relief properly tightened with no exposed wiring?", required: true, flagOn: "No" },
+  { key: "cables_routed", section: "VFDs & electrical", label: "Electrical cables and hoses are routed correctly to eliminate trip hazards and damage?", required: true, flagOn: "No" },
+  { key: "electrical_boxes_secure", section: "VFDs & electrical", label: "All electrical boxes secure with no missing bolts, hardware, and are all buttons in good condition?", required: true, flagOn: "No" },
+  { key: "no_exposed_gland_wires", section: "VFDs & electrical", label: "No exposed wires from glands", required: false, flagOn: "No" },
+  { key: "cables_no_damage", section: "VFDs & electrical", label: "Electrical cables are free of nicks, cuts, and damage?", required: true, flagOn: "No" },
+  { key: "whip_checks", section: "Hoses & valves", label: "All hoses with pressure have whip checks correctly installed?", required: true, flagOn: "No" },
+  { key: "valve_handles", section: "Hoses & valves", label: "All valves have handles and work correctly?", required: true, flagOn: "No" },
+  { key: "open_valves_capped", section: "Hoses & valves", label: "Are all open ended valves capped off?", required: true, flagOn: "No" },
+  { key: "shakers_mounted", section: "Shakers", label: "Are shakers properly mounted to tanks?", required: true, flagOn: "No" },
+  { key: "shaker_tank_grating", section: "Shakers", label: "Grating on shaker tank is secure and free from damage?", required: true, flagOn: "No" },
+  { key: "shakers_conveying", section: "Shakers", label: "Are shakers conveying properly?", required: true, flagOn: "No" },
+  { key: "shaker_motor_wires", section: "Shakers", label: "Are wires to shakers motors secured to prevent rubbing against shaker?", required: true, flagOn: "No" },
+  { key: "shaker_motor_noise", section: "Shakers", label: "Are shaker motors free of excess noise?", required: true, flagOn: "No" },
+  { key: "shaker_skirts", section: "Shakers", label: "Shaker skirts in good condition?", required: true, flagOn: "No" },
+  { key: "shaker_screens", section: "Shakers", label: "Are shaker screens in good condition?", required: true, flagOn: "No" },
+  { key: "hoses_condition", section: "Shakers", label: "Are all hoses in good condition?", required: true, flagOn: "No" },
+  { key: "shaker_basket_grounded", section: "Shakers", label: "Shaker basket grounded to frame?", required: true, flagOn: "No" },
+  { key: "shaker_tank_grounded", section: "Shakers", label: "Shaker tank properly grounded?", required: true, flagOn: "No" },
+  { key: "shaker_slides_hung", section: "Shakers", label: "Shaker slide/chutes hung correctly, lined up, and not touching baskets?", required: true, flagOn: "No" },
+  { key: "dewatering_grounded", section: "Dewatering & mixing", label: "Dewatering unit grounded?", required: true, flagOn: "No" },
+  { key: "dewatering_hoses", section: "Dewatering & mixing", label: "All hoses attached to dewatering unit properly with whip checks?", required: true, flagOn: "No" },
+  { key: "mixing_tanks_no_leaks", section: "Dewatering & mixing", label: "Mixing tanks/plumbing inspected and no leaks", required: true, flagOn: "No" },
+  { key: "fire_extinguishers", section: "Housekeeping", label: "Fire extinguishers charged, in date, and properly located?", required: true, flagOn: "No" },
+  { key: "jobsite_clean", section: "Housekeeping", label: "Jobsite clean and organized?", required: true, flagOn: "No" },
+  { key: "jobsite_no_trash", section: "Housekeeping", label: "Jobsite free from trash?", required: true, flagOn: "No" },
+  { key: "tools_put_away", section: "Housekeeping", label: "Tools are clean and put away?", required: true, flagOn: "No" },
+  { key: "bunkhouse_clean", section: "Housekeeping", label: "Bunkhouse clean and presentable?", required: true, flagOn: "No" },
+  { key: "other_findings", section: "Other findings", label: "Are there any other findings that was not listed on this inspection?", required: true, flagOn: "Yes" },
+];
+
+// One answered row as stored in rig_up_reports.checklist (jsonb).
+export interface RigInspectionAnswer {
+  key: string;
+  section: string;
+  label: string;
+  answer: ServiceAnswer | null; // null = optional item left blank
+  flagged: boolean;
+  note: string | null;
+}
+
+export const RIG_UP_KINDS = ["upload", "inspection"] as const;
+export type RigUpKind = (typeof RIG_UP_KINDS)[number];
+
+// Payload for filing an in-app rig inspection. Photos are uploaded one at a
+// time afterwards (POST /api/rig-up-reports/:id/photos) to stay under the
+// hosting request-size limit.
+export const createRigInspectionSchema = z.object({
+  job_id: z.string().uuid("Choose a job"),
+  site_conducted: z.string().trim().min(1, "Site conducted is required").max(300),
+  rig_number: z.string().trim().max(100).nullable().optional(),
+  // Local date + time as typed on the form, e.g. "2026-10-27T14:30".
+  conducted_on: z.string().min(10, "Conducted on is required"),
+  prepared_by: z.string().trim().min(1, "Prepared by is required").max(200),
+  notes: z.string().trim().max(4000).nullable().optional(),
+  checklist: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        answer: z.enum(SERVICE_ANSWERS).nullable().optional(),
+        note: z.string().trim().max(2000).nullable().optional(),
+      }),
+    )
+    .min(1, "Answer the inspection"),
+});
+export type CreateRigInspectionInput = z.infer<typeof createRigInspectionSchema>;
+
+export const rigInspectionPhotoSchema = z.object({
+  file_name: z.string().min(1).max(200),
+  file_mime: z.string().min(1).max(100),
+  file_base64: z.string().min(1),
+  caption: z.string().trim().max(200).nullable().optional(),
+});
 
 // ---- Field daily report + JSA schemas --------------------------------------
 // Numeric KPI field: accepts number, blank, or null -> null when empty.

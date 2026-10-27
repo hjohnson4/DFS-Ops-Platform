@@ -37,7 +37,9 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Upload, Inbox, Download, ShieldCheck, Trash2 } from "lucide-react";
+import { Upload, Inbox, Download, ShieldCheck, Trash2, ClipboardCheck, Camera } from "lucide-react";
+import { NewRigInspectionDialog } from "@/components/NewRigInspectionDialog";
+import { RigInspectionDetailDialog } from "@/components/RigInspectionDetailDialog";
 import { parseDisplayDate } from "@/lib/utils";
 
 const STATUS_TONE: Record<RigUpStatus, string> = {
@@ -55,6 +57,8 @@ export default function RigUpReportsPage() {
   const { profile } = useAuth();
   const { toast } = useToast();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [inspectionOpen, setInspectionOpen] = useState(false);
+  const [viewId, setViewId] = useState<string | null>(null);
   const [toDelete, setToDelete] = useState<RigUpReportWithLinks | null>(null);
 
   const { data: reports, isLoading } = useQuery<RigUpReportWithLinks[]>({
@@ -150,12 +154,12 @@ export default function RigUpReportsPage() {
   }
 
   return (
-    <div className="p-6 max-w-5xl">
+    <div className="p-4 sm:p-6 max-w-5xl">
       <h1 className="text-xl font-semibold mb-3">Safety / JSAs</h1>
       <SafetyTabs />
-      <div className="flex items-center justify-between gap-2 mb-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
         <h2 className="text-base font-semibold">Rig-up Reports</h2>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {pending > 0 && (
             <span className="inline-flex items-center rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-400 px-2.5 py-1 text-xs font-medium">
               {pending} awaiting sign-off
@@ -164,6 +168,17 @@ export default function RigUpReportsPage() {
           {canUpload && (
             <Button
               size="sm"
+              onClick={() => setInspectionOpen(true)}
+              data-testid="button-new-rig-inspection"
+            >
+              <ClipboardCheck className="h-3.5 w-3.5 mr-1.5" />
+              New rig inspection
+            </Button>
+          )}
+          {canUpload && (
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => setDialogOpen(true)}
               data-testid="button-upload-rig-up"
             >
@@ -174,9 +189,9 @@ export default function RigUpReportsPage() {
         </div>
       </div>
       <p className="text-sm text-muted-foreground mb-5">
-        Supervisors and area managers upload rig-up reports for a job. Each
-        report is tracked here and held until the area manager for the job's
-        area signs it off.
+        Supervisors and area managers fill out a rig inspection in the app (or
+        upload a rig-up report file) for a job. Each report is tracked here and
+        held until the area manager for the job's area signs it off.
       </p>
 
       {isLoading ? (
@@ -191,13 +206,98 @@ export default function RigUpReportsPage() {
           </div>
           <div className="text-xs text-muted-foreground mt-1">
             {canUpload
-              ? "Use “Upload rig-up report” to add one for a job."
+              ? "Use “New rig inspection” to fill one out, or “Upload rig-up report” to add a file."
               : "Rig-up reports uploaded by supervisors will appear here."}
           </div>
         </div>
       ) : (
-        <div className="rounded-lg border border-card-border overflow-hidden">
-          <table className="w-full text-sm">
+        <>
+        {/* Phones: one card per report */}
+        <div className="sm:hidden space-y-2">
+          {(reports || []).map((r) => (
+            <div
+              key={r.id}
+              className="rounded-lg border border-card-border p-3"
+              data-testid={`card-rig-up-${r.id}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-medium">{r.job_number || "—"}</div>
+                  <div className="text-xs text-muted-foreground truncate">
+                    {r.customer_name || "—"} · {r.area}
+                  </div>
+                </div>
+                <span
+                  className={`shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${STATUS_TONE[r.status]}`}
+                >
+                  {r.status}
+                </span>
+              </div>
+              <div className="mt-2 text-sm">
+                {r.kind === "inspection" ? (
+                  <button
+                    className="inline-flex items-center gap-1 font-medium text-primary"
+                    onClick={() => setViewId(r.id)}
+                  >
+                    <ClipboardCheck className="h-3.5 w-3.5" />
+                    Rig inspection{r.rig_number ? ` · ${r.rig_number}` : ""}
+                  </button>
+                ) : (
+                  <button
+                    className="inline-flex items-center gap-1 text-primary text-left break-all"
+                    onClick={() => download(r)}
+                  >
+                    <Download className="h-3.5 w-3.5 shrink-0" />
+                    {r.title || r.attachment_name}
+                  </button>
+                )}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {fmt(r.created_at)}
+                {r.uploaded_by_name ? ` · by ${r.uploaded_by_name}` : ""}
+                {r.kind === "inspection" && (
+                  <>
+                    {" · "}
+                    {r.score_total
+                      ? `${Math.round(((r.score_pass ?? 0) / r.score_total) * 100)}%`
+                      : "—"}
+                    {" · "}
+                    <span className={(r.flagged_count ?? 0) > 0 ? "text-red-600 dark:text-red-400 font-medium" : ""}>
+                      {r.flagged_count ?? 0} flagged
+                    </span>
+                  </>
+                )}
+              </div>
+              {(canSignOff(r) || canDelete(r)) && (
+                <div className="mt-2 flex items-center justify-end gap-1.5">
+                  {canSignOff(r) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={signOff.isPending}
+                      onClick={() => signOff.mutate(r.id)}
+                    >
+                      <ShieldCheck className="h-3.5 w-3.5 mr-1" />
+                      Sign off
+                    </Button>
+                  )}
+                  {canDelete(r) && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-8 w-8 text-muted-foreground hover:text-red-600"
+                      onClick={() => setToDelete(r)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="hidden sm:block rounded-lg border border-card-border overflow-x-auto">
+          <table className="w-full text-sm min-w-[720px]">
             <thead className="bg-muted/50 text-muted-foreground">
               <tr className="text-left">
                 <th className="px-4 py-2.5 font-medium">Uploaded</th>
@@ -231,6 +331,34 @@ export default function RigUpReportsPage() {
                   </td>
                   <td className="px-4 py-2.5 whitespace-nowrap">{r.area}</td>
                   <td className="px-4 py-2.5">
+                    {r.kind === "inspection" ? (
+                      <>
+                        <button
+                          className="inline-flex items-center gap-1 font-medium text-primary hover:underline text-left"
+                          onClick={() => setViewId(r.id)}
+                          data-testid={`button-view-inspection-${r.id}`}
+                        >
+                          <ClipboardCheck className="h-3.5 w-3.5" />
+                          Rig inspection{r.rig_number ? ` · ${r.rig_number}` : ""}
+                        </button>
+                        <div className="text-xs text-muted-foreground">
+                          {r.score_total
+                            ? `${Math.round(((r.score_pass ?? 0) / r.score_total) * 100)}% (${r.score_pass ?? 0}/${r.score_total})`
+                            : "—"}
+                          {" · "}
+                          <span className={(r.flagged_count ?? 0) > 0 ? "text-red-600 dark:text-red-400 font-medium" : ""}>
+                            {r.flagged_count ?? 0} flagged
+                          </span>
+                          {(r.photo_count ?? 0) > 0 && (
+                            <span className="inline-flex items-center gap-0.5 ml-1.5">
+                              <Camera className="h-3 w-3" />
+                              {r.photo_count}
+                            </span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                    <>
                     {r.title && <div className="font-medium">{r.title}</div>}
                     <button
                       className="inline-flex items-center gap-1 text-primary hover:underline text-xs"
@@ -240,6 +368,8 @@ export default function RigUpReportsPage() {
                       <Download className="h-3 w-3" />
                       {r.attachment_name}
                     </button>
+                    </>
+                    )}
                     {r.report_date && (
                       <div className="text-xs text-muted-foreground">
                         Report date: {fmt(r.report_date)}
@@ -291,7 +421,17 @@ export default function RigUpReportsPage() {
             </tbody>
           </table>
         </div>
+        </>
       )}
+
+      {canUpload && (
+        <NewRigInspectionDialog
+          open={inspectionOpen}
+          onOpenChange={setInspectionOpen}
+          userArea={profile?.role === "admin" ? null : profile?.area ?? null}
+        />
+      )}
+      <RigInspectionDetailDialog reportId={viewId} onClose={() => setViewId(null)} />
 
       {canUpload && (
         <UploadDialog
@@ -309,7 +449,8 @@ export default function RigUpReportsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Remove this rig-up report?</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently deletes the report and its uploaded file. This
+              This permanently deletes the report and its uploaded file or
+              inspection photos. This
               cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>

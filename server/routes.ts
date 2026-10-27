@@ -26,6 +26,9 @@ import {
   createReportSchema,
   createServiceReportSchema,
   CENTRIFUGE_SERVICE_CHECKLIST,
+  RIG_INSPECTION_CHECKLIST,
+  createRigInspectionSchema,
+  rigInspectionPhotoSchema,
   uploadServiceReportSchema,
   createCustomerSchema,
   updateCustomerSchema,
@@ -72,6 +75,7 @@ import {
 } from "@shared/schema";
 import type {
   ServiceAssetRow,
+  RigInspectionAnswer,
   ServiceDashboard,
   ServiceAssetDetail,
   JobHours,
@@ -7701,7 +7705,7 @@ export async function registerRoutes(
   // the job's area (admins too). Attachment bytes are excluded from list/detail
   // payloads and stream from a dedicated download route.
   const RIG_UP_LIST_COLS =
-    "id, job_id, area, customer_id, report_date, title, notes, attachment_name, attachment_mime, attachment_size, status, uploaded_by, uploaded_by_name, signed_off_by, signed_off_by_name, signed_off_at, created_at";
+    "id, job_id, area, customer_id, report_date, title, notes, attachment_name, attachment_mime, attachment_size, status, uploaded_by, uploaded_by_name, signed_off_by, signed_off_by_name, signed_off_at, created_at, kind, site_conducted, rig_number, conducted_on, prepared_by, score_pass, score_total, flagged_count";
 
   // List rig-up reports, newest first. Area-scoped: admins see all; area
   // managers, supervisors and field techs see only their own area.
@@ -7719,12 +7723,23 @@ export async function registerRoutes(
       if (scope) q = q.eq("area", scope);
       const { data, error } = await q;
       if (error) return res.status(500).json({ message: error.message });
+      // Photo counts for in-app inspections (ids only — no image bytes).
+      const inspIds = (data || []).filter((r: any) => r.kind === "inspection").map((r: any) => r.id);
+      const photoCount: Record<string, number> = {};
+      if (inspIds.length) {
+        const { data: ph } = await (supabaseAdmin || supabaseAnon)
+          .from("rig_up_report_photos")
+          .select("rig_up_id")
+          .in("rig_up_id", inspIds);
+        for (const r of ph || []) photoCount[(r as any).rig_up_id] = (photoCount[(r as any).rig_up_id] || 0) + 1;
+      }
       const rows = (data || []).map((r: any) => {
         const { jobs, customers, ...rest } = r;
         return {
           ...rest,
           job_number: jobs?.job_number ?? null,
           customer_name: customers?.name ?? null,
+          photo_count: photoCount[r.id] || 0,
         };
       });
       res.json(rows);
@@ -7815,6 +7830,215 @@ export async function registerRoutes(
         `inline; filename="${((data as any).attachment_name || "rig-up-report").replace(/"/g, "")}"`,
       );
       res.send(buf);
+    },
+  );
+
+  // ---- In-app rig inspection (added 2026-10-27) ------------------------------
+  // Digital "Official Rig Inspection" filed as a rig-up report (kind =
+  // "inspection"). Same roles and area rules as uploads; same area-manager
+  // sign-off. Score = answered Yes/No items that are not flagged / all
+  // answered Yes/No items (N/A and blank optional items are left out).
+  app.post(
+    "/api/rig-up-reports/inspection",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const parsed = createRigInspectionSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const p = parsed.data;
+      const client = supabaseAdmin || supabaseAnon;
+
+      const { data: job, error: jobErr } = await client
+        .from("jobs")
+        .select("id, area, customer_id, job_number")
+        .eq("id", p.job_id)
+        .single();
+      if (jobErr || !job) return res.status(404).json({ message: "Job not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && job.area !== scope)
+        return res
+          .status(403)
+          .json({ message: "You can only file rig inspections for jobs in your area." });
+
+      const given = new Map(p.checklist.map((c) => [c.key, c]));
+      const checklist: RigInspectionAnswer[] = [];
+      const missing: string[] = [];
+      let pass = 0;
+      let total = 0;
+      let flagged = 0;
+      for (const def of RIG_INSPECTION_CHECKLIST) {
+        const g = given.get(def.key);
+        const answer = (g?.answer ?? null) as RigInspectionAnswer["answer"];
+        if (!answer && def.required) missing.push(def.label);
+        const isFlag = !!answer && answer === def.flagOn;
+        if (answer && answer !== "N/A") {
+          total += 1;
+          if (isFlag) flagged += 1;
+          else pass += 1;
+        }
+        checklist.push({
+          key: def.key,
+          section: def.section,
+          label: def.label,
+          answer,
+          flagged: isFlag,
+          note: g?.note?.trim() ? g.note.trim() : null,
+        });
+      }
+      if (missing.length)
+        return res.status(400).json({
+          message: `Answer all required questions (${missing.length} left). First one: "${missing[0]}"`,
+        });
+
+      const reportDate = /^\d{4}-\d{2}-\d{2}/.test(p.conducted_on) ? p.conducted_on.slice(0, 10) : null;
+      const { data, error } = await client
+        .from("rig_up_reports")
+        .insert({
+          job_id: job.id,
+          area: job.area,
+          customer_id: job.customer_id,
+          report_date: reportDate,
+          title: "Rig inspection",
+          notes: p.notes ?? null,
+          kind: "inspection",
+          site_conducted: p.site_conducted,
+          rig_number: p.rig_number || null,
+          conducted_on: p.conducted_on,
+          prepared_by: p.prepared_by,
+          checklist,
+          score_pass: pass,
+          score_total: total,
+          flagged_count: flagged,
+          status: "Pending sign-off",
+          uploaded_by: req.profile!.id,
+          uploaded_by_name: req.profile!.name,
+        })
+        .select(RIG_UP_LIST_COLS)
+        .single();
+      if (error) return res.status(400).json({ message: error.message });
+      await client.from("rig_up_report_events").insert({
+        rig_up_id: data.id,
+        actor_id: req.profile!.id,
+        actor_name: req.profile!.name,
+        actor_role: req.profile!.role,
+        action: "uploaded",
+        detail: `Filed rig inspection for job ${job.job_number} (${job.area}): ${pass}/${total} pass, ${flagged} flagged.`,
+      });
+      res.status(201).json(data);
+    },
+  );
+
+  // Full rig-up report (checklist + photo list without bytes). Area-scoped.
+  app.get(
+    "/api/rig-up-reports/:id",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const rid = String(req.params.id);
+      const client = supabaseAdmin || supabaseAnon;
+      const { data, error } = await client
+        .from("rig_up_reports")
+        .select(
+          `${RIG_UP_LIST_COLS}, checklist, jobs:jobs!rig_up_reports_job_id_fkey(job_number, well_name), customers:customers!rig_up_reports_customer_id_fkey(name)`,
+        )
+        .eq("id", rid)
+        .single();
+      if (error || !data) return res.status(404).json({ message: "Rig-up report not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && (data as any).area !== scope)
+        return res.status(404).json({ message: "Rig-up report not found" });
+      const { data: photos } = await client
+        .from("rig_up_report_photos")
+        .select("id, file_name, file_mime, caption, created_at")
+        .eq("rig_up_id", rid)
+        .order("created_at", { ascending: true });
+      const { jobs, customers, ...rest } = data as any;
+      res.json({
+        ...rest,
+        job_number: jobs?.job_number ?? null,
+        well_name: jobs?.well_name ?? null,
+        customer_name: customers?.name ?? null,
+        photos: photos || [],
+        photo_count: (photos || []).length,
+      });
+    },
+  );
+
+  // Add one photo to a rig inspection (one per request keeps each upload
+  // small). Uploader roles, own area, and only while it awaits sign-off.
+  app.post(
+    "/api/rig-up-reports/:id/photos",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const rid = String(req.params.id);
+      const parsed = rigInspectionPhotoSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      if (!parsed.data.file_mime.startsWith("image/"))
+        return res.status(400).json({ message: "Photos must be images." });
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: rep } = await client
+        .from("rig_up_reports")
+        .select("id, area, status, kind")
+        .eq("id", rid)
+        .single();
+      if (!rep) return res.status(404).json({ message: "Rig-up report not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && rep.area !== scope)
+        return res.status(404).json({ message: "Rig-up report not found" });
+      if (rep.status === "Signed off")
+        return res.status(409).json({ message: "This report is already signed off." });
+      const { count } = await client
+        .from("rig_up_report_photos")
+        .select("id", { count: "exact", head: true })
+        .eq("rig_up_id", rid);
+      if ((count || 0) >= 24)
+        return res.status(400).json({ message: "A report can have up to 24 photos." });
+      const bytes = Buffer.from(parsed.data.file_base64, "base64");
+      const { data, error } = await client
+        .from("rig_up_report_photos")
+        .insert({
+          rig_up_id: rid,
+          file_name: parsed.data.file_name,
+          file_mime: parsed.data.file_mime,
+          file_size: bytes.length,
+          file_base64: parsed.data.file_base64,
+          caption: parsed.data.caption ?? null,
+          uploaded_by: req.profile!.id,
+        })
+        .select("id, file_name, file_mime, caption, created_at")
+        .single();
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(201).json(data);
+    },
+  );
+
+  // Stream one inspection photo. Area-scoped.
+  app.get(
+    "/api/rig-up-reports/:id/photos/:photoId",
+    requireAuth,
+    async (req: Request, res: Response) => {
+      const rid = String(req.params.id);
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: rep } = await client
+        .from("rig_up_reports")
+        .select("area")
+        .eq("id", rid)
+        .single();
+      const scope = areaScopeOf(req.profile!);
+      if (!rep || (scope && rep.area !== scope))
+        return res.status(404).json({ message: "Photo not found" });
+      const { data: ph } = await client
+        .from("rig_up_report_photos")
+        .select("file_mime, file_base64")
+        .eq("id", String(req.params.photoId))
+        .eq("rig_up_id", rid)
+        .single();
+      if (!ph) return res.status(404).json({ message: "Photo not found" });
+      res.setHeader("Content-Type", ph.file_mime || "image/jpeg");
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.send(Buffer.from(ph.file_base64, "base64"));
     },
   );
 
