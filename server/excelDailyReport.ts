@@ -239,11 +239,37 @@ function toDateStrRaw(v: any): string | null {
     }
   }
   const s = String(v).trim();
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  // Typed text dates. Crews write them several ways: 10/29/2026, 10-29-2026,
+  // 10.29.26, 2026-10-29 — and sometimes with month and day swapped
+  // ("2026-30-10" for Oct 30). Read each form explicitly, swap month/day when
+  // the month is impossible but the swap is a real date, and reject anything
+  // that still isn't a real calendar day (Postgres would refuse it and the
+  // whole email would fail to import).
+  const ymd = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/.exec(s);
+  if (ymd) return realYmd(Number(ymd[1]), Number(ymd[2]), Number(ymd[3]));
+  const mdy = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:\D|$)/.exec(s);
+  if (mdy) {
+    let y = Number(mdy[3]);
+    if (mdy[3].length === 2) y += 2000;
+    return realYmd(y, Number(mdy[1]), Number(mdy[2]));
+  }
   const parsed = new Date(s);
   if (!isNaN(parsed.getTime())) return ymdLocal(parsed);
   return null;
+}
+
+// y/m/d -> yyyy-mm-dd when it is a real calendar day. If the month is out of
+// range but swapping month and day gives a real date, use the swap.
+function realYmd(y: number, m: number, d: number): string | null {
+  const ok = (mm: number, dd: number) => {
+    if (mm < 1 || mm > 12 || dd < 1) return false;
+    const t = new Date(Date.UTC(y, mm - 1, dd));
+    return t.getUTCMonth() === mm - 1 && t.getUTCDate() === dd;
+  };
+  let mm = m, dd = d;
+  if (!ok(mm, dd) && ok(d, m)) { mm = d; dd = m; }
+  if (!ok(mm, dd)) return null;
+  return `${y}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
 }
 
 // Add a whole number of days to a yyyy-mm-dd string, returning yyyy-mm-dd.
@@ -324,6 +350,14 @@ function reportDaySheets(
     if (!completed && !isFirst && ws && day1Date) {
       const d = toDateStr(rawCell(ws, DATE_CELL));
       if (d && d > day1Date) completed = true;
+    }
+    // A tab with NO date of its own that comes after a blank template tab is
+    // not a worked day — crews sometimes park notes (and a copied depth) on a
+    // far-off tab like "21". Without this the importer took that tab as the
+    // newest day and invented its date from the template tab before it.
+    if (completed && !isFirst && ws && !toDateStr(rawCell(ws, DATE_CELL))) {
+      const prev = out[out.length - 1];
+      if (prev && !prev.completed) completed = false;
     }
     if (completed) {
       const d = ws ? toDateStr(rawCell(ws, DATE_CELL)) : null;

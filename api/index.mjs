@@ -463,11 +463,31 @@ function toDateStrRaw(v) {
     }
   }
   const s = String(v).trim();
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
-  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  const ymd2 = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\D|$)/.exec(s);
+  if (ymd2) return realYmd(Number(ymd2[1]), Number(ymd2[2]), Number(ymd2[3]));
+  const mdy = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:\D|$)/.exec(s);
+  if (mdy) {
+    let y = Number(mdy[3]);
+    if (mdy[3].length === 2) y += 2e3;
+    return realYmd(y, Number(mdy[1]), Number(mdy[2]));
+  }
   const parsed = new Date(s);
   if (!isNaN(parsed.getTime())) return ymdLocal(parsed);
   return null;
+}
+function realYmd(y, m, d) {
+  const ok = (mm2, dd2) => {
+    if (mm2 < 1 || mm2 > 12 || dd2 < 1) return false;
+    const t = new Date(Date.UTC(y, mm2 - 1, dd2));
+    return t.getUTCMonth() === mm2 - 1 && t.getUTCDate() === dd2;
+  };
+  let mm = m, dd = d;
+  if (!ok(mm, dd) && ok(d, m)) {
+    mm = d;
+    dd = m;
+  }
+  if (!ok(mm, dd)) return null;
+  return `${y}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
 }
 function addDaysToDateStr(dateStr2, days) {
   const d = /* @__PURE__ */ new Date(`${dateStr2}T00:00:00Z`);
@@ -505,6 +525,10 @@ function reportDaySheets(wb) {
     if (!completed && !isFirst && ws2 && day1Date) {
       const d = toDateStr(rawCell(ws2, DATE_CELL));
       if (d && d > day1Date) completed = true;
+    }
+    if (completed && !isFirst && ws2 && !toDateStr(rawCell(ws2, DATE_CELL))) {
+      const prev = out[out.length - 1];
+      if (prev && !prev.completed) completed = false;
     }
     if (completed) {
       const d = ws2 ? toDateStr(rawCell(ws2, DATE_CELL)) : null;
