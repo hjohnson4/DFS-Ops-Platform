@@ -1585,6 +1585,10 @@ export const createJobSchema = z.object({
   // supervisor profile ids assigned to this job on creation. Assigning a
   // supervisor lets them log drive-by / call-out services on unmanned jobs.
   supervisor_ids: z.array(z.string().uuid()).optional(),
+  // "No daily reports" job (like Silver Back / the Mud Plant): the set day
+  // rate bills every day on the job's billing calendar from billing_start_date.
+  no_reports: z.boolean().optional(),
+  billing_start_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 });
 export type CreateJobInput = z.infer<typeof createJobSchema>;
 

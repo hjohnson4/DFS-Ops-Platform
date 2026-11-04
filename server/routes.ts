@@ -2624,20 +2624,41 @@ export async function registerRoutes(
         return res
           .status(403)
           .json({ message: "You can only create jobs in your area" });
+      // "No daily reports" job: set day rate on a billing calendar (the same
+      // setup as Silver Back / the Mud Plant). Admin / Area Manager only.
+      const noReports = !!parsed.data.no_reports;
+      let billingStart: string | null = null;
+      if (noReports) {
+        if (!["admin", "area"].includes(req.profile!.role))
+          return res.status(403).json({
+            message: "Only an Admin or Area Manager can create a no-reports (set day rate) job",
+          });
+        if (!(Number(parsed.data.day_rate) > 0))
+          return res.status(400).json({ message: "Enter the day rate to bill each day" });
+        billingStart =
+          parsed.data.billing_start_date || parsed.data.started_on || todayCentral();
+      }
       const client = supabaseAdmin || supabaseAnon;
       const { data, error } = await client
         .from("jobs")
         .insert({
+          ...(noReports
+            ? {
+                manual_day_rate: true,
+                manual_billing_mode: "calendar",
+                billing_start_date: billingStart,
+              }
+            : {}),
           job_number: parsed.data.job_number,
           area: parsed.data.area,
           customer_id: parsed.data.customer_id,
           description: parsed.data.description ?? null,
           status: parsed.data.status ?? "Active",
           crewing: parsed.data.crewing ?? "Manned",
-          started_on: parsed.data.started_on || null,
+          started_on: parsed.data.started_on || billingStart || null,
           ended_on: parsed.data.ended_on || null,
           day_rate: parsed.data.day_rate ?? null,
-          well_name: parsed.data.well_name?.trim() || null,
+          well_name: noReports ? null : parsed.data.well_name?.trim() || null,
         })
         .select()
         .single();

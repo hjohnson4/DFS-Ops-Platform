@@ -5,6 +5,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
 import { AREAS, CREWING, type Customer, type Asset, type Crewing, assetIsAssignable } from "@shared/schema";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -34,6 +35,10 @@ interface Props {
   lockedCustomer?: Customer;
   onCreated?: () => void;
 }
+
+// Today's date (Central) as yyyy-mm-dd, for the billing start default.
+const todayIso = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(new Date());
 
 export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
   const { profile } = useAuth();
@@ -85,6 +90,11 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
   // Optional starter pad — just enough to begin; expanded later on the job page.
   const [padName, setPadName] = useState("");
   const [padWells, setPadWells] = useState("");
+  // "No daily reports" job (like Silver Back / the Mud Plant): the set day
+  // rate bills every day on a billing calendar. Admin / Area Manager only.
+  const canSetNoReports = profile?.role === "admin" || profile?.role === "area";
+  const [noReports, setNoReports] = useState(false);
+  const [billingStart, setBillingStart] = useState("");
 
   const effectiveArea = areaLocked ? profile?.area || AREAS[0] : area;
 
@@ -122,9 +132,13 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
     setArea(profile?.area || AREAS[0]);
     setPadName("");
     setPadWells("");
+    setNoReports(false);
+    setBillingStart("");
   };
 
   const dateError = !!startedOn && !!endedOn && endedOn < startedOn;
+  const rateMissing =
+    noReports && !(dayRate.trim() !== "" && Number.isFinite(Number(dayRate)) && Number(dayRate) > 0);
 
   const create = useMutation({
     mutationFn: async () => {
@@ -138,7 +152,10 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
         started_on: startedOn || null,
         ended_on: endedOn || null,
         day_rate: dayRate.trim() === "" ? null : Number(dayRate),
-        well_name: wellName.trim() || null,
+        well_name: noReports ? null : wellName.trim() || null,
+        ...(noReports
+          ? { no_reports: true, billing_start_date: billingStart || startedOn || null }
+          : {}),
         asset_ids: assetIds,
         field_tech_ids: techIds,
         supervisor_ids: supIds,
@@ -149,7 +166,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
       // best-effort follow-on: if it fails, the job still exists and the pad
       // can be added later from the job page.
       let padWarning: string | null = null;
-      if (padName.trim() && job?.id) {
+      if (!noReports && padName.trim() && job?.id) {
         const well_names = padWells
           .split(/[\n,]/)
           .map((s) => s.trim())
@@ -307,6 +324,67 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
             </ToggleGroup>
           </div>
 
+          {/* No daily reports: set day rate billed every day */}
+          <div
+            className={`rounded-lg border p-3 space-y-3 ${noReports ? "border-primary bg-primary/5" : "border-card-border"}`}
+          >
+            <div className="flex items-start gap-3">
+              <Switch
+                checked={noReports}
+                onCheckedChange={(v) => {
+                  setNoReports(v);
+                  if (v && !billingStart) setBillingStart(startedOn || todayIso());
+                }}
+                disabled={!canSetNoReports}
+                id="switch-no-reports"
+                data-testid="switch-job-no-reports"
+              />
+              <label htmlFor="switch-no-reports" className="cursor-pointer">
+                <span className="block text-sm font-medium">
+                  No daily reports — bill the set day rate every day
+                </span>
+                <span className="block text-xs text-muted-foreground">
+                  For jobs like Silver Back and the Mud Plant. The day rate adds up every day from the billing
+                  start date on the job's billing calendar — no reports needed.
+                  {!canSetNoReports && " Only an Admin or Area Manager can turn this on."}
+                </span>
+              </label>
+            </div>
+            {noReports && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Day rate (required)</Label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      inputMode="decimal"
+                      className="pl-7"
+                      placeholder="0.00"
+                      value={dayRate}
+                      onChange={(e) => setDayRate(e.target.value)}
+                      data-testid="input-job-no-reports-rate"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Billing starts</Label>
+                  <Input
+                    type="date"
+                    value={billingStart}
+                    onChange={(e) => setBillingStart(e.target.value)}
+                    data-testid="input-job-billing-start"
+                  />
+                </div>
+                {rateMissing && (
+                  <p className="col-span-2 text-xs text-destructive">Enter the day rate to bill each day.</p>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Start / end dates */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -334,6 +412,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
             </p>
           )}
 
+          {!noReports && (
           <div className="space-y-1.5">
             <Label>Starting day rate (optional)</Label>
             <div className="relative">
@@ -356,6 +435,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
               (cell AL57), so it updates automatically when the rate changes.
             </p>
           </div>
+          )}
 
           {/* Assign assets */}
           <div className="space-y-1.5">
@@ -470,6 +550,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
             )}
           </div>
 
+          {!noReports && (
           <div className="space-y-1.5">
             <Label>Well name (optional)</Label>
             <Input
@@ -482,8 +563,10 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
               Used to auto-match emailed daily reports to this job.
             </p>
           </div>
+          )}
 
           {/* Optional starter pad */}
+          {!noReports && (
           <div className="rounded-lg border border-card-border bg-muted/20 p-3 space-y-3">
             <div className="flex items-center gap-1.5">
               <Layers className="h-4 w-4 text-primary" />
@@ -520,6 +603,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
               </p>
             </div>
           </div>
+          )}
 
           <div className="space-y-1.5">
             <Label>Description (optional)</Label>
@@ -534,7 +618,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
         <DialogFooter>
           <Button
             onClick={() => create.mutate()}
-            disabled={create.isPending || !jobNumber || !effectiveCustomerId || dateError}
+            disabled={create.isPending || !jobNumber || !effectiveCustomerId || dateError || rateMissing}
             data-testid="button-save-job"
           >
             {create.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
