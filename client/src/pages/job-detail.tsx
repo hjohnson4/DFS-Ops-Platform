@@ -783,7 +783,7 @@ export default function JobDetailPage() {
                   >
                     Centrifuge {slot}
                   </span>
-                ) : centrifugeCount >= 2 ? (
+                ) : centrifugeCount >= 2 && !(job.manual_day_rate && job.manual_billing_mode === "calendar") ? (
                   <span
                     className="inline-flex rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-xs text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300"
                     data-testid={`badge-slot-${a.id}`}
