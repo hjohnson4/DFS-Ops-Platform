@@ -1,3 +1,4 @@
+import { openWorkOrdersByAsset } from "./openWorkOrders";
 import type { Express, Request, Response } from "express";
 import { supabaseAnon, supabaseAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf } from "./auth";
@@ -255,6 +256,13 @@ export function registerForecastRoutes(app: Express) {
           .in("id", extra);
         (more || []).forEach((a: any) => assets.push(a));
       }
+      // Out on an open work order => "Unavailable" (shows as In shop).
+      const woMap = await openWorkOrdersByAsset(assets.map((a: any) => a.id));
+      assets.forEach((a: any) => {
+        const wo = woMap.get(a.id);
+        a.open_work_order = wo || null;
+        if (wo) a.status = "Unavailable";
+      });
       // Asset-number order: compare the numeric part, then the full tag.
       const num = (t: string) => {
         const m = String(t).match(/(\d+)/);
@@ -477,6 +485,11 @@ export function registerForecastRoutes(app: Express) {
           return !p.asset?.job_id || !j || j.archived_at || !LIVE_STATUSES.includes(j.status);
         })
         .map((p: any) => p.asset_id);
+      // Units out on an open work order (Unavailable) stay planned, not moved.
+      const outOnWo = await openWorkOrdersByAsset(movable);
+      const movableNow = movable.filter((id: string) => !outOnWo.has(id));
+      movable.length = 0;
+      movable.push(...movableNow);
       let moved: string[] = [];
       if (movable.length) {
         const { error: mErr } = await client

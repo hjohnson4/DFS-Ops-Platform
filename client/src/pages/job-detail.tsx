@@ -29,6 +29,7 @@ import {
   isLiveJobStatus,
   tracksRunHours,
   type BidDocument,
+  assetIsAssignable,
 } from "@shared/schema";
 import { FieldTicketDialog, StatusBadge } from "@/components/FieldTicketDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
@@ -140,7 +141,7 @@ export default function JobDetailPage() {
   // assets available to attach: unassigned AND in this job's operating area
   // (the backend enforces the same-area rule; we mirror it in the picker)
   const attachableAssets = (allAssets || []).filter(
-    (a) => !a.job_id && a.area === job?.area && a.status !== "Returned",
+    (a) => a.area === job?.area && assetIsAssignable(a),
   );
 
   // field tickets for this job (Admin / Area Manager / Supervisor only)

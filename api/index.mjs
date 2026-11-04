@@ -830,6 +830,7 @@ var centrifugeSlotField = z.union([
   })
 ]).optional();
 var RETURNED_RENTAL_STATUS = "Returned";
+var UNAVAILABLE_STATUS = "Unavailable";
 function assetStatusFor(jobId, current) {
   if (jobId) return "On Job";
   if (current === RETURNED_RENTAL_STATUS) return RETURNED_RENTAL_STATUS;
@@ -1345,7 +1346,10 @@ var createWorkOrderSchema = z.object({
   priority: z.enum(WORK_ORDER_PRIORITIES).default("Medium"),
   status: z.enum(WORK_ORDER_OPEN_STATUSES).default("In Progress"),
   due_date: dateStr.nullable().optional(),
-  notes: z.string().nullable().optional()
+  notes: z.string().nullable().optional(),
+  // If the machine is on a job, optionally swap in this available unit
+  // (it takes the outgoing unit's place and centrifuge slot on that job).
+  replace_with_asset_id: z.string().uuid().nullable().optional()
 });
 var updateWorkOrderSchema = z.object({
   title: z.string().trim().min(1).optional(),
@@ -1422,6 +1426,36 @@ var setJobReleaseSchema = z.object({
 var setProjectedRateSchema = z.object({
   projected_day_rate: z.number().nonnegative().max(1e6).nullable()
 });
+
+// server/openWorkOrders.ts
+async function openWorkOrdersByAsset(assetIds) {
+  const out = /* @__PURE__ */ new Map();
+  const ids = Array.from(new Set(assetIds.filter(Boolean)));
+  if (!ids.length) return out;
+  const client3 = supabaseAdmin || supabaseAnon;
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data, error } = await client3.from("work_orders").select("id, asset_id, wo_number, vendor, sent_on, due_date, created_at").in("asset_id", ids.slice(i, i + 200)).neq("status", "Completed").order("created_at", { ascending: false });
+    if (error) return out;
+    for (const w of data || []) {
+      if (out.has(w.asset_id)) continue;
+      out.set(w.asset_id, {
+        id: w.id,
+        wo_number: w.wo_number,
+        vendor: w.vendor ?? null,
+        sent_on: w.sent_on ?? null,
+        due_date: w.due_date ?? null
+      });
+    }
+  }
+  return out;
+}
+async function withOpenWorkOrders(assets) {
+  const map = await openWorkOrdersByAsset(assets.map((a) => a.id));
+  return assets.map((a) => {
+    const wo = map.get(a.id) || null;
+    return wo ? { ...a, status: UNAVAILABLE_STATUS, open_work_order: wo } : { ...a, open_work_order: null };
+  });
+}
 
 // server/forecast.ts
 var db = () => supabaseAdmin || supabaseAnon;
@@ -1597,6 +1631,12 @@ function registerForecastRoutes(app) {
         const { data: more } = await client3.from("assets").select("id, tag, category, area, status, job_id, is_rental, rental_vendor").in("id", extra);
         (more || []).forEach((a) => assets.push(a));
       }
+      const woMap = await openWorkOrdersByAsset(assets.map((a) => a.id));
+      assets.forEach((a) => {
+        const wo = woMap.get(a.id);
+        a.open_work_order = wo || null;
+        if (wo) a.status = "Unavailable";
+      });
       const num3 = (t) => {
         const m = String(t).match(/(\d+)/);
         return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
@@ -1772,6 +1812,10 @@ function registerForecastRoutes(app) {
         const j = p.asset?.job;
         return !p.asset?.job_id || !j || j.archived_at || !LIVE_STATUSES.includes(j.status);
       }).map((p) => p.asset_id);
+      const outOnWo = await openWorkOrdersByAsset(movable);
+      const movableNow = movable.filter((id) => !outOnWo.has(id));
+      movable.length = 0;
+      movable.push(...movableNow);
       let moved = [];
       if (movable.length) {
         const { error: mErr } = await client3.from("assets").update({ job_id: job.id, status: "On Job", area: f.area }).in("id", movable);
@@ -4605,7 +4649,9 @@ async function registerRoutes(httpServer, app) {
           });
         return res.status(400).json({ message: error.message });
       }
-      const assetIds = parsed.data.asset_ids ?? [];
+      const requestedIds = parsed.data.asset_ids ?? [];
+      const outOnWo = await openWorkOrdersByAsset(requestedIds);
+      const assetIds = requestedIds.filter((id) => !outOnWo.has(id));
       if (assetIds.length > 0) {
         const { error: assignErr } = await client3.from("assets").update({ job_id: data.id, status: "On Job" }).in("id", assetIds).eq("area", data.area);
         if (assignErr)
@@ -5289,7 +5335,8 @@ async function registerRoutes(httpServer, app) {
     if (fieldJobIds) q = q.in("job_id", fieldJobIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
-    res.json((data || []).map((a) => stripRentalMoney(a, req.profile.role)));
+    const rows = await withOpenWorkOrders(data || []);
+    res.json(rows.map((a) => stripRentalMoney(a, req.profile.role)));
   });
   app.get(
     "/api/assets/utilization.csv",
@@ -5314,6 +5361,7 @@ async function registerRoutes(httpServer, app) {
       if (aErr) return res.status(500).json({ message: aErr.message });
       const assets = assetsData || [];
       const assetIds = assets.map((a) => a.id);
+      const woByAsset = await openWorkOrdersByAsset(assetIds);
       const mCount = /* @__PURE__ */ new Map();
       if (assetIds.length) {
         const { data: reps } = await client3.from("maintenance_reports").select("asset_id, report_date").in("asset_id", assetIds).gte("report_date", start).lte("report_date", end);
@@ -5351,7 +5399,8 @@ async function registerRoutes(httpServer, app) {
       const lines = [header.join(",")];
       for (const a of assets) {
         const job = a.job;
-        const location = job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.area ? `${a.area}/unassigned` : "Unassigned";
+        const wo = woByAsset.get(a.id);
+        const location = wo ? `${wo.vendor || "Sent out"} (${wo.wo_number})` : job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.area ? `${a.area}/unassigned` : "Unassigned";
         const daysDeployed = job ? clampOverlapDays(job.started_on, job.ended_on) : null;
         const utilPct = daysDeployed === null ? null : Math.round(daysDeployed / windowDays * 1e3) / 10;
         const estRevenue = daysDeployed === null || a.day_rate === null || a.day_rate === void 0 ? null : Math.round(Number(a.day_rate) * daysDeployed * 100) / 100;
@@ -5359,7 +5408,7 @@ async function registerRoutes(httpServer, app) {
           esc(a.tag),
           esc(a.category),
           esc(a.area),
-          esc(a.status),
+          esc(wo ? "Unavailable" : a.status),
           esc(location),
           esc(a.day_rate),
           esc(a.run_hours),
@@ -5402,6 +5451,7 @@ async function registerRoutes(httpServer, app) {
       if (aErr) return res.status(500).json({ message: aErr.message });
       const assets = assetsData || [];
       const assetIds = assets.map((a) => a.id);
+      const woByAsset = await openWorkOrdersByAsset(assetIds);
       const mCount = /* @__PURE__ */ new Map();
       if (assetIds.length) {
         const { data: reps } = await client3.from("maintenance_reports").select("asset_id, report_date").in("asset_id", assetIds).gte("report_date", start).lte("report_date", end);
@@ -5423,7 +5473,8 @@ async function registerRoutes(httpServer, app) {
       let utilN = 0;
       const rows = assets.map((a) => {
         const job = a.job;
-        const location = job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.area ? `${a.area}/unassigned` : "Unassigned";
+        const wo = woByAsset.get(a.id);
+        const location = wo ? `${wo.vendor || "Sent out"} (${wo.wo_number})` : job ? `${job.well_name || job.job_number} \xB7 ${job.area}` : a.area ? `${a.area}/unassigned` : "Unassigned";
         const daysDeployed = job ? clampOverlapDays(job.started_on, job.ended_on) : null;
         const utilPct = daysDeployed === null ? null : Math.round(daysDeployed / windowDays * 1e3) / 10;
         const estRevenue = daysDeployed === null || a.day_rate === null || a.day_rate === void 0 ? null : Math.round(Number(a.day_rate) * daysDeployed * 100) / 100;
@@ -5437,7 +5488,7 @@ async function registerRoutes(httpServer, app) {
           tag: a.tag,
           category: a.category,
           area: a.area,
-          status: a.status,
+          status: wo ? "Unavailable" : a.status,
           location,
           day_rate: a.day_rate ?? null,
           run_hours: a.run_hours ?? null,
@@ -5504,10 +5555,11 @@ async function registerRoutes(httpServer, app) {
         state = svc?.state ?? state;
         interval = SERVICE_INTERVAL_HOURS;
       }
+      const [assetWithWo] = await withOpenWorkOrders([asset]);
       res.json(
         stripRentalMoney(
           {
-            ...asset,
+            ...assetWithWo,
             run_hours_since_service: hoursSince,
             service_hours_interval: interval,
             service_state: state,
@@ -5569,6 +5621,13 @@ async function registerRoutes(httpServer, app) {
           return res.status(409).json({ message: ARCHIVED_JOB_MSG });
         if (job.area !== nextArea)
           return res.status(400).json({ message: "Asset and job must be in the same operating area" });
+      }
+      if (patch.job_id && patch.job_id !== asset.job_id) {
+        const wo = (await openWorkOrdersByAsset([asset.id])).get(asset.id);
+        if (wo)
+          return res.status(409).json({
+            message: `This unit is unavailable \u2014 it is out on work order ${wo.wo_number}${wo.vendor ? ` at ${wo.vendor}` : ""}. Close out the work order before putting it on a job.`
+          });
       }
       const effectiveCategory = patch.category ?? asset.category;
       if (!tracksRunHours(effectiveCategory)) delete patch.service_hours_interval;
@@ -6227,6 +6286,27 @@ async function registerRoutes(httpServer, app) {
       if (input.due_date && input.due_date < input.sent_on)
         return res.status(400).json({ message: "Expected back can't be before the date sent" });
       const client3 = supabaseAdmin || supabaseAnon;
+      let swap = null;
+      if (input.replace_with_asset_id) {
+        const { data: from } = await client3.from("assets").select("id, tag, area, status, job_id, centrifuge_slot, job:jobs(job_number, well_name)").eq("id", input.asset_id).single();
+        if (!from?.job_id)
+          return res.status(400).json({ message: "This unit isn't on a job, so there's nothing to replace." });
+        if (input.replace_with_asset_id === input.asset_id)
+          return res.status(400).json({ message: "Choose a different unit as the replacement." });
+        const { data: to } = await client3.from("assets").select("id, tag, area, status, job_id").eq("id", input.replace_with_asset_id).single();
+        if (!to) return res.status(404).json({ message: "Replacement unit not found" });
+        if (to.area !== from.area)
+          return res.status(400).json({ message: "The replacement unit must be in the same area as the job." });
+        if (to.job_id || to.status === "Returned")
+          return res.status(409).json({ message: `${to.tag} isn't available \u2014 it's already on a job or returned.` });
+        const toWo = (await openWorkOrdersByAsset([to.id])).get(to.id);
+        if (toWo)
+          return res.status(409).json({ message: `${to.tag} is unavailable \u2014 it's out on work order ${toWo.wo_number}.` });
+        if (await jobIsArchived(client3, from.job_id))
+          return res.status(409).json({ message: ARCHIVED_JOB_MSG });
+        const j = Array.isArray(from.job) ? from.job[0] : from.job;
+        swap = { from, to, jobLabel: j?.well_name || j?.job_number || "the job" };
+      }
       const woNumber = await nextWorkOrderNumber(client3);
       const { data, error } = await client3.from("work_orders").insert({
         wo_number: woNumber,
@@ -6243,7 +6323,15 @@ async function registerRoutes(httpServer, app) {
         created_by: req.profile.id
       }).select(WORK_ORDER_SELECT).single();
       if (error) return woErr(res, 400, error.message);
-      res.status(201).json(flattenWorkOrder(data));
+      let replaced = null;
+      if (swap) {
+        const { error: offErr } = await client3.from("assets").update({ job_id: null, status: assetStatusFor(null, swap.from.status), centrifuge_slot: null }).eq("id", swap.from.id);
+        if (!offErr) {
+          const { error: onErr } = await client3.from("assets").update({ job_id: swap.from.job_id, status: "On Job", centrifuge_slot: swap.from.centrifuge_slot ?? null }).eq("id", swap.to.id);
+          replaced = onErr ? null : { from_tag: swap.from.tag, to_tag: swap.to.tag, job: swap.jobLabel };
+        }
+      }
+      res.status(201).json({ ...flattenWorkOrder(data), replaced });
     }
   );
   app.patch(

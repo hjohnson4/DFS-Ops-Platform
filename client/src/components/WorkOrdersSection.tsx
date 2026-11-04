@@ -8,9 +8,11 @@ import {
   WORK_ORDER_STATUSES,
   WORK_ORDER_OPEN_STATUSES,
   WORK_ORDER_INVOICE_MAX_BYTES,
+  assetIsAssignable,
 } from "@shared/schema";
 import type {
   Asset,
+  AssetWithSchedule,
   WorkOrderWithLinks,
   WorkOrderType,
   WorkOrderPriority,
@@ -189,13 +191,66 @@ function WorkOrderDialog({
     [assets],
   );
 
+  // Basic checks, run before the replace-unit pop-up and again on save.
+  function checkFields() {
+    if (!isEdit && !assetId) throw new Error("Choose an asset");
+    if (!title.trim()) throw new Error("Describe what the machine is going in for");
+    if (!vendor.trim()) throw new Error("Enter where the machine was sent");
+    if (!sentOn) throw new Error("Enter the date the machine was sent");
+    if (dueDate && dueDate < sentOn) throw new Error("Expected back can't be before the date sent");
+  }
+
+  // Replace-unit pop-up: shown when a new work order's machine is on a job.
+  const [replaceOpen, setReplaceOpen] = useState(false);
+  const [replaceWith, setReplaceWith] = useState("");
+  useEffect(() => {
+    if (!open) {
+      setReplaceOpen(false);
+      setReplaceWith("");
+    }
+  }, [open]);
+  const selectedAsset = useMemo(
+    () => (assets as AssetWithSchedule[]).find((a) => a.id === assetId) || null,
+    [assets, assetId],
+  );
+  const selectedJobLabel = selectedAsset?.job
+    ? selectedAsset.job.well_name || selectedAsset.job.job_number
+    : "its job";
+  // Units that can step in: same area, not on a job, not returned, not out on
+  // a work order. Same type as the outgoing unit listed first.
+  const replacementOptions = useMemo(() => {
+    if (!selectedAsset) return [];
+    return (assets as AssetWithSchedule[])
+      .filter((a) => a.id !== selectedAsset.id && a.area === selectedAsset.area && assetIsAssignable(a))
+      .sort((a, b) => {
+        const sa = a.category === selectedAsset.category ? 0 : 1;
+        const sb = b.category === selectedAsset.category ? 0 : 1;
+        return sa - sb || a.category.localeCompare(b.category) || a.tag.localeCompare(b.tag, undefined, { numeric: true });
+      });
+  }, [assets, selectedAsset]);
+
+  function submit() {
+    try {
+      checkFields();
+    } catch (e: any) {
+      toast({
+        title: isEdit ? "Could not update work order" : "Could not create work order",
+        description: e.message,
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!isEdit && selectedAsset?.job_id) {
+      setReplaceWith("");
+      setReplaceOpen(true);
+      return;
+    }
+    mutation.mutate(null);
+  }
+
   const mutation = useMutation({
-    mutationFn: async () => {
-      if (!isEdit && !assetId) throw new Error("Choose an asset");
-      if (!title.trim()) throw new Error("Describe what the machine is going in for");
-      if (!vendor.trim()) throw new Error("Enter where the machine was sent");
-      if (!sentOn) throw new Error("Enter the date the machine was sent");
-      if (dueDate && dueDate < sentOn) throw new Error("Expected back can't be before the date sent");
+    mutationFn: async (replaceWithId: string | null) => {
+      checkFields();
       const body: any = {
         title: title.trim(),
         vendor: vendor.trim(),
@@ -223,12 +278,25 @@ function WorkOrderDialog({
         return res.json();
       }
       body.asset_id = assetId;
+      if (replaceWithId) body.replace_with_asset_id = replaceWithId;
       const res = await apiRequest("POST", "/api/work-orders", body);
       return res.json();
     },
-    onSuccess: () => {
-      toast({ title: isEdit ? "Work order updated" : "Work order created" });
+    onSuccess: (saved: any) => {
+      toast({
+        title: isEdit ? "Work order updated" : "Work order created",
+        description: !isEdit && saved?.replaced
+          ? `${saved.replaced.to_tag} replaced ${saved.replaced.from_tag} on ${saved.replaced.job}.`
+          : undefined,
+      });
+      setReplaceOpen(false);
       queryClient.invalidateQueries({ queryKey: ["/api/work-orders"] });
+      // A replacement swaps units on the job.
+      if (!isEdit) queryClient.invalidateQueries({ predicate: (q) => /^\/api\/jobs/.test(String(q.queryKey[0] ?? "")) });
+      // Asset status/location follow open work orders ("Unavailable" at the vendor).
+      queryClient.invalidateQueries({
+        predicate: (q) => /^\/api\/(assets|forecast)/.test(String(q.queryKey[0] ?? "")),
+      });
       queryClient.invalidateQueries({ queryKey: [`/api/assets/${editing?.asset_id ?? assetId}/refurbishments`] });
       onOpenChange(false);
     },
@@ -260,7 +328,7 @@ function WorkOrderDialog({
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            mutation.mutate();
+            submit();
           }}
           className="space-y-3"
         >
@@ -454,6 +522,62 @@ function WorkOrderDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+
+      {/* Replace-unit pop-up (new work order on a unit that's on a job) */}
+      <Dialog open={replaceOpen} onOpenChange={(o) => !mutation.isPending && setReplaceOpen(o)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Replace {selectedAsset?.tag}?</DialogTitle>
+            <DialogDescription>
+              {selectedAsset?.tag} is on {selectedJobLabel}. Once this work order is created it will show as
+              Unavailable at {vendor.trim() || "the vendor"}. Would you like to replace it on the job with
+              another unit?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label>Replacement unit</Label>
+            {replacementOptions.length ? (
+              <Select value={replaceWith} onValueChange={setReplaceWith}>
+                <SelectTrigger data-testid="select-wo-replacement">
+                  <SelectValue placeholder="Select an available unit…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {replacementOptions.map((a) => (
+                    <SelectItem key={a.id} value={a.id}>
+                      {a.tag}
+                      {a.is_rental ? " · RENTAL" : ""} · {a.category}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                No units are available in {selectedAsset?.area} right now.
+              </p>
+            )}
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={mutation.isPending}
+              onClick={() => mutation.mutate(null)}
+              data-testid="button-wo-no-replace"
+            >
+              No, don't replace
+            </Button>
+            <Button
+              type="button"
+              disabled={!replaceWith || mutation.isPending}
+              onClick={() => mutation.mutate(replaceWith)}
+              data-testid="button-wo-replace"
+            >
+              {mutation.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />}
+              Replace unit
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }
@@ -510,6 +634,10 @@ function CloseOutDialog({
     onSuccess: () => {
       toast({ title: `${wo!.wo_number} closed out`, description: `Added to ${wo!.asset_tag}'s refurbishment history.` });
       queryClient.invalidateQueries({ queryKey: ["/api/work-orders"] });
+      // Asset status/location follow open work orders ("Unavailable" at the vendor).
+      queryClient.invalidateQueries({
+        predicate: (q) => /^\/api\/(assets|forecast)/.test(String(q.queryKey[0] ?? "")),
+      });
       queryClient.invalidateQueries({ queryKey: [`/api/assets/${wo!.asset_id}/refurbishments`] });
       onOpenChange(false);
     },
@@ -657,6 +785,10 @@ export function WorkOrdersSection({ canManage }: { canManage: boolean }) {
     onSuccess: () => {
       toast({ title: "Work order deleted" });
       queryClient.invalidateQueries({ queryKey: ["/api/work-orders"] });
+      // Asset status/location follow open work orders ("Unavailable" at the vendor).
+      queryClient.invalidateQueries({
+        predicate: (q) => /^\/api\/(assets|forecast)/.test(String(q.queryKey[0] ?? "")),
+      });
     },
     onError: (e: any) =>
       toast({ title: "Could not delete work order", description: e.message, variant: "destructive" }),

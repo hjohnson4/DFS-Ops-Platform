@@ -1130,7 +1130,7 @@ function ConvertDialog({ forecast, board, onClose }: { forecast: ForecastJob; bo
   const [wellName, setWellName] = useState("");
   const jobs = new Map(board.jobs.map((j) => [j.id, j]));
   const planned = board.assets.filter((a) => (forecast.asset_ids || []).includes(a.id));
-  const freeNow = (a: (typeof planned)[number]) => !a.job_id;
+  const freeNow = (a: (typeof planned)[number]) => !a.job_id && a.status !== "Unavailable";
   const [move, setMove] = useState<Set<string>>(new Set(planned.filter(freeNow).map((a) => a.id)));
 
   const go = useMutation({
@@ -1297,6 +1297,7 @@ function ForecastDetailsDialog({
   const days = f.end_on ? daysBetween(f.start_on, f.end_on) : null;
 
   function whereNow(a: ForecastBoard["assets"][number]) {
+    if (a.status === "Unavailable") return { text: "Unavailable (out on a work order)", warn: true };
     if (!a.job_id) {
       const shop = SHOP_RE.test(a.status || "");
       return { text: shop ? `In shop (${a.status})` : "Available now", warn: shop };

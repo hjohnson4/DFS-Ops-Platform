@@ -370,6 +370,17 @@ export interface AssetJobRef {
 export interface AssetWithSchedule extends Asset {
   maintenance_schedule: MaintenanceSchedule | null;
   job: AssetJobRef | null;
+  // Set when the asset has an open (not yet closed-out) work order: the
+  // machine is at the vendor, so it shows "Unavailable" at that location.
+  open_work_order?: AssetOpenWorkOrder | null;
+}
+
+export interface AssetOpenWorkOrder {
+  id: string;
+  wo_number: string;
+  vendor: string | null;
+  sent_on: string | null;
+  due_date: string | null;
 }
 
 // Human-readable current location of an asset, derived from its assigned job.
@@ -379,6 +390,11 @@ export interface AssetWithSchedule extends Asset {
 // which area the asset belongs to. Falls back to "Unassigned" only when the
 // asset has no area at all.
 export function assetLocation(a: AssetWithSchedule): string {
+  // Out on an open work order: it is physically wherever it was sent.
+  if (a.open_work_order) {
+    const wo = a.open_work_order;
+    return `${wo.vendor || "Sent out"} (${wo.wo_number})`;
+  }
   if (a.job) {
     const where = a.job.well_name || a.job.job_number;
     return `${where} \u00b7 ${a.job.area}`;
@@ -1310,13 +1326,27 @@ const centrifugeSlotField = z
 // which stays "Returned" so it drops out of the fleet lists.
 export const ASSET_STATUSES = ["On Job", "Available"] as const;
 export const RETURNED_RENTAL_STATUS = "Returned";
+// An asset with an open work order (sent out for refurbishment/repair) is
+// "Unavailable" until the work order is closed out. This is worked out live
+// from the open work order (see assetStatusLabel) — it is never saved on the
+// asset row, so closing or deleting the work order restores the status.
+export const UNAVAILABLE_STATUS = "Unavailable";
 export function assetStatusFor(jobId: string | null | undefined, current?: string | null): string {
   if (jobId) return "On Job";
   if (current === RETURNED_RENTAL_STATUS) return RETURNED_RENTAL_STATUS;
   return "Available";
 }
-export const assetStatusLabel = (a: { job_id?: string | null; status?: string | null }) =>
-  assetStatusFor(a.job_id, a.status);
+export const assetStatusLabel = (a: {
+  job_id?: string | null;
+  status?: string | null;
+  open_work_order?: unknown;
+}) => (a.open_work_order ? UNAVAILABLE_STATUS : assetStatusFor(a.job_id, a.status));
+// True when the asset can be put on a job (not returned, not out on a work order).
+export const assetIsAssignable = (a: {
+  job_id?: string | null;
+  status?: string | null;
+  open_work_order?: unknown;
+}) => !a.job_id && !a.open_work_order && a.status !== RETURNED_RENTAL_STATUS && a.status !== UNAVAILABLE_STATUS;
 
 export const createAssetSchema = z.object({
   tag: z.string().min(1),
@@ -2440,6 +2470,9 @@ export const createWorkOrderSchema = z.object({
   status: z.enum(WORK_ORDER_OPEN_STATUSES as [string, ...string[]]).default("In Progress"),
   due_date: dateStr.nullable().optional(),
   notes: z.string().nullable().optional(),
+  // If the machine is on a job, optionally swap in this available unit
+  // (it takes the outgoing unit's place and centrifuge slot on that job).
+  replace_with_asset_id: z.string().uuid().nullable().optional(),
 });
 export type CreateWorkOrderInput = z.infer<typeof createWorkOrderSchema>;
 

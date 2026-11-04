@@ -484,6 +484,8 @@ function CreateAssetDialog({
 // ---------------------------------------------------------------------------
 function statusClasses(status: string): string {
   const s = status.toLowerCase();
+  if (s.includes("unavail"))
+    return "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20";
   if (s.includes("job") || s.includes("active") || s.includes("deploy"))
     return "bg-primary/10 text-primary border-primary/20";
   if (s.includes("repair") || s.includes("down") || s.includes("service"))

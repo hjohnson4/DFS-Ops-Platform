@@ -68,7 +68,7 @@ interface Seg {
   tip: string;
 }
 
-export const SHOP_RE = /shop|repair|down|out of service/i;
+export const SHOP_RE = /shop|repair|down|out of service|unavailable/i;
 
 export function buildGrid(board: ForecastBoard, lvl: ForecastLevel, categories: readonly string[]): CategoryBlock[] {
   const ws = toMs(board.window_start);
@@ -112,7 +112,7 @@ export function buildGrid(board: ForecastBoard, lvl: ForecastLevel, categories: 
         )} → ${f.end_on ? shortDate(f.end_on) : "indefinite"}`,
       });
     }
-    if (!a.job_id && SHOP_RE.test(a.status || ""))
+    if ((!a.job_id || a.status === "Unavailable") && SHOP_RE.test(a.status || ""))
       out.push({ id: "shop", kind: "shop", label: "In shop", s: ws, e: we, tip: `Status: ${a.status}` });
     return out;
   };

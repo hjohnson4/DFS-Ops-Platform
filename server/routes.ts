@@ -13,6 +13,7 @@ import {
 } from "./excelDailyReport";
 import * as XLSX from "xlsx";
 import { registerForecastRoutes } from "./forecast";
+import { openWorkOrdersByAsset, withOpenWorkOrders } from "./openWorkOrders";
 import { registerFieldTicketRoutes } from "./fieldTickets";
 import { registerRentalRoutes, stripRentalMoney } from "./rentals";
 import { AREAS, isLiveJobStatus, assetStatusFor } from "@shared/schema";
@@ -2650,7 +2651,10 @@ export async function registerRoutes(
 
       // Assign any selected assets to the new job. Only assets in the same
       // area are eligible; silently ignore any that don't qualify.
-      const assetIds = parsed.data.asset_ids ?? [];
+      // Units out on an open work order (Unavailable) are skipped.
+      const requestedIds = parsed.data.asset_ids ?? [];
+      const outOnWo = await openWorkOrdersByAsset(requestedIds);
+      const assetIds = requestedIds.filter((id) => !outOnWo.has(id));
       if (assetIds.length > 0) {
         const { error: assignErr } = await client
           .from("assets")
@@ -3640,7 +3644,9 @@ export async function registerRoutes(
     if (fieldJobIds) q = q.in("job_id", fieldJobIds);
     const { data, error } = await q;
     if (error) return res.status(500).json({ message: error.message });
-    res.json((data || []).map((a: any) => stripRentalMoney(a, req.profile!.role)));
+    // Out on an open work order => "Unavailable" at the vendor.
+    const rows = await withOpenWorkOrders((data || []) as any[]);
+    res.json(rows.map((a: any) => stripRentalMoney(a, req.profile!.role)));
   });
 
   // Utilization export (CSV) over a selectable [start,end] date window.
@@ -3678,6 +3684,7 @@ export async function registerRoutes(
 
       // Count maintenance reports filed within the window, per asset.
       const assetIds = assets.map((a) => a.id);
+      const woByAsset = await openWorkOrdersByAsset(assetIds);
       const mCount = new Map<string, number>();
       if (assetIds.length) {
         const { data: reps } = await client
@@ -3713,7 +3720,10 @@ export async function registerRoutes(
       const lines = [header.join(",")];
       for (const a of assets) {
         const job = a.job;
-        const location = job
+        const wo = woByAsset.get(a.id);
+        const location = wo
+          ? `${wo.vendor || "Sent out"} (${wo.wo_number})`
+          : job
           ? `${job.well_name || job.job_number} \u00b7 ${job.area}`
           : a.area
             ? `${a.area}/unassigned`
@@ -3726,7 +3736,7 @@ export async function registerRoutes(
             ? null
             : Math.round(Number(a.day_rate) * daysDeployed * 100) / 100;
         lines.push([
-          esc(a.tag), esc(a.category), esc(a.area), esc(a.status), esc(location),
+          esc(a.tag), esc(a.category), esc(a.area), esc(wo ? "Unavailable" : a.status), esc(location),
           esc(a.day_rate), esc(a.run_hours), esc(daysDeployed), esc(windowDays),
           esc(utilPct), esc(estRevenue), esc(mCount.get(a.id) || 0),
         ].join(","));
@@ -3772,6 +3782,7 @@ export async function registerRoutes(
       const assets = (assetsData || []) as any[];
 
       const assetIds = assets.map((a) => a.id);
+      const woByAsset = await openWorkOrdersByAsset(assetIds);
       const mCount = new Map<string, number>();
       if (assetIds.length) {
         const { data: reps } = await client
@@ -3800,7 +3811,10 @@ export async function registerRoutes(
       let utilN = 0;
       const rows = assets.map((a) => {
         const job = a.job;
-        const location = job
+        const wo = woByAsset.get(a.id);
+        const location = wo
+          ? `${wo.vendor || "Sent out"} (${wo.wo_number})`
+          : job
           ? `${job.well_name || job.job_number} \u00b7 ${job.area}`
           : a.area
             ? `${a.area}/unassigned`
@@ -3819,7 +3833,7 @@ export async function registerRoutes(
           tag: a.tag,
           category: a.category,
           area: a.area,
-          status: a.status,
+          status: wo ? "Unavailable" : a.status,
           location,
           day_rate: a.day_rate ?? null,
           run_hours: a.run_hours ?? null,
@@ -3907,10 +3921,11 @@ export async function registerRoutes(
         state = svc?.state ?? state;
         interval = SERVICE_INTERVAL_HOURS;
       }
+      const [assetWithWo] = await withOpenWorkOrders([asset as any]);
       res.json(
         stripRentalMoney(
           {
-            ...asset,
+            ...assetWithWo,
             run_hours_since_service: hoursSince,
             service_hours_interval: interval,
             service_state: state,
@@ -4014,6 +4029,16 @@ export async function registerRoutes(
           return res
             .status(400)
             .json({ message: "Asset and job must be in the same operating area" });
+      }
+
+      // A unit out on an open work order is at the vendor — it can't be put
+      // on a job until that work order is closed out.
+      if (patch.job_id && patch.job_id !== asset.job_id) {
+        const wo = (await openWorkOrdersByAsset([asset.id])).get(asset.id);
+        if (wo)
+          return res.status(409).json({
+            message: `This unit is unavailable — it is out on work order ${wo.wo_number}${wo.vendor ? ` at ${wo.vendor}` : ""}. Close out the work order before putting it on a job.`,
+          });
       }
 
       // Service interval only applies to run-hour assets. If the category is
@@ -4979,6 +5004,38 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Expected back can't be before the date sent" });
 
       const client = supabaseAdmin || supabaseAnon;
+
+      // Check the replacement unit (if any) BEFORE creating the work order.
+      let swap: { from: any; to: any; jobLabel: string } | null = null;
+      if (input.replace_with_asset_id) {
+        const { data: from } = await client
+          .from("assets")
+          .select("id, tag, area, status, job_id, centrifuge_slot, job:jobs(job_number, well_name)")
+          .eq("id", input.asset_id)
+          .single();
+        if (!from?.job_id)
+          return res.status(400).json({ message: "This unit isn't on a job, so there's nothing to replace." });
+        if (input.replace_with_asset_id === input.asset_id)
+          return res.status(400).json({ message: "Choose a different unit as the replacement." });
+        const { data: to } = await client
+          .from("assets")
+          .select("id, tag, area, status, job_id")
+          .eq("id", input.replace_with_asset_id)
+          .single();
+        if (!to) return res.status(404).json({ message: "Replacement unit not found" });
+        if (to.area !== from.area)
+          return res.status(400).json({ message: "The replacement unit must be in the same area as the job." });
+        if (to.job_id || to.status === "Returned")
+          return res.status(409).json({ message: `${to.tag} isn't available — it's already on a job or returned.` });
+        const toWo = (await openWorkOrdersByAsset([to.id])).get(to.id);
+        if (toWo)
+          return res.status(409).json({ message: `${to.tag} is unavailable — it's out on work order ${toWo.wo_number}.` });
+        if (await jobIsArchived(client, from.job_id))
+          return res.status(409).json({ message: ARCHIVED_JOB_MSG });
+        const j: any = Array.isArray((from as any).job) ? (from as any).job[0] : (from as any).job;
+        swap = { from, to, jobLabel: j?.well_name || j?.job_number || "the job" };
+      }
+
       const woNumber = await nextWorkOrderNumber(client);
       const { data, error } = await client
         .from("work_orders")
@@ -4999,7 +5056,28 @@ export async function registerRoutes(
         .select(WORK_ORDER_SELECT)
         .single();
       if (error) return woErr(res, 400, error.message);
-      res.status(201).json(flattenWorkOrder(data));
+
+      // Optional swap: the user chose to replace the outgoing unit on its job
+      // with an available one. The outgoing unit comes off the job (and shows
+      // "Unavailable" at the vendor); the replacement takes its place and its
+      // centrifuge slot. Without a swap the unit stays linked to its job.
+      let replaced: { from_tag: string; to_tag: string; job: string } | null = null;
+      if (swap) {
+        const { error: offErr } = await client
+          .from("assets")
+          .update({ job_id: null, status: assetStatusFor(null, swap.from.status), centrifuge_slot: null })
+          .eq("id", swap.from.id);
+        if (!offErr) {
+          const { error: onErr } = await client
+            .from("assets")
+            .update({ job_id: swap.from.job_id, status: "On Job", centrifuge_slot: swap.from.centrifuge_slot ?? null })
+            .eq("id", swap.to.id);
+          replaced = onErr
+            ? null
+            : { from_tag: swap.from.tag, to_tag: swap.to.tag, job: swap.jobLabel };
+        }
+      }
+      res.status(201).json({ ...flattenWorkOrder(data), replaced });
     },
   );
 

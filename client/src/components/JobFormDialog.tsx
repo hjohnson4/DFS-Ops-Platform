@@ -3,7 +3,7 @@ import { RentalBadge } from "@/components/Rental";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
-import { AREAS, CREWING, type Customer, type Asset, type Crewing } from "@shared/schema";
+import { AREAS, CREWING, type Customer, type Asset, type Crewing, assetIsAssignable } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -91,7 +91,7 @@ export function JobFormDialog({ trigger, lockedCustomer, onCreated }: Props) {
   // Assets that can be assigned: same area, and not already on another job.
   const eligibleAssets = useMemo(
     () =>
-      (assets || []).filter((a) => a.area === effectiveArea && !a.job_id && a.status !== "Returned"),
+      (assets || []).filter((a) => a.area === effectiveArea && assetIsAssignable(a)),
     [assets, effectiveArea],
   );
 
