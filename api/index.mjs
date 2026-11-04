@@ -512,13 +512,18 @@ function reportDaySheets(wb) {
   const out = [];
   let day = 0;
   let latestDate = null;
+  let latestDay = 0;
   const day1Name = wb.SheetNames.find((n) => /^Report Day 1$/i.test(n.trim()));
   const day1Date = day1Name ? toDateStr(rawCell(wb.Sheets[day1Name], DATE_CELL)) : null;
-  for (const name of wb.SheetNames) {
+  const tabs = wb.SheetNames.filter((name) => {
+    const t = name.trim();
+    return /^Report Day 1$/i.test(t) || /^\d+$/.test(t) && Number(t) >= 2;
+  });
+  const tabDate = tabs.map((n) => toDateStr(rawCell(wb.Sheets[n], DATE_CELL)));
+  for (let idx = 0; idx < tabs.length; idx++) {
+    const name = tabs[idx];
     const t = name.trim();
     const isFirst = /^Report Day 1$/i.test(t);
-    const isNumbered = /^\d+$/.test(t) && Number(t) >= 2;
-    if (!isFirst && !isNumbered) continue;
     day += 1;
     const ws2 = wb.Sheets[name];
     let completed = sheetIsCompleted(ws2);
@@ -530,12 +535,27 @@ function reportDaySheets(wb) {
       const prev = out[out.length - 1];
       if (prev && !prev.completed) completed = false;
     }
+    let fixedDate = null;
+    const typed = tabDate[idx];
     if (completed) {
-      const d = ws2 ? toDateStr(rawCell(ws2, DATE_CELL)) : null;
-      if (d && latestDate && d < latestDate) completed = false;
-      else if (d && (!latestDate || d > latestDate)) latestDate = d;
+      const d = typed;
+      if (d && latestDate) {
+        const expected = addDaysToDateStr(latestDate, day - latestDay);
+        const next = tabDate.slice(idx + 1).find((x) => !!x) || null;
+        if (d > addDaysToDateStr(expected, 7) && next && next > latestDate && next < d) {
+          fixedDate = expected;
+        }
+      }
+      if (fixedDate) {
+        latestDate = fixedDate;
+        latestDay = day;
+      } else if (d && latestDate && d < latestDate) completed = false;
+      else if (d && (!latestDate || d > latestDate)) {
+        latestDate = d;
+        latestDay = day;
+      }
     }
-    out.push({ day, name, completed });
+    out.push(fixedDate ? { day, name, completed, fixedDate, typedDate: typed } : { day, name, completed });
   }
   return out;
 }
@@ -620,7 +640,8 @@ function parseDaySheet(wb, chosen, incomplete) {
   well_context.remarks = toText(rawCell(ws2, layout.remarks));
   const spud = toDateStr(rawCell(ws2, SPUD_DATE_CELL));
   well_context.spud_date = spud && spud >= "2000-01-01" ? spud : null;
-  const report_date = toDateStr(rawCell(ws2, DATE_CELL));
+  const typedReportDate = toDateStr(rawCell(ws2, DATE_CELL));
+  const report_date = chosen.fixedDate || typedReportDate;
   const v8raw = toText(rawCell(ws2, "V8"));
   const job_number = v8raw && !/^\d+(\.\d+)?$/.test(v8raw) ? v8raw : null;
   const v9raw = toText(rawCell(ws2, "V9"));
@@ -652,7 +673,10 @@ function parseDaySheet(wb, chosen, incomplete) {
     source_sheet: dayLabel,
     report_day: chosen.day,
     incomplete,
-    missing_fields: missingCriticalFields(ws2),
+    missing_fields: chosen.fixedDate ? [
+      `Report date (D3) \u2014 typed as ${chosen.typedDate ?? typedReportDate}, filled in as ${chosen.fixedDate}`,
+      ...missingCriticalFields(ws2)
+    ] : missingCriticalFields(ws2),
     kpis,
     kpi_cell_map: cellMap,
     well_context,

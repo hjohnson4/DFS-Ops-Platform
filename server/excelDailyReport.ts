@@ -326,24 +326,30 @@ function sheetMissingKeyFields(ws: XLSX.WorkSheet | undefined): boolean {
 // with real hand-entered activity (see sheetIsCompleted).
 function reportDaySheets(
   wb: XLSX.WorkBook,
-): { day: number; name: string; completed: boolean }[] {
-  const out: { day: number; name: string; completed: boolean }[] = [];
+): { day: number; name: string; completed: boolean; fixedDate?: string | null; typedDate?: string | null }[] {
+  const out: { day: number; name: string; completed: boolean; fixedDate?: string | null; typedDate?: string | null }[] = [];
   let day = 0;
   // Latest real date seen on an earlier completed tab. Unused template tabs
   // inherit Day 1's date via formula, so a later tab whose date goes BACKWARD
   // from an earlier completed day is template junk (e.g. a stray depth typed
   // into tab 8 while the real latest day is tab 7) — never a worked day.
   let latestDate: string | null = null;
+  let latestDay = 0;
   // Report Day 1's date (D3). Unused template tabs fall back to this exact
   // date via formula, so a later tab whose D3 is AFTER it was really worked,
   // even when the crew left measured depth (AI9) and remarks blank.
   const day1Name = wb.SheetNames.find((n) => /^Report Day 1$/i.test(n.trim()));
   const day1Date = day1Name ? toDateStr(rawCell(wb.Sheets[day1Name], DATE_CELL)) : null;
-  for (const name of wb.SheetNames) {
+  // Day tabs in workbook order with their typed date, for look-ahead.
+  const tabs = wb.SheetNames.filter((name) => {
+    const t = name.trim();
+    return /^Report Day 1$/i.test(t) || (/^\d+$/.test(t) && Number(t) >= 2);
+  });
+  const tabDate = tabs.map((n) => toDateStr(rawCell(wb.Sheets[n], DATE_CELL)));
+  for (let idx = 0; idx < tabs.length; idx++) {
+    const name = tabs[idx];
     const t = name.trim();
     const isFirst = /^Report Day 1$/i.test(t);
-    const isNumbered = /^\d+$/.test(t) && Number(t) >= 2;
-    if (!isFirst && !isNumbered) continue;
     day += 1;
     const ws = wb.Sheets[name];
     let completed = sheetIsCompleted(ws);
@@ -359,12 +365,34 @@ function reportDaySheets(
       const prev = out[out.length - 1];
       if (prev && !prev.completed) completed = false;
     }
+    let fixedDate: string | null = null;
+    const typed = tabDate[idx];
     if (completed) {
-      const d = ws ? toDateStr(rawCell(ws, DATE_CELL)) : null;
-      if (d && latestDate && d < latestDate) completed = false;
-      else if (d && (!latestDate || d > latestDate)) latestDate = d;
+      const d = typed;
+      // Typo'd date that jumps far AHEAD (e.g. 11/23 typed for 10/23): more
+      // than a week past the expected date, while the NEXT dated tab drops
+      // back into the normal sequence. Keep the day, use the expected date,
+      // and don't let the typo hide every later tab as "going backward".
+      if (d && latestDate) {
+        const expected = addDaysToDateStr(latestDate, day - latestDay);
+        const next = tabDate.slice(idx + 1).find((x) => !!x) || null;
+        if (
+          d > addDaysToDateStr(expected, 7) &&
+          next && next > latestDate && next < d
+        ) {
+          fixedDate = expected;
+        }
+      }
+      if (fixedDate) {
+        latestDate = fixedDate;
+        latestDay = day;
+      } else if (d && latestDate && d < latestDate) completed = false;
+      else if (d && (!latestDate || d > latestDate)) {
+        latestDate = d;
+        latestDay = day;
+      }
     }
-    out.push({ day, name, completed });
+    out.push(fixedDate ? { day, name, completed, fixedDate, typedDate: typed } : { day, name, completed });
   }
   return out;
 }
@@ -475,7 +503,7 @@ export function parseDailyReportWorkbook(
 // path (parseAllCompletedDays) so both read cells identically.
 function parseDaySheet(
   wb: XLSX.WorkBook,
-  chosen: { day: number; name: string; completed: boolean },
+  chosen: { day: number; name: string; completed: boolean; fixedDate?: string | null; typedDate?: string | null },
   incomplete: boolean,
 ): ParsedDailyReport {
   const ws = wb.Sheets[chosen.name];
@@ -515,7 +543,8 @@ function parseDaySheet(
   const spud = toDateStr(rawCell(ws, SPUD_DATE_CELL));
   well_context.spud_date = spud && spud >= "2000-01-01" ? spud : null;
 
-  const report_date = toDateStr(rawCell(ws, DATE_CELL));
+  const typedReportDate = toDateStr(rawCell(ws, DATE_CELL));
+  const report_date = chosen.fixedDate || typedReportDate;
 
   // Job number / rig name: read verbatim from V8 on this report-day sheet
   // (labeled "Rig Name" in R8). This is the value crews type as the job/rig,
@@ -573,7 +602,12 @@ function parseDaySheet(
     source_sheet: dayLabel,
     report_day: chosen.day,
     incomplete,
-    missing_fields: missingCriticalFields(ws),
+    missing_fields: chosen.fixedDate
+      ? [
+          `Report date (D3) — typed as ${chosen.typedDate ?? typedReportDate}, filled in as ${chosen.fixedDate}`,
+          ...missingCriticalFields(ws),
+        ]
+      : missingCriticalFields(ws),
     kpis,
     kpi_cell_map: cellMap,
     well_context,
