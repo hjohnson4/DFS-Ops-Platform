@@ -3075,6 +3075,22 @@ function dropManualRateField(fields, jobId, manual) {
   if (!jobId || !manual.has(String(jobId))) return fields;
   return fields.filter((f) => !String(f).startsWith(MANUAL_RATE_MISSING));
 }
+async function operatorIsSetRateCustomer(client3, operator) {
+  const op = String(operator || "").trim().toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (op.length < 4) return false;
+  const { data: custs } = await client3.from("customers").select("id, name");
+  const ids = (custs || []).filter((c) => {
+    const n = String(c.name || "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+    return n === op || n.startsWith(op + " ") || op.startsWith(n + " ");
+  }).map((c) => String(c.id));
+  if (!ids.length) return false;
+  const { data: jobs } = await client3.from("jobs").select("id, manual_day_rate").in("customer_id", ids).is("archived_at", null);
+  const list = jobs || [];
+  return list.length > 0 && list.every((j) => j.manual_day_rate === true);
+}
+function dropDayRateField(fields) {
+  return fields.filter((f) => !String(f).startsWith(MANUAL_RATE_MISSING));
+}
 function withoutManualRateFlag(r, manual) {
   const mf = r?.analysis?.missing_fields;
   if (!Array.isArray(mf) || !r.job_id || !manual.has(String(r.job_id))) return r;
@@ -6631,7 +6647,10 @@ async function registerRoutes(httpServer, app) {
     let customer_id = resolved.customer_id;
     const matchedByJobNumber = !!job_id && !!excel.job_number && normJobId(excel.job_number).length > 0;
     const status = job_id ? "Pending Review" : "Needs job match";
-    const missingFields = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client3)).map(
+    let ingestMissing = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client3));
+    if (!job_id && await operatorIsSetRateCustomer(client3, excel.well_context?.operator))
+      ingestMissing = dropDayRateField(ingestMissing);
+    const missingFields = ingestMissing.map(
       (f) => f === "Report date (D3)" && excel.report_date ? `Report date (D3) \u2014 filled in as ${excel.report_date} from the prior day` : f
     );
     const row = {
@@ -7102,12 +7121,20 @@ async function registerRoutes(httpServer, app) {
       const scope = areaScopeOf(req.profile);
       if (scope && job.area !== scope)
         return res.status(403).json({ message: "You can only assign reports to jobs in your area." });
-      const { data, error } = await client3.from("daily_reports").update({
+      const assignUpdate = {
         job_id: job.id,
         area: job.area,
         customer_id: job.customer_id,
         status: "Pending Review"
-      }).eq("id", report.id).select().single();
+      };
+      {
+        const cleaned = withoutManualRateFlag(
+          { job_id: job.id, analysis: report.analysis },
+          await manualRateJobIds(client3)
+        );
+        if (cleaned.analysis !== report.analysis) assignUpdate.analysis = cleaned.analysis;
+      }
+      const { data, error } = await client3.from("daily_reports").update(assignUpdate).eq("id", report.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
       await client3.from("daily_report_events").insert({
         report_id: report.id,

@@ -306,6 +306,33 @@ function dropManualRateField(fields: string[], jobId: string | null | undefined,
   if (!jobId || !manual.has(String(jobId))) return fields;
   return fields.filter((f) => !String(f).startsWith(MANUAL_RATE_MISSING));
 }
+// Operator (cell H8) of a report that has no job yet: when it names a
+// customer whose open jobs are ALL set day rate (e.g. "Expand" -> Expand
+// Energy, "VERDUN" -> Verdun Oil & Gas), the blank day rate is expected, so
+// the report is not flagged while it waits for a job match.
+async function operatorIsSetRateCustomer(client: any, operator: string | null | undefined): Promise<boolean> {
+  const op = String(operator || "").trim().toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  if (op.length < 4) return false;
+  const { data: custs } = await client.from("customers").select("id, name");
+  const ids = ((custs || []) as any[])
+    .filter((c) => {
+      const n = String(c.name || "").toUpperCase().replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+      return n === op || n.startsWith(op + " ") || op.startsWith(n + " ");
+    })
+    .map((c) => String(c.id));
+  if (!ids.length) return false;
+  const { data: jobs } = await client
+    .from("jobs")
+    .select("id, manual_day_rate")
+    .in("customer_id", ids)
+    .is("archived_at", null);
+  const list = (jobs || []) as any[];
+  return list.length > 0 && list.every((j) => j.manual_day_rate === true);
+}
+function dropDayRateField(fields: string[]): string[] {
+  return fields.filter((f) => !String(f).startsWith(MANUAL_RATE_MISSING));
+}
+
 // Strip the AL57 flag from a report row's analysis for set-day-rate jobs
 // (covers reports imported before this rule existed).
 function withoutManualRateFlag<T extends { job_id?: string | null; analysis?: any }>(r: T, manual: Set<string>): T {
@@ -5502,7 +5529,10 @@ export async function registerRoutes(
     const status = job_id ? "Pending Review" : "Needs job match";
     // Critical blank fields on the imported day tab. When the date was blank
     // but inferred from the prior day, say so, so the reviewer can confirm it.
-    const missingFields = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client)).map((f) =>
+    let ingestMissing = dropManualRateField(excel.missing_fields || [], job_id, await manualRateJobIds(client));
+    if (!job_id && (await operatorIsSetRateCustomer(client, excel.well_context?.operator)))
+      ingestMissing = dropDayRateField(ingestMissing);
+    const missingFields = ingestMissing.map((f) =>
       f === "Report date (D3)" && excel.report_date
         ? `Report date (D3) — filled in as ${excel.report_date} from the prior day`
         : f,
@@ -6212,14 +6242,24 @@ export async function registerRoutes(
           .status(403)
           .json({ message: "You can only assign reports to jobs in your area." });
 
+      // Set day rate jobs (Expand, Verdun): a blank day rate on the report is
+      // expected, so clear that flag once the report is on the job.
+      const assignUpdate: Record<string, any> = {
+        job_id: job.id,
+        area: job.area,
+        customer_id: job.customer_id,
+        status: "Pending Review",
+      };
+      {
+        const cleaned = withoutManualRateFlag(
+          { job_id: job.id, analysis: report.analysis },
+          await manualRateJobIds(client),
+        );
+        if (cleaned.analysis !== report.analysis) assignUpdate.analysis = cleaned.analysis;
+      }
       const { data, error } = await client
         .from("daily_reports")
-        .update({
-          job_id: job.id,
-          area: job.area,
-          customer_id: job.customer_id,
-          status: "Pending Review",
-        })
+        .update(assignUpdate)
         .eq("id", report.id)
         .select()
         .single();
