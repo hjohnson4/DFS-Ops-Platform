@@ -74,6 +74,8 @@ import {
   WORK_ORDER_MANAGE_ROLES,
   createJobServiceSchema,
   updateJobServiceSchema,
+  uploadJobServiceFileSchema,
+  SERVICE_FILE_MAX_BYTES,
 } from "@shared/schema";
 import type {
   ServiceAssetRow,
@@ -8619,12 +8621,27 @@ export async function registerRoutes(
         for (const l of Array.isArray(t.line_items) ? t.line_items : [])
           if (l?.service_id && !ticketOf.has(l.service_id))
             ticketOf.set(l.service_id, t.ticket_number);
+      // Attached photos/files (names only — the file data is fetched on open).
+      // If the files table hasn't been set up yet this just returns none.
+      const filesBySvc = new Map<string, any[]>();
+      const { data: fl, error: flErr } = await padClient()
+        .from("job_service_files")
+        .select("id, service_id, file_name, file_mime, file_size, uploaded_by_name, created_at")
+        .eq("job_id", job.id)
+        .order("created_at", { ascending: true });
+      if (!flErr)
+        for (const f of (fl || []) as any[]) {
+          const arr = filesBySvc.get(f.service_id) || [];
+          arr.push(f);
+          filesBySvc.set(f.service_id, arr);
+        }
       res.json(
         rows.map((r) => ({
           ...r,
           asset_tag: r.asset_id ? assetById.get(r.asset_id)?.tag ?? null : null,
           asset_category: r.asset_id ? assetById.get(r.asset_id)?.category ?? null : null,
           on_ticket: ticketOf.get(r.id) ?? null,
+          files: filesBySvc.get(r.id) || [],
         })),
       );
     },
@@ -8671,6 +8688,114 @@ export async function registerRoutes(
         .single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json(data);
+    },
+  );
+
+  // ---- Photos & files on a service charge --------------------------------
+  // One file per request (keeps each upload well under the hosting limit).
+  async function loadScopedService(req: Request, res: Response) {
+    const job = await loadScopedJob(req, res, req.params.jobId);
+    if (!job) return null;
+    const { data: svc } = await padClient()
+      .from("job_services")
+      .select("id, job_id")
+      .eq("id", String(req.params.serviceId))
+      .eq("job_id", job.id)
+      .maybeSingle();
+    if (!svc) {
+      res.status(404).json({ message: "Service charge not found" });
+      return null;
+    }
+    return { job, svc };
+  }
+
+  app.post(
+    "/api/jobs/:jobId/services/:serviceId/files",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const ctx = await loadScopedService(req, res);
+      if (!ctx) return;
+      if (!(await canManageServices(req, ctx.job.id)))
+        return res.status(403).json({
+          message: "Only an assigned supervisor or a manager can add files",
+        });
+      const parsed = uploadJobServiceFileSchema.safeParse(req.body);
+      if (!parsed.success)
+        return res.status(400).json({ message: parsed.error.errors[0].message });
+      const b64 = parsed.data.file_base64.replace(/^data:[^,]*,/, "");
+      const size = Buffer.byteLength(b64, "base64");
+      if (size > SERVICE_FILE_MAX_BYTES)
+        return res.status(400).json({
+          message: `${parsed.data.file_name} is too large (max ${Math.round(SERVICE_FILE_MAX_BYTES / 1024 / 1024)} MB).`,
+        });
+      const { data, error } = await padClient()
+        .from("job_service_files")
+        .insert({
+          service_id: ctx.svc.id,
+          job_id: ctx.job.id,
+          file_name: parsed.data.file_name,
+          file_mime: parsed.data.file_mime,
+          file_size: size,
+          file_base64: b64,
+          uploaded_by: req.profile!.id,
+          uploaded_by_name: req.profile!.name,
+        })
+        .select("id, service_id, file_name, file_mime, file_size, uploaded_by_name, created_at")
+        .single();
+      if (error)
+        return res.status(400).json({
+          message: /job_service_files/.test(error.message)
+            ? "File uploads aren't set up yet — run the service charge files SQL in Supabase."
+            : error.message,
+        });
+      res.status(201).json(data);
+    },
+  );
+
+  // Open/download one attached file.
+  app.get(
+    "/api/jobs/:jobId/services/:serviceId/files/:fileId",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const ctx = await loadScopedService(req, res);
+      if (!ctx) return;
+      const { data: f } = await padClient()
+        .from("job_service_files")
+        .select("file_name, file_mime, file_base64")
+        .eq("id", String(req.params.fileId))
+        .eq("service_id", ctx.svc.id)
+        .maybeSingle();
+      if (!f) return res.status(404).json({ message: "File not found" });
+      res.setHeader("Content-Type", f.file_mime || "application/octet-stream");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${String(f.file_name).replace(/[^\x20-\x7e]|["\\]/g, "_")}"`,
+      );
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.send(Buffer.from(f.file_base64, "base64"));
+    },
+  );
+
+  app.delete(
+    "/api/jobs/:jobId/services/:serviceId/files/:fileId",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const ctx = await loadScopedService(req, res);
+      if (!ctx) return;
+      if (!(await canManageServices(req, ctx.job.id)))
+        return res.status(403).json({
+          message: "Only an assigned supervisor or a manager can remove files",
+        });
+      const { error } = await padClient()
+        .from("job_service_files")
+        .delete()
+        .eq("id", String(req.params.fileId))
+        .eq("service_id", ctx.svc.id);
+      if (error) return res.status(400).json({ message: error.message });
+      res.status(204).end();
     },
   );
 

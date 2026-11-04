@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { RentalBadge } from "@/components/Rental";
 import { MudPlantBilling, DailyCentrifugeHours } from "@/components/MudPlantCards";
 import { JobStandbyCard, StandbyBadge } from "@/components/JobStandby";
@@ -11,6 +11,7 @@ import {
   JOB_STATUS,
   CREWING,
   SERVICE_TYPES,
+  SERVICE_FILE_MAX_BYTES,
   type JobWithCustomer,
   type JobService,
   type ServiceType,
@@ -69,6 +70,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
+import { Camera, Paperclip, Upload, ImageIcon } from "lucide-react";
+import { prepareFile, fileSizeLabel, type PreparedFile } from "@/lib/serviceFiles";
 import { Archive, ArchiveRestore, ArrowLeft, Building2, Calendar, Check, ChevronDown, ClipboardList, DollarSign, FileText, Info, Layers, Loader2, MapPin, Navigation, Pencil, Play, Plus, Power, PowerOff, ShieldAlert, Ticket, Trash2, User, Wrench, X } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -1176,6 +1179,41 @@ function ServiceFormDialog({
   const [wellId, setWellId] = useState<string>(service?.well_id ?? NO_WELL);
   const NO_ASSET = "__none__";
   const [assetId, setAssetId] = useState<string>(service?.asset_id ?? NO_ASSET);
+  // Photos / files picked in this dialog, uploaded after the charge is saved.
+  const [pending, setPending] = useState<PreparedFile[]>([]);
+  const [preparing, setPreparing] = useState(false);
+  const photoInput = useRef<HTMLInputElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  async function addFiles(list: FileList | null) {
+    if (!list || !list.length) return;
+    setPreparing(true);
+    const next: PreparedFile[] = [];
+    for (const f of Array.from(list)) {
+      try {
+        const pf = await prepareFile(f);
+        if (pf.bytes > SERVICE_FILE_MAX_BYTES) {
+          toast({
+            title: `${f.name} is too large`,
+            description: `Files can be up to ${Math.round(SERVICE_FILE_MAX_BYTES / 1024 / 1024)} MB.`,
+            variant: "destructive",
+          });
+          continue;
+        }
+        next.push(pf);
+      } catch (e: any) {
+        toast({ title: `Could not add ${f.name}`, description: e.message, variant: "destructive" });
+      }
+    }
+    setPending((p) => [...p, ...next]);
+    setPreparing(false);
+  }
+  const removeExisting = useMutation({
+    mutationFn: async (fileId: string) =>
+      apiRequest("DELETE", `/api/jobs/${job.id}/services/${service!.id}/files/${fileId}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/jobs", job.id, "services"] }),
+    onError: (e: any) =>
+      toast({ title: "Could not remove file", description: e.message, variant: "destructive" }),
+  });
   // Equipment on this job (plus the current pick, if it has since moved).
   const { data: allAssets } = useQuery<Asset[]>({
     queryKey: ["/api/assets"],
@@ -1215,6 +1253,7 @@ function ServiceFormDialog({
     setNotes(service?.notes ?? "");
     setWellId(service?.well_id ?? NO_WELL);
     setAssetId(service?.asset_id ?? NO_ASSET);
+    setPending([]);
   };
 
   const save = useMutation({
@@ -1227,6 +1266,7 @@ function ServiceFormDialog({
         asset_id: assetId === NO_ASSET ? null : assetId,
         notes: notes.trim(),
       };
+      let serviceId = service?.id;
       if (service) {
         await apiRequest(
           "PATCH",
@@ -1234,10 +1274,31 @@ function ServiceFormDialog({
           body,
         );
       } else {
-        await apiRequest("POST", `/api/jobs/${job.id}/services`, body);
+        const res = await apiRequest("POST", `/api/jobs/${job.id}/services`, body);
+        serviceId = (await res.json()).id;
       }
+      // Upload attached photos/files one at a time.
+      const failed: string[] = [];
+      for (const f of pending) {
+        try {
+          await apiRequest("POST", `/api/jobs/${job.id}/services/${serviceId}/files`, {
+            file_name: f.name,
+            file_mime: f.mime,
+            file_base64: f.base64,
+          });
+        } catch (e: any) {
+          failed.push(`${f.name}: ${e.message}`);
+        }
+      }
+      return { failed };
     },
-    onSuccess: () => {
+    onSuccess: ({ failed }: { failed: string[] }) => {
+      if (failed.length)
+        toast({
+          title: "Saved, but some files didn't upload",
+          description: failed.join("\n"),
+          variant: "destructive",
+        });
       queryClient.invalidateQueries({ queryKey: servicesKey });
       queryClient.invalidateQueries({ queryKey: ["/api/jobs", job.id, "billing-calendar"] });
       queryClient.invalidateQueries({ queryKey: ["/api/revenue/summary"] });
@@ -1267,7 +1328,7 @@ function ServiceFormDialog({
       }}
     >
       <DialogTrigger asChild>{trigger}</DialogTrigger>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{service ? "Edit service charge" : "Log a service charge"}</DialogTitle>
         </DialogHeader>
@@ -1381,6 +1442,111 @@ function ServiceFormDialog({
               data-testid="input-service-notes"
             />
           </div>
+          <div className="space-y-1.5">
+            <Label>Photos &amp; files (optional)</Label>
+            <input
+              ref={photoInput}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = "";
+              }}
+              data-testid="input-service-photo"
+            />
+            <input
+              ref={fileInput}
+              type="file"
+              multiple
+              accept="image/*,application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.csv,.txt"
+              className="hidden"
+              onChange={(e) => {
+                addFiles(e.target.files);
+                e.target.value = "";
+              }}
+              data-testid="input-service-files"
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => photoInput.current?.click()}
+                data-testid="button-service-take-photo"
+              >
+                <Camera className="mr-1.5 h-4 w-4" /> Take photo
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => fileInput.current?.click()}
+                data-testid="button-service-choose-files"
+              >
+                <Upload className="mr-1.5 h-4 w-4" /> Choose files
+              </Button>
+              {preparing && <Loader2 className="h-4 w-4 animate-spin self-center text-muted-foreground" />}
+            </div>
+            {((service?.files?.length ?? 0) > 0 || pending.length > 0) && (
+              <ul className="space-y-1">
+                {(service?.files ?? []).map((f) => (
+                  <li
+                    key={f.id}
+                    className="flex items-center gap-2 rounded border border-card-border px-2 py-1 text-xs"
+                  >
+                    {f.file_mime.startsWith("image/") ? (
+                      <ImageIcon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    ) : (
+                      <Paperclip className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    )}
+                    <span className="truncate flex-1">{f.file_name}</span>
+                    <span className="text-muted-foreground">{fileSizeLabel(f.file_size)}</span>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6 text-destructive hover:text-destructive"
+                      disabled={removeExisting.isPending}
+                      onClick={() => removeExisting.mutate(f.id)}
+                      aria-label={`Remove ${f.file_name}`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </li>
+                ))}
+                {pending.map((f, i) => (
+                  <li
+                    key={`p-${i}`}
+                    className="flex items-center gap-2 rounded border border-dashed border-card-border px-2 py-1 text-xs"
+                  >
+                    {f.mime.startsWith("image/") ? (
+                      <ImageIcon className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    ) : (
+                      <Paperclip className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                    )}
+                    <span className="truncate flex-1">{f.name}</span>
+                    <span className="text-muted-foreground">{fileSizeLabel(f.bytes)} · uploads on save</span>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-6 w-6"
+                      onClick={() => setPending((p) => p.filter((_, j) => j !== i))}
+                      aria-label={`Remove ${f.name}`}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="text-xs text-muted-foreground">
+              On a phone, Take photo opens the camera; Choose files picks from your photos or files
+              (PDF, Word, Excel). Up to 3 MB each — photos are shrunk automatically.
+            </p>
+          </div>
         </div>
         <DialogFooter>
           <Button
@@ -1392,7 +1558,7 @@ function ServiceFormDialog({
           </Button>
           <Button
             onClick={() => save.mutate()}
-            disabled={save.isPending || dateInvalid || costMissing || costInvalid || notesMissing}
+            disabled={save.isPending || preparing || dateInvalid || costMissing || costInvalid || notesMissing}
             data-testid="button-save-service"
           >
             {save.isPending && (
@@ -1404,6 +1570,36 @@ function ServiceFormDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+// Open an attached service-charge file in a new tab (or download it if the
+// browser blocks the tab). The tab is opened first so phones don't block it.
+async function openServiceFile(
+  jobId: string,
+  serviceId: string,
+  fileId: string,
+  name: string,
+  toast: (t: any) => void,
+) {
+  const w = window.open("", "_blank");
+  try {
+    const res = await apiRequest("GET", `/api/jobs/${jobId}/services/${serviceId}/files/${fileId}`);
+    const url = URL.createObjectURL(await res.blob());
+    if (w) {
+      w.location.href = url;
+    } else {
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  } catch (e: any) {
+    w?.close();
+    toast({ title: "Could not open file", description: e.message, variant: "destructive" });
+  }
 }
 
 function ServicesSection({ job }: { job: JobWithCustomer }) {
@@ -1594,6 +1790,26 @@ function ServicesSection({ job }: { job: JobWithCustomer }) {
               {s.notes && (
                 <div className="mt-1 pl-6 text-sm text-muted-foreground whitespace-pre-wrap">
                   {s.notes}
+                </div>
+              )}
+              {(s.files?.length ?? 0) > 0 && (
+                <div className="mt-1.5 pl-6 flex flex-wrap gap-1.5" data-testid={`service-files-${s.id}`}>
+                  {s.files!.map((f) => (
+                    <button
+                      key={f.id}
+                      type="button"
+                      onClick={() => openServiceFile(job.id, s.id, f.id, f.file_name, toast)}
+                      className="inline-flex max-w-[16rem] items-center gap-1 rounded border border-card-border bg-muted/40 px-1.5 py-0.5 text-xs hover:bg-muted"
+                      title={`Open ${f.file_name}`}
+                    >
+                      {f.file_mime.startsWith("image/") ? (
+                        <ImageIcon className="h-3 w-3 shrink-0" />
+                      ) : (
+                        <Paperclip className="h-3 w-3 shrink-0" />
+                      )}
+                      <span className="truncate">{f.file_name}</span>
+                    </button>
+                  ))}
                 </div>
               )}
               {s.created_by_name && (

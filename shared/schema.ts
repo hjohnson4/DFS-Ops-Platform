@@ -1628,6 +1628,7 @@ export interface JobService {
   asset_tag?: string | null; // joined for display
   asset_category?: string | null; // joined for display
   on_ticket?: number | null; // field ticket number it's billed on, if any
+  files?: JobServiceFile[]; // photos / documents attached (no file data)
   created_by: string | null;
   created_by_name: string | null;
   created_at: string;
@@ -1669,6 +1670,24 @@ export const updateJobServiceSchema = z.object({
   notes: z.string().trim().min(1, "Describe what was done").max(2000).optional(),
 });
 export type UpdateJobServiceInput = z.infer<typeof updateJobServiceSchema>;
+
+// A photo or document attached to a service charge (file data not included).
+export interface JobServiceFile {
+  id: string;
+  service_id: string;
+  file_name: string;
+  file_mime: string;
+  file_size: number | null;
+  uploaded_by_name: string | null;
+  created_at: string;
+}
+// Per-file limit (after phone photos are shrunk in the browser).
+export const SERVICE_FILE_MAX_BYTES = 3 * 1024 * 1024;
+export const uploadJobServiceFileSchema = z.object({
+  file_name: z.string().trim().min(1).max(200),
+  file_mime: z.string().trim().min(1).max(150),
+  file_base64: z.string().min(1, "The file is empty"),
+});
 
 // A field tech assigned to a job. Only field-role profiles are assignable.
 export interface JobAssignment {
