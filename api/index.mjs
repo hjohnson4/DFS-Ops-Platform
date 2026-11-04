@@ -783,7 +783,7 @@ function serviceStatusFor(a) {
   else if (hoursSince >= interval * (1 - SERVICE_SOON_FRACTION)) state = "Soon";
   return { hoursSince, interval, state };
 }
-var SERVICE_INTERVAL_HOURS = 150;
+var SERVICE_INTERVAL_HOURS = 75;
 function hoursServiceStatusFor(hoursSince, hasService, interval = SERVICE_INTERVAL_HOURS) {
   if (!hasService && hoursSince <= 0)
     return { hoursSince: null, interval, state: "No baseline" };

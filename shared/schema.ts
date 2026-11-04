@@ -552,8 +552,8 @@ export function serviceStatusFor(a: {
 // ---- Run-hours service interval (centrifuges) ------------------------------
 // A centrifuge must be serviced within this many run hours of its last
 // service report. "Service soon" turns on at SERVICE_SOON_FRACTION of the
-// interval (135 hrs); "Overdue" at 150 hrs or more.
-export const SERVICE_INTERVAL_HOURS = 150;
+// interval (68 hrs); "Overdue" at 75 hrs or more.
+export const SERVICE_INTERVAL_HOURS = 75;
 
 // One row of the per-report run-hours log (table asset_run_hours): the hours a
 // signed-off daily report added to one centrifuge, with the job and well the

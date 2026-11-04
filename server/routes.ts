@@ -4245,7 +4245,7 @@ export async function registerRoutes(
 
       // Build per-asset service status from RUN HOURS: hours logged on daily
       // reports dated after the asset's last service report, against a
-      // 150-hour service interval. Every centrifuge gets a status (an
+      // 75-hour service interval. Every centrifuge gets a status (an
       // unassigned unit still carries the hours it came off its last job with);
       // the due/overdue counts below only count job-assigned units.
       const rows: (ServiceAssetRow & { _deployed: boolean })[] = assets.map(

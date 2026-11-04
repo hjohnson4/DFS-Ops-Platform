@@ -42,7 +42,7 @@ const STATE_LABEL: Record<ServiceState, string> = {
 };
 
 // Service module pop-up for one centrifuge: hours since service against the
-// 150-hour interval, its service history (date, supervisor, open the report)
+// 75-hour interval, its service history (date, supervisor, open the report)
 // and run hours totalled per job and per well.
 export function ServiceAssetDialog({
   assetId,
