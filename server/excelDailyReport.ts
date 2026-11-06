@@ -8,6 +8,7 @@ import type {
   DailyFieldKpis,
   KpiCellRef,
   DailyReportWellContext,
+  CostLine,
 } from "@shared/schema";
 
 // Two report-day layouts exist in the field:
@@ -146,11 +147,46 @@ KPI_CELLS_V2.push(
 
 const LAYOUTS: Record<
   SheetLayout,
-  { kpis: KpiCell[]; remarks: string; dayRate: string }
+  { kpis: KpiCell[]; remarks: string; dayRate: string; costRows: [number, number]; priceRow: number }
 > = {
-  v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57" },
-  v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59" },
+  v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57", costRows: [45, 56], priceRow: 66 },
+  v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59", costRows: [47, 58], priceRow: 68 },
 };
+
+// "Cost Information" block on the Report Day sheet: equipment label in column
+// Y, that day's charge in column AL (the rows above the Cumulative Cost row).
+// Screens, trucking/disposal, drive-by/call-out and other charges are "extra"
+// lines (billed by count); everything else is part of the day's package.
+// Unit prices for the counted lines sit on the Report Day 1 tab (hidden row).
+const EXTRA_COST_RE = /screen|trucking|disposal|drive\s*-?\s*by|call\s*-?\s*out|other\s*charge/i;
+const PRICE_CELLS: { re: RegExp; col: string }[] = [
+  { re: /dry(ing|er)\s*shaker\s*screen/i, col: "AD" },
+  { re: /rig\s*shaker\s*screen/i, col: "AL" },
+  { re: /disposal\s*of\s*cuttings/i, col: "P" },
+  { re: /disposal\s*of\s*liquids/i, col: "C" },
+];
+function readCostLines(
+  wb: XLSX.WorkBook,
+  ws: XLSX.WorkSheet | undefined,
+  layout: { costRows: [number, number]; priceRow: number },
+): CostLine[] {
+  const out: CostLine[] = [];
+  const day1 = wb.Sheets["Report Day 1"];
+  for (let r = layout.costRows[0]; r <= layout.costRows[1]; r++) {
+    const label = toText(rawCell(ws, `Y${r}`));
+    if (!label || /^\d+(\.\d+)?$/.test(label)) continue;
+    const amount = toNumber(rawCell(ws, `AL${r}`)) ?? 0;
+    const kind: CostLine["kind"] = EXTRA_COST_RE.test(label) ? "extra" : "package";
+    const line: CostLine = { label, amount, kind };
+    if (kind === "extra") {
+      const pc = PRICE_CELLS.find((p) => p.re.test(label));
+      const unit = pc ? toNumber(rawCell(day1, `${pc.col}${layout.priceRow}`)) : null;
+      if (unit && unit > 0) line.unit_price = unit;
+    }
+    out.push(line);
+  }
+  return out;
+}
 
 function sheetLayout(ws: XLSX.WorkSheet | undefined): SheetLayout {
   const q39 = ws?.["Q39"]?.v;
@@ -536,6 +572,8 @@ function parseDaySheet(
   // Notes / comments typed by the crew in B57 (operations summary). Stored
   // verbatim (line breaks kept) so the report detail page can show it.
   well_context.remarks = toText(rawCell(ws, layout.remarks));
+  // Daily cost breakdown (used by the job's ticket preview).
+  well_context.cost_lines = readCostLines(wb, ws, layout);
   // Spud date in AU6 (labeled "Spud Date:" in AQ6). Set day rate billing
   // (e.g. Verdun) starts on this date.
   // A blank template cell (0) reads as 1899-12-30 — treat anything before

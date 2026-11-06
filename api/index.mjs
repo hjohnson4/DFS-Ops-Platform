@@ -398,9 +398,34 @@ KPI_CELLS_V2.push(
   ])
 );
 var LAYOUTS = {
-  v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57" },
-  v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59" }
+  v1: { kpis: KPI_CELLS_V1, remarks: "B57", dayRate: "AL57", costRows: [45, 56], priceRow: 66 },
+  v2: { kpis: KPI_CELLS_V2, remarks: "B59", dayRate: "AL59", costRows: [47, 58], priceRow: 68 }
 };
+var EXTRA_COST_RE = /screen|trucking|disposal|drive\s*-?\s*by|call\s*-?\s*out|other\s*charge/i;
+var PRICE_CELLS = [
+  { re: /dry(ing|er)\s*shaker\s*screen/i, col: "AD" },
+  { re: /rig\s*shaker\s*screen/i, col: "AL" },
+  { re: /disposal\s*of\s*cuttings/i, col: "P" },
+  { re: /disposal\s*of\s*liquids/i, col: "C" }
+];
+function readCostLines(wb, ws2, layout) {
+  const out = [];
+  const day1 = wb.Sheets["Report Day 1"];
+  for (let r = layout.costRows[0]; r <= layout.costRows[1]; r++) {
+    const label = toText(rawCell(ws2, `Y${r}`));
+    if (!label || /^\d+(\.\d+)?$/.test(label)) continue;
+    const amount = toNumber(rawCell(ws2, `AL${r}`)) ?? 0;
+    const kind = EXTRA_COST_RE.test(label) ? "extra" : "package";
+    const line = { label, amount, kind };
+    if (kind === "extra") {
+      const pc = PRICE_CELLS.find((p) => p.re.test(label));
+      const unit = pc ? toNumber(rawCell(day1, `${pc.col}${layout.priceRow}`)) : null;
+      if (unit && unit > 0) line.unit_price = unit;
+    }
+    out.push(line);
+  }
+  return out;
+}
 function sheetLayout(ws2) {
   const q39 = ws2?.["Q39"]?.v;
   if (typeof q39 === "string" && /daily\s*run\s*hours/i.test(q39)) return "v2";
@@ -638,6 +663,7 @@ function parseDaySheet(wb, chosen, incomplete) {
   well_context.meas_depth_ft = toNumber(rawCell(ws2, "AI9"));
   well_context.supervisor = toText(rawCell(ws2, "AI11"));
   well_context.remarks = toText(rawCell(ws2, layout.remarks));
+  well_context.cost_lines = readCostLines(wb, ws2, layout);
   const spud = toDateStr(rawCell(ws2, SPUD_DATE_CELL));
   well_context.spud_date = spud && spud >= "2000-01-01" ? spud : null;
   const typedReportDate = toDateStr(rawCell(ws2, DATE_CELL));
@@ -1467,6 +1493,41 @@ function specificJobOf(a) {
   if (!v || v === String(j.job_number ?? "").trim()) return null;
   return v;
 }
+var previewMoney = z.coerce.number().nonnegative();
+var ticketPreviewDraftSchema = z.object({
+  well_name: z.string().min(1, "Pick a well."),
+  header: z.object({
+    customer: z.string().optional(),
+    address: z.string().optional(),
+    city_state_zip: z.string().optional(),
+    county: z.string().optional(),
+    well_name: z.string().optional(),
+    date: z.string().optional(),
+    ordered_by: z.string().optional(),
+    po_afe: z.string().optional(),
+    job_no: z.string().optional(),
+    ticket_type: z.enum(["service", "delivery"]).optional(),
+    comments: z.string().optional()
+  }).partial().optional(),
+  overrides: z.record(
+    z.object({
+      description: z.string().nullable().optional(),
+      quantity: previewMoney.nullable().optional(),
+      unit_cost: previewMoney.nullable().optional(),
+      hidden: z.boolean().optional()
+    })
+  ).optional(),
+  extra_lines: z.array(
+    z.object({
+      id: z.string().min(1),
+      description: z.string().min(1, "Each added line needs a description."),
+      quantity: previewMoney,
+      unit_cost: previewMoney,
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+      note: z.string().nullable().optional()
+    })
+  ).max(50).optional()
+});
 
 // server/openWorkOrders.ts
 async function openWorkOrdersByAsset(assetIds) {
@@ -1576,7 +1637,7 @@ function registerForecastRoutes(app) {
         if (missingTable(fErr.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
         return res.status(500).json({ message: fErr.message });
       }
-      const num3 = (v) => v == null || !Number.isFinite(Number(v)) ? null : Number(v);
+      const num4 = (v) => v == null || !Number.isFinite(Number(v)) ? null : Number(v);
       const rows = [
         ...jobs.map((j) => ({
           kind: "job",
@@ -1588,7 +1649,7 @@ function registerForecastRoutes(app) {
           odds: null,
           start_on: j.started_on && j.started_on > win.window_start ? String(j.started_on).slice(0, 10) : null,
           end_on: j.est_release_on ?? null,
-          day_rate: num3(j.projected_day_rate),
+          day_rate: num4(j.projected_day_rate),
           latest_report_rate: latest.get(j.id)?.rate ?? null
         })),
         ...(fRows || []).filter((f) => !f.end_on || f.end_on >= win.window_start).map((f) => ({
@@ -1598,10 +1659,10 @@ function registerForecastRoutes(app) {
           customer_name: f.customer_name ?? null,
           area: f.area,
           stage: f.stage,
-          odds: num3(f.odds),
+          odds: num4(f.odds),
           start_on: f.start_on,
           end_on: f.end_on ?? null,
-          day_rate: num3(f.day_rate),
+          day_rate: num4(f.day_rate),
           latest_report_rate: null
         }))
       ];
@@ -1678,11 +1739,11 @@ function registerForecastRoutes(app) {
         a.open_work_order = wo || null;
         if (wo) a.status = "Unavailable";
       });
-      const num3 = (t) => {
+      const num4 = (t) => {
         const m = String(t).match(/(\d+)/);
         return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER;
       };
-      assets.sort((a, b) => num3(a.tag) - num3(b.tag) || String(a.tag).localeCompare(String(b.tag)));
+      assets.sort((a, b) => num4(a.tag) - num4(b.tag) || String(a.tag).localeCompare(String(b.tag)));
       const jobIds = Array.from(new Set(assets.map((a) => a.job_id).filter(Boolean)));
       let jq = client3.from("jobs").select("id, job_number, area, status, started_on, est_release_on, day_rate, archived_at, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
       if (area) jq = jq.or(`area.eq."${area}"${jobIds.length ? `,id.in.(${jobIds.join(",")})` : ""}`);
@@ -2628,8 +2689,387 @@ async function recordRateChange(before, after, by) {
   await c.from("job_rate_events").insert(rows);
 }
 
-// server/rentals.ts
+// server/ticketPreview.ts
 var db3 = () => supabaseAdmin || supabaseAnon;
+var MANAGE2 = ["admin", "area"];
+var VIEW2 = ["admin", "area", "super"];
+var DRAFT_SQL_HINT = 'Saving ticket preview edits needs a one-time database update: run "Ticket preview setup.sql" in the Supabase SQL Editor.';
+var missingTable2 = (msg) => /ticket_preview_drafts|does not exist|schema cache/i.test(msg);
+var round22 = (n) => Math.round(n * 100) / 100;
+var num2 = (v) => {
+  const n = Number(v);
+  return v === null || v === void 0 || v === "" || !Number.isFinite(n) ? null : n;
+};
+var md = (d) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d);
+  return m ? `${Number(m[2])}/${Number(m[3])}` : d;
+};
+var addDays2 = (d, n) => {
+  const [y, m, dd] = d.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, dd + n));
+  return t.toISOString().slice(0, 10);
+};
+var range = (a, b) => a === b ? md(a) : `${md(a)} \u2013 ${md(b)}`;
+var STATUS_RANK = { "Signed off": 3, "Pending Review": 2, "Correction pending": 2, "Changes requested": 1 };
+async function loadJob(req, res) {
+  const scope = areaScopeOf(req.profile);
+  const { data: job } = await db3().from("jobs").select("id,job_number,area,status,crewing,customer:customers(name)").eq("id", req.params.id).single();
+  if (!job || scope && job.area !== scope) {
+    res.status(404).json({ message: "Job not found" });
+    return null;
+  }
+  return job;
+}
+async function loadDraft(jobId, wk) {
+  const { data, error } = await db3().from("ticket_preview_drafts").select("*").eq("job_id", jobId).eq("well_key", wk).maybeSingle();
+  if (error) return { draft: null, ready: !missingTable2(error.message), by: null, at: null };
+  if (!data) return { draft: null, ready: true, by: null, at: null };
+  return {
+    draft: {
+      header: data.header || {},
+      overrides: data.overrides || {},
+      extra_lines: Array.isArray(data.extra_lines) ? data.extra_lines : []
+    },
+    ready: true,
+    by: data.updated_by_name ?? null,
+    at: data.updated_at ?? null
+  };
+}
+async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
+  const [{ data: reports }, { data: tickets }, { data: services }] = await Promise.all([
+    db3().from("daily_reports").select("id,report_day,report_date,well_name,status,kpis,well_context,analysis,created_at").eq("job_id", job.id),
+    db3().from("field_tickets").select("ticket_number,ticket_date,well_name,county,po_afe,ordered_by,line_items,created_at").eq("job_id", job.id).order("created_at", { ascending: false }),
+    db3().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: true })
+  ]);
+  if (costOverride) {
+    for (const r of reports || [])
+      if (costOverride.has(r.id)) r.well_context = { ...r.well_context || {}, cost_lines: costOverride.get(r.id) };
+  }
+  const best = /* @__PURE__ */ new Map();
+  for (const r of reports || []) {
+    if (r.analysis?.correction_of) continue;
+    if (r.status === "Needs job match") continue;
+    const date = String(r.report_date ?? "").slice(0, 10);
+    const well = String(r.well_name ?? "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !well) continue;
+    const k = `${wellKey(well)}|${date}`;
+    const cur = best.get(k);
+    const rank = (x) => STATUS_RANK[x.status] ?? 0;
+    if (!cur || rank(r) > rank(cur) || rank(r) === rank(cur) && String(r.created_at) > String(cur.created_at))
+      best.set(k, r);
+  }
+  const covered = /* @__PURE__ */ new Map();
+  for (const t of tickets || []) {
+    for (const l of Array.isArray(t.line_items) ? t.line_items : []) {
+      if (!l.start_date || l.service_id) continue;
+      const wk2 = wellKey(l.well_name || t.well_name);
+      if (!wk2) continue;
+      const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
+      const m = covered.get(wk2) || /* @__PURE__ */ new Map();
+      for (let d = l.start_date; d <= end; d = addDays2(d, 1)) if (!m.has(d)) m.set(d, t.ticket_number);
+      covered.set(wk2, m);
+    }
+  }
+  const wells = /* @__PURE__ */ new Map();
+  best.forEach((r, k) => {
+    const [wk2, date] = k.split("|");
+    const w = wells.get(wk2) || { well_name: String(r.well_name).trim(), open_days: 0, last_date: "", total_days: 0 };
+    w.total_days += 1;
+    if (!covered.get(wk2)?.has(date)) w.open_days += 1;
+    if (date > w.last_date) w.last_date = date;
+    wells.set(wk2, w);
+  });
+  const wellList = Array.from(wells.entries()).map(([wk2, w]) => ({ key: wk2, ...w })).sort((a, b) => a.last_date < b.last_date ? 1 : -1);
+  let wk = wellParam ? wellKey(wellParam) : "";
+  if (!wk || !wells.has(wk)) wk = (wellList.find((w) => w.open_days > 0) || wellList[0])?.key ?? "";
+  const wellName = wk ? wells.get(wk).well_name : "";
+  const coveredHere = covered.get(wk) || /* @__PURE__ */ new Map();
+  const allDays = [];
+  best.forEach((r, k) => {
+    if (k.startsWith(wk + "|")) allDays.push(r);
+  });
+  allDays.sort((a, b) => a.report_date < b.report_date ? -1 : 1);
+  const lastTicketed = Array.from(coveredHere.keys()).sort().pop() ?? null;
+  const days = [];
+  for (const r of allDays) {
+    const date = String(r.report_date).slice(0, 10);
+    const cost = Array.isArray(r.well_context?.cost_lines) ? r.well_context.cost_lines : null;
+    const dayCost = num2(r.kpis?.day_rate);
+    const pkg = cost ? round22(cost.filter((c) => c.kind === "package").reduce((s, c) => s + (Number(c.amount) || 0), 0)) : dayCost;
+    days.push({
+      report_id: r.id,
+      report_day: r.report_day ?? null,
+      date,
+      status: r.status,
+      day_cost: dayCost,
+      cumulative: num2(r.kpis?.accrued_current_well),
+      package_cost: pkg,
+      has_breakdown: !!cost,
+      on_ticket: coveredHere.get(date) ?? null
+    });
+  }
+  const open = days.filter((d) => d.on_ticket == null);
+  const lines = [];
+  const reportById = new Map(allDays.map((r) => [r.id, r]));
+  const pkgName = (cost) => {
+    const names = (cost || []).filter((c) => c.kind === "package" && c.amount > 0).map((c) => c.label);
+    if (names.some((n) => /closed\s*loop/i.test(n))) return "Closed Loop Package";
+    if (names.some((n) => /centrifuge/i.test(n))) return "Centrifuge Package";
+    return job.crewing === "Manned" ? "Closed Loop Package" : "Centrifuge Package";
+  };
+  let run = null;
+  const flush = () => {
+    if (!run) return;
+    const breakdown = (run.cost || []).filter((c) => c.kind === "package" && c.amount > 0).map((c) => ({ label: c.label, amount: c.amount }));
+    lines.push({
+      key: `pkg:${run.start}`,
+      kind: "package",
+      description: pkgName(run.cost),
+      dates_label: range(run.start, run.end),
+      start_date: run.start,
+      end_date: run.end,
+      quantity: run.days,
+      unit_cost: run.rate,
+      total: round22(run.days * run.rate),
+      breakdown,
+      notes: [],
+      edited: false,
+      hidden: false,
+      service_ids: []
+    });
+    run = null;
+  };
+  const zeroDays = open.filter((d) => !(Number(d.package_cost) > 0));
+  for (const d of open) {
+    const rate = d.package_cost ?? 0;
+    if (!(rate > 0)) {
+      flush();
+      continue;
+    }
+    const cost = reportById.get(d.report_id)?.well_context?.cost_lines ?? null;
+    if (run && rate === run.rate) {
+      run.end = d.date;
+      run.days += 1;
+    } else {
+      flush();
+      run = { start: d.date, end: d.date, rate, days: 1, cost };
+    }
+  }
+  flush();
+  const extras = /* @__PURE__ */ new Map();
+  for (const d of open) {
+    const cost = reportById.get(d.report_id)?.well_context?.cost_lines ?? [];
+    for (const c of cost) {
+      if (c.kind !== "extra" || !(Number(c.amount) > 0)) continue;
+      const e = extras.get(c.label) || { label: c.label, unit: c.unit_price ?? null, entries: [] };
+      e.entries.push({ date: d.date, amount: Number(c.amount) });
+      if (!e.unit && c.unit_price) e.unit = c.unit_price;
+      extras.set(c.label, e);
+    }
+  }
+  extras.forEach((e) => {
+    const total2 = round22(e.entries.reduce((s, x) => s + x.amount, 0));
+    if (!e.unit && e.entries.every((x) => x.amount === e.entries[0].amount)) e.unit = e.entries[0].amount;
+    const countable = e.unit && e.entries.every((x) => Math.abs(x.amount / e.unit - Math.round(x.amount / e.unit)) < 1e-6);
+    const perDay = e.entries.every((x) => x.amount === e.unit);
+    const unitWord = /screen/i.test(e.label) ? "screens" : /trucking|disposal/i.test(e.label) ? "loads" : "";
+    const notes = e.entries.map(
+      (x) => countable && perDay && !unitWord ? `${md(x.date)}` : countable ? `${md(x.date)} \u2013 ${Math.round(x.amount / e.unit)}${unitWord ? " " + unitWord : ""}` : `${md(x.date)} \u2013 $${x.amount.toLocaleString("en-US")}`
+    );
+    const first = e.entries[0].date;
+    const last = e.entries[e.entries.length - 1].date;
+    lines.push({
+      key: `extra:${e.label}`,
+      kind: "extra",
+      description: e.label.trim(),
+      dates_label: null,
+      start_date: first,
+      end_date: last,
+      quantity: countable ? Math.round(total2 / e.unit) : 1,
+      unit_cost: countable ? e.unit : total2,
+      total: total2,
+      breakdown: [],
+      notes,
+      edited: false,
+      hidden: false,
+      service_ids: []
+    });
+  });
+  const billed = /* @__PURE__ */ new Set();
+  for (const t of tickets || [])
+    for (const l of Array.isArray(t.line_items) ? t.line_items : []) if (l.service_id) billed.add(l.service_id);
+  const svcByType = /* @__PURE__ */ new Map();
+  for (const s of services || []) {
+    if (billed.has(s.id)) continue;
+    if (s.well_name && wellKey(s.well_name) !== wk) continue;
+    if (lastTicketed && s.service_date <= lastTicketed) continue;
+    const arr = svcByType.get(s.service_type) || [];
+    arr.push(s);
+    svcByType.set(s.service_type, arr);
+  }
+  svcByType.forEach((arr, type) => {
+    const rates = Array.from(new Set(arr.map((s) => Number(s.cost) || 0)));
+    const total2 = round22(arr.reduce((s, x) => s + (Number(x.cost) || 0), 0));
+    const same = rates.length === 1;
+    lines.push({
+      key: `svc:${type}`,
+      kind: "service",
+      description: type === "Drive-by Service" ? "Drive by Service" : type,
+      dates_label: null,
+      start_date: arr[0].service_date,
+      end_date: arr[arr.length - 1].service_date,
+      quantity: same ? arr.length : 1,
+      unit_cost: same ? rates[0] : total2,
+      total: total2,
+      breakdown: [],
+      notes: arr.map((s) => `${md(s.service_date)} \u2013 ${String(s.notes || "Service").split(/\r?\n/)[0].slice(0, 60)}${same ? "" : ` ($${(Number(s.cost) || 0).toLocaleString("en-US")})`}`),
+      edited: false,
+      hidden: false,
+      service_ids: arr.map((s) => s.id),
+      service_costs: arr.map((s) => Number(s.cost) || 0)
+    });
+  });
+  const { draft, ready, by, at } = wk ? await loadDraft(job.id, wk) : { draft: null, ready: true, by: null, at: null };
+  for (const l of lines) {
+    const o = draft?.overrides?.[l.key];
+    if (!o) continue;
+    if (o.description != null && o.description.trim()) l.description = o.description.trim();
+    if (o.quantity != null) l.quantity = o.quantity;
+    if (o.unit_cost != null) l.unit_cost = o.unit_cost;
+    if (o.hidden) l.hidden = true;
+    l.total = round22(l.quantity * l.unit_cost);
+    l.edited = true;
+  }
+  for (const x of draft?.extra_lines ?? []) {
+    lines.push({
+      key: `user:${x.id}`,
+      kind: "user",
+      description: x.description,
+      dates_label: null,
+      start_date: x.date || open[open.length - 1]?.date || todayCentral(),
+      end_date: null,
+      quantity: x.quantity,
+      unit_cost: x.unit_cost,
+      total: round22(x.quantity * x.unit_cost),
+      breakdown: [],
+      notes: x.note ? [x.note] : [],
+      edited: true,
+      hidden: false,
+      service_ids: [],
+      user_id: x.id,
+      user_date: x.date ?? null
+    });
+  }
+  const total = round22(lines.filter((l) => !l.hidden).reduce((s, l) => s + l.total, 0));
+  const flags = [];
+  const allSum = round22(days.reduce((s, d) => s + (d.day_cost ?? 0), 0));
+  const lastCum = [...days].reverse().find((d) => d.cumulative != null)?.cumulative ?? null;
+  if (lastCum != null && Math.abs(lastCum - allSum) > 0.5) {
+    const diff = round22(lastCum - allSum);
+    flags.push(
+      diff > 0 ? `The report's running total ($${lastCum.toLocaleString("en-US")}) is $${diff.toLocaleString("en-US")} more than the report days in DFS Ops add up to. A report day may be missing or out of date.` : `The report days in DFS Ops add up to $${(-diff).toLocaleString("en-US")} more than the report's running total ($${lastCum.toLocaleString("en-US")}). A day may be counted twice or out of date.`
+    );
+  }
+  for (let i = 1; i < days.length; i++) {
+    const from = addDays2(days[i - 1].date, 1);
+    const to = addDays2(days[i].date, -1);
+    if (from <= to && days[i].on_ticket == null)
+      flags.push(`No report in DFS Ops for ${from === to ? md(from) : `${md(from)} \u2013 ${md(to)}`}.`);
+  }
+  if (zeroDays.length)
+    flags.push(
+      `${zeroDays.length} day${zeroDays.length === 1 ? " has" : "s have"} a $0 day cost and ${zeroDays.length === 1 ? "is" : "are"} left off the ticket (${zeroDays.slice(0, 6).map((d) => md(d.date)).join(", ")}${zeroDays.length > 6 ? ", \u2026" : ""}).`
+    );
+  const pending = open.filter((d) => d.status !== "Signed off");
+  if (pending.length)
+    flags.push(`${pending.length} day${pending.length === 1 ? "" : "s"} not signed off yet (${pending.map((d) => md(d.date)).join(", ")}).`);
+  if (open.some((d) => !d.has_breakdown))
+    flags.push(
+      "Some days don't have the equipment breakdown yet, so they use the day cost as the package rate. An Admin can fill it in with Refresh KPIs on the Daily Reports page."
+    );
+  const lastTicket = (tickets || []).find((t) => wellKey(t.well_name).includes(wk)) || (tickets || [])[0] || null;
+  const header = {
+    customer: job.customer?.name ?? "",
+    address: "",
+    city_state_zip: "",
+    county: lastTicket?.county ?? "",
+    well_name: wellName,
+    date: todayCentral(),
+    ordered_by: lastTicket?.ordered_by ?? "",
+    po_afe: lastTicket?.po_afe ?? "",
+    job_no: job.job_number,
+    ticket_type: "delivery",
+    comments: lastTicket?.po_afe ? `PO# ${lastTicket.po_afe}` : "",
+    ...draft?.header || {}
+  };
+  return {
+    job_id: job.id,
+    job_number: job.job_number,
+    job_status: job.status,
+    wells: wellList.map(({ key, well_name, open_days, last_date }) => ({ key, well_name, open_days, last_date })),
+    well_key: wk,
+    well_name: wellName,
+    last_ticketed_date: lastTicketed,
+    header,
+    days,
+    lines,
+    total,
+    flags,
+    can_edit: canEdit,
+    drafts_ready: ready,
+    draft_saved_by: by,
+    draft_saved_at: at
+  };
+}
+function registerTicketPreviewRoutes(app) {
+  app.get("/api/jobs/:id/ticket-preview", requireAuth, requireRole(...VIEW2), async (req, res) => {
+    const job = await loadJob(req, res);
+    if (!job) return;
+    try {
+      const canEdit = MANAGE2.includes(req.profile.role);
+      res.json(await buildTicketPreview(job, req.query.well ? String(req.query.well) : null, canEdit));
+    } catch (e) {
+      res.status(500).json({ message: e?.message ?? String(e) });
+    }
+  });
+  app.put("/api/jobs/:id/ticket-preview", requireAuth, requireRole(...MANAGE2), async (req, res) => {
+    const job = await loadJob(req, res);
+    if (!job) return;
+    const parsed = ticketPreviewDraftSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const p = parsed.data;
+    const wk = wellKey(p.well_name);
+    if (!wk) return res.status(400).json({ message: "Pick a well." });
+    const { error } = await db3().from("ticket_preview_drafts").upsert(
+      {
+        job_id: job.id,
+        well_key: wk,
+        well_name: p.well_name,
+        header: p.header ?? {},
+        overrides: p.overrides ?? {},
+        extra_lines: p.extra_lines ?? [],
+        updated_by: req.profile.id,
+        updated_by_name: req.profile.name ?? null,
+        updated_at: (/* @__PURE__ */ new Date()).toISOString()
+      },
+      { onConflict: "job_id,well_key" }
+    );
+    if (error) return res.status(400).json({ message: missingTable2(error.message) ? DRAFT_SQL_HINT : error.message });
+    res.json(await buildTicketPreview(job, p.well_name, true));
+  });
+  app.delete("/api/jobs/:id/ticket-preview", requireAuth, requireRole(...MANAGE2), async (req, res) => {
+    const job = await loadJob(req, res);
+    if (!job) return;
+    const wk = wellKey(String(req.query.well ?? ""));
+    if (!wk) return res.status(400).json({ message: "Pick a well." });
+    const { error } = await db3().from("ticket_preview_drafts").delete().eq("job_id", job.id).eq("well_key", wk);
+    if (error && !missingTable2(error.message)) return res.status(400).json({ message: error.message });
+    res.json(await buildTicketPreview(job, String(req.query.well), true));
+  });
+}
+
+// server/rentals.ts
+var db4 = () => supabaseAdmin || supabaseAnon;
 var RENTAL_MONEY_ROLES = ["admin", "area"];
 var canSeeRentalMoney = (role) => !!role && RENTAL_MONEY_ROLES.includes(role);
 var MONEY_FIELDS = ["rental_monthly_rate", "rental_notes"];
@@ -2639,7 +3079,7 @@ function stripRentalMoney(row, role) {
   MONEY_FIELDS.forEach((k) => delete out[k]);
   return out;
 }
-function addDays2(iso, n) {
+function addDays3(iso, n) {
   const d = /* @__PURE__ */ new Date(iso + "T12:00:00Z");
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
@@ -2649,16 +3089,16 @@ function daysInMonth(iso) {
   const m = Number(iso.slice(5, 7));
   return new Date(Date.UTC(y, m, 0)).getUTCDate();
 }
-var num2 = (v) => {
+var num3 = (v) => {
   if (v === null || v === void 0 || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
-var round22 = (n) => Math.round(n * 100) / 100;
+var round23 = (n) => Math.round(n * 100) / 100;
 function computeRental(asset, stints, charges, today = todayCentral()) {
   const start = asset.rental_start;
-  const monthly = num2(asset.rental_monthly_rate);
-  const one_time = round22(charges.reduce((s, c) => s + (num2(c.amount) ?? 0), 0));
+  const monthly = num3(asset.rental_monthly_rate);
+  const one_time = round23(charges.reduce((s, c) => s + (num3(c.amount) ?? 0), 0));
   if (!start) {
     return {
       through: null,
@@ -2669,7 +3109,7 @@ function computeRental(asset, stints, charges, today = todayCentral()) {
       one_time_charges: one_time,
       total_cost: one_time,
       earned: 0,
-      profit: round22(-one_time),
+      profit: round23(-one_time),
       on_rent: false,
       monthly_rate: monthly
     };
@@ -2683,21 +3123,21 @@ function computeRental(asset, stints, charges, today = todayCentral()) {
   let missing = 0;
   let rent = 0;
   let earned = 0;
-  for (let d = start; d <= end; d = addDays2(d, 1)) {
+  for (let d = start; d <= end; d = addDays3(d, 1)) {
     days++;
     if (monthly != null) rent += monthly / daysInMonth(d);
     const s = sorted.find((x) => x.job_id && x.start_date <= d && (x.end_date == null || x.end_date >= d));
     if (s) {
       onJob++;
-      const r = num2(s.day_rate);
+      const r = num3(s.day_rate);
       if (r == null) missing++;
       else earned += r;
     }
     if (days > 3660) break;
   }
-  rent = round22(rent);
-  earned = round22(earned);
-  const total = round22(rent + one_time);
+  rent = round23(rent);
+  earned = round23(earned);
+  const total = round23(rent + one_time);
   return {
     through: end < start ? null : end,
     days_on_rent: end < start ? 0 : days,
@@ -2707,7 +3147,7 @@ function computeRental(asset, stints, charges, today = todayCentral()) {
     one_time_charges: one_time,
     total_cost: total,
     earned,
-    profit: round22(earned - total),
+    profit: round23(earned - total),
     on_rent: !asset.rental_end || asset.rental_end >= today,
     monthly_rate: monthly
   };
@@ -2716,7 +3156,7 @@ var missingSetup = (msg) => !!msg && /rental_|asset_job_stints|is_rental/.test(m
 var SETUP_MSG2 = "Rental tracking isn't set up yet. Run the rental centrifuges SQL in the Supabase SQL editor, then refresh.";
 async function loadRentalBits(assetIds) {
   if (!assetIds.length) return { stints: /* @__PURE__ */ new Map(), charges: /* @__PURE__ */ new Map() };
-  const client3 = db3();
+  const client3 = db4();
   const [{ data: st }, { data: ch }] = await Promise.all([
     client3.from("asset_job_stints").select("id, asset_id, job_id, day_rate, start_date, end_date, created_at, job:jobs(job_number)").in("asset_id", assetIds),
     client3.from("rental_charges").select("id, asset_id, charge_date, description, amount, created_by_name, created_at").in("asset_id", assetIds).order("charge_date", { ascending: true })
@@ -2730,7 +3170,7 @@ async function loadRentalBits(assetIds) {
 function registerRentalRoutes(app) {
   app.get("/api/rentals", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    let q = db3().from("assets").select(
+    let q = db4().from("assets").select(
       "id, tag, category, area, status, job_id, day_rate, is_rental, rental_vendor, rental_ref, rental_monthly_rate, rental_start, rental_end, rental_notes, job:jobs(id, job_number)"
     ).eq("is_rental", true).order("tag", { ascending: true });
     if (scope) q = q.eq("area", scope);
@@ -2759,11 +3199,11 @@ function registerRentalRoutes(app) {
     res.json({
       today,
       rentals: out,
-      totals: { total_cost: round22(t.total_cost), earned: round22(t.earned), profit: round22(t.profit), on_rent: t.on_rent, count: out.length }
+      totals: { total_cost: round23(t.total_cost), earned: round23(t.earned), profit: round23(t.profit), on_rent: t.on_rent, count: out.length }
     });
   });
   app.get("/api/assets/:id/rental", requireAuth, requireRole("admin", "area"), async (req, res) => {
-    const { data: a, error } = await db3().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
+    const { data: a, error } = await db4().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
     if (error) {
       if (missingSetup(error.message)) return res.status(409).json({ message: SETUP_MSG2, setup_required: true });
       return res.status(500).json({ message: error.message });
@@ -2781,7 +3221,7 @@ function registerRentalRoutes(app) {
         id: s.id,
         job_id: s.job_id,
         job_number: s.job?.job_number ?? null,
-        day_rate: num2(s.day_rate),
+        day_rate: num3(s.day_rate),
         start_date: s.start_date,
         end_date: s.end_date
       }))
@@ -2794,12 +3234,12 @@ function registerRentalRoutes(app) {
     async (req, res) => {
       const parsed = createRentalChargeSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
-      const { data: a } = await db3().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
+      const { data: a } = await db4().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
       if (!a) return res.status(404).json({ message: "Asset not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && a.area !== scope) return res.status(403).json({ message: "Outside your area" });
       if (!a.is_rental) return res.status(400).json({ message: "This asset isn't marked as a rental" });
-      const { data, error } = await db3().from("rental_charges").insert({
+      const { data, error } = await db4().from("rental_charges").insert({
         asset_id: a.id,
         charge_date: parsed.data.charge_date,
         description: parsed.data.description,
@@ -2819,7 +3259,7 @@ function registerRentalRoutes(app) {
     const parsed = setStintStartSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
     const start = parsed.data.start_date;
-    const { data: st } = await db3().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
+    const { data: st } = await db4().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
     if (!st || !st.job_id) return res.status(404).json({ message: "Job record not found" });
     const a = st.asset || {};
     const scope = areaScopeOf(req.profile);
@@ -2832,7 +3272,7 @@ function registerRentalRoutes(app) {
       return res.status(400).json({
         message: `That's before this rental was received (${a.rental_start}). Change the received date on the asset first.`
       });
-    const { data: others } = await db3().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
+    const { data: others } = await db4().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
     const thisEnd = st.end_date || "9999-12-31";
     const clash = (others || []).find(
       (o) => o.job_id !== st.job_id && o.start_date <= thisEnd && (o.end_date == null || o.end_date >= start)
@@ -2841,16 +3281,16 @@ function registerRentalRoutes(app) {
       return res.status(400).json({
         message: `That overlaps the time this unit was on ${clash.job?.job_number ?? "another job"} (${clash.start_date} \u2192 ${clash.end_date ?? "now"}).`
       });
-    const { error } = await db3().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
+    const { error } = await db4().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
     if (error) return res.status(400).json({ message: error.message });
     res.json({ ok: true, start_date: start });
   });
   app.delete("/api/rental-charges/:id", requireAuth, requireRole("admin", "area"), async (req, res) => {
-    const { data: c } = await db3().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
+    const { data: c } = await db4().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
     if (!c) return res.status(404).json({ message: "Charge not found" });
     const scope = areaScopeOf(req.profile);
     if (scope && c.asset?.area !== scope) return res.status(403).json({ message: "Outside your area" });
-    const { error } = await db3().from("rental_charges").delete().eq("id", c.id);
+    const { error } = await db4().from("rental_charges").delete().eq("id", c.id);
     if (error) return res.status(400).json({ message: error.message });
     res.status(204).end();
   });
@@ -2987,7 +3427,7 @@ function hoursAfter(rows, afterDate) {
   }
   return Math.round(t * 100) / 100;
 }
-var round23 = (n) => Math.round(n * 100) / 100;
+var round24 = (n) => Math.round(n * 100) / 100;
 async function hoursSinceServiceFor(client3, assets) {
   const ids = assets.map((a) => a.id);
   const out = /* @__PURE__ */ new Map();
@@ -3004,7 +3444,7 @@ async function hoursSinceServiceFor(client3, assets) {
     else {
       const meter = Number(a.run_hours ?? 0) || 0;
       const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-      since = round23(Math.max(0, meter - base));
+      since = round24(Math.max(0, meter - base));
     }
     const st = hoursServiceStatusFor(since, !!lastService);
     out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
@@ -3296,8 +3736,18 @@ function describeReportChanges(prior, next) {
   cmp("well_name", prior.well_name, next.well_name);
   const pc = prior.well_context || {};
   const nc = next.well_context || {};
-  for (const k of Array.from(/* @__PURE__ */ new Set([...Object.keys(pc), ...Object.keys(nc)])))
+  for (const k of Array.from(/* @__PURE__ */ new Set([...Object.keys(pc), ...Object.keys(nc)]))) {
+    if (k === "cost_lines") {
+      const m = (v) => new Map((Array.isArray(v) ? v : []).map((l) => [String(l.label), Number(l.amount) || 0]));
+      const pa = m(pc[k]);
+      const na = m(nc[k]);
+      if (pa.size === 0 || na.size === 0) continue;
+      for (const lbl of Array.from(/* @__PURE__ */ new Set([...Array.from(pa.keys()), ...Array.from(na.keys())])))
+        cmp(lbl, pa.get(lbl) ?? 0, na.get(lbl) ?? 0);
+      continue;
+    }
     cmp(k, pc[k], nc[k]);
+  }
   const pk = prior.kpis || {};
   const nk = next.kpis || {};
   for (const k of Array.from(/* @__PURE__ */ new Set([...Object.keys(pk), ...Object.keys(nk)])))
@@ -4171,7 +4621,7 @@ async function registerRoutes(httpServer, app) {
     if (scope && job.area !== scope) return res.status(404).json({ message: "Job not found" });
     const jobIds = await jobScopeOf(req.profile);
     if (jobIds && !jobIds.includes(job.id)) return res.status(404).json({ message: "Job not found" });
-    const num3 = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? 0 : Number(v);
+    const num4 = (v) => v == null || v === "" || !Number.isFinite(Number(v)) ? 0 : Number(v);
     const wellKey3 = (w) => String(w ?? "").trim().replace(/\s+/g, " ").toLowerCase();
     const log2 = [];
     let ready = true;
@@ -4220,7 +4670,7 @@ async function registerRoutes(httpServer, app) {
     };
     for (const r of log2) {
       const w = getW(r.well_name);
-      const h = num3(r.hours);
+      const h = num4(r.hours);
       w.by_asset[r.asset_id] = (w.by_asset[r.asset_id] || 0) + h;
       w.total += h;
       touch(w, r.report_date);
@@ -4233,7 +4683,7 @@ async function registerRoutes(httpServer, app) {
       touch(w, r.report_date);
       if (r.run_hours_applied) continue;
       const by = slotDailyHours(r.kpis);
-      const h = num3(by[1]) + num3(by[2]) + num3(by[3]) + num3(by[4]);
+      const h = num4(by[1]) + num4(by[2]) + num4(by[3]) + num4(by[4]);
       if (h <= 0) continue;
       if (r.status === "Signed off") {
         const k = dayKey(r);
@@ -4447,7 +4897,7 @@ async function registerRoutes(httpServer, app) {
     const monthStart = to.slice(0, 8) + "01";
     const { data: mtdRows } = await client3.from("asset_run_hours").select("asset_id, hours").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", monthStart).lte("report_date", to);
     const mtd = {};
-    for (const r of mtdRows || []) mtd[r.asset_id] = round23((mtd[r.asset_id] ?? 0) + (Number(r.hours) || 0));
+    for (const r of mtdRows || []) mtd[r.asset_id] = round24((mtd[r.asset_id] ?? 0) + (Number(r.hours) || 0));
     const start = String(job.billing_start_date ?? job.started_on ?? "").slice(0, 10);
     const lookFrom = (() => {
       const d = /* @__PURE__ */ new Date(today + "T12:00:00Z");
@@ -4507,7 +4957,7 @@ async function registerRoutes(httpServer, app) {
       const h = Number(raw);
       if (!Number.isFinite(h) || h < 0 || h > 24)
         return res.status(400).json({ message: `${a.tag}: hours must be between 0 and 24.` });
-      clean2.push({ asset_id: a.id, hours: round23(h), tag: a.tag });
+      clean2.push({ asset_id: a.id, hours: round24(h), tag: a.tag });
     }
     const actor = req.profile;
     for (const e of clean2) {
@@ -4534,10 +4984,10 @@ async function registerRoutes(httpServer, app) {
         });
         if (error) return res.status(400).json({ message: `${e.tag}: ${error.message}` });
       }
-      const delta = round23(next - old);
+      const delta = round24(next - old);
       if (delta !== 0) {
         const { data: cur } = await client3.from("assets").select("run_hours").eq("id", e.asset_id).single();
-        const meter = round23(Math.max(0, (Number(cur?.run_hours ?? 0) || 0) + delta));
+        const meter = round24(Math.max(0, (Number(cur?.run_hours ?? 0) || 0) + delta));
         await client3.from("assets").update({ run_hours: meter }).eq("id", e.asset_id);
       }
     }
@@ -4990,6 +5440,7 @@ async function registerRoutes(httpServer, app) {
     }
   );
   registerFieldTicketRoutes(app);
+  registerTicketPreviewRoutes(app);
   const FDR_TABLE = "daily_reports";
   const flattenFdr = (r) => {
     const { job, submitter, signer, ...rest } = r;
@@ -5821,10 +6272,10 @@ async function registerRoutes(httpServer, app) {
           } else {
             const meter = Number(a.run_hours ?? 0) || 0;
             const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-            since = round23(Math.max(0, meter - base));
+            since = round24(Math.max(0, meter - base));
           }
           const st = hoursServiceStatusFor(since, !!lastService);
-          const currentJobHours = assigned && log2.ready ? round23(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
+          const currentJobHours = assigned && log2.ready ? round24(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
             id: a.id,
@@ -5913,7 +6364,7 @@ async function registerRoutes(httpServer, app) {
       else {
         const meter = Number(a.run_hours ?? 0) || 0;
         const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
-        since = round23(Math.max(0, meter - base));
+        since = round24(Math.max(0, meter - base));
       }
       const st = hoursServiceStatusFor(since, !!lastService);
       const jobsMap = /* @__PURE__ */ new Map();
@@ -5946,8 +6397,8 @@ async function registerRoutes(httpServer, app) {
       }
       const jobs = Array.from(jobsMap.values()).map(({ _wells, ...j }) => ({
         ...j,
-        hours: round23(j.hours),
-        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round23(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
+        hours: round24(j.hours),
+        wells: Array.from(_wells.values()).map((w) => ({ ...w, hours: round24(w.hours) })).sort((x, y) => String(y.last_date ?? "").localeCompare(String(x.last_date ?? "")))
       })).sort(
         (x, y) => Number(y.is_current) - Number(x.is_current) || String(y.wells[0]?.last_date ?? "").localeCompare(String(x.wells[0]?.last_date ?? ""))
       );
@@ -5968,7 +6419,7 @@ async function registerRoutes(httpServer, app) {
         last_service_date: lastService,
         last_service_supervisor: history[0]?.supervisor_name ?? null,
         current_job_hours: a.job_id ? log2.ready ? current?.hours ?? 0 : null : null,
-        total_logged_hours: round23(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
+        total_logged_hours: round24(log2.rows.reduce((t, r) => t + (Number(r.hours) || 0), 0)),
         history,
         jobs,
         ledger_ready: log2.ready
@@ -7117,7 +7568,9 @@ async function registerRoutes(httpServer, app) {
           const mergedKpis = { ...r.kpis || {}, ...excel.kpis || {} };
           const oldCtx = r.well_context || {};
           const newSpud = excel.well_context?.spud_date ?? null;
-          const ctxChanged = (oldCtx.spud_date ?? null) !== newSpud;
+          const newCost = excel.well_context?.cost_lines ?? null;
+          const costChanged = JSON.stringify(oldCtx.cost_lines ?? null) !== JSON.stringify(newCost);
+          const ctxChanged = (oldCtx.spud_date ?? null) !== newSpud || costChanged;
           const before = JSON.stringify(r.kpis || {});
           const after = JSON.stringify(mergedKpis);
           if (before === after && !ctxChanged) {
@@ -7125,7 +7578,7 @@ async function registerRoutes(httpServer, app) {
             continue;
           }
           const patch = { kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map };
-          if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud };
+          if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud, cost_lines: newCost };
           const { error: upErr } = await client3.from("daily_reports").update(patch).eq("id", r.id);
           if (upErr) {
             errors += 1;

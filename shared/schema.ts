@@ -1093,6 +1093,16 @@ export interface DailyReportWellContext {
   // Spud date from cell AU6 ("Spud Date:" label in AQ6). Set day rate billing
   // starts on this date.
   spud_date?: string | null;
+  // Daily cost breakdown from the "Cost Information" block (Y label, AL
+  // amount). Used by the ticket preview to group days into package lines.
+  cost_lines?: CostLine[] | null;
+}
+
+export interface CostLine {
+  label: string; // equipment / charge name from column Y
+  amount: number; // that day's charge (column AL)
+  kind: "package" | "extra"; // extra = screens, trucking, disposal, drive-by, other
+  unit_price?: number | null; // price per screen / load (Report Day 1), when known
 }
 
 // Report origin. Emailed reports arrive as an Excel workbook and carry locked,
@@ -2730,3 +2740,116 @@ export function specificJobOf(a: {
   if (!v || v === String(j.job_number ?? "").trim()) return null;
   return v;
 }
+
+// ---- Ticket preview --------------------------------------------------------
+// What a job's field ticket would look like if the job ended today, built from
+// the daily reports. See server/ticketPreview.ts.
+export interface TicketPreviewDay {
+  report_id: string;
+  report_day: number | null;
+  date: string; // yyyy-mm-dd
+  status: string;
+  day_cost: number | null; // the report's daily cost total
+  cumulative: number | null; // the report's running total for the well
+  package_cost: number | null; // package part of the day (no extras)
+  has_breakdown: boolean; // equipment breakdown read from the workbook
+  on_ticket: number | null; // field ticket # this day is already on
+}
+
+export interface TicketPreviewLine {
+  key: string; // stable key used for edits (pkg:<start>, extra:<label>, svc:<type>, user:<id>)
+  kind: "package" | "extra" | "service" | "user";
+  description: string;
+  dates_label: string | null; // "10/25 – 11/5" for package lines
+  start_date: string | null;
+  end_date: string | null;
+  quantity: number;
+  unit_cost: number;
+  total: number;
+  breakdown: { label: string; amount: number }[]; // package equipment
+  notes: string[]; // dated sub-lines ("11/3 – 2 screens")
+  edited: boolean;
+  hidden: boolean;
+  service_ids: string[]; // job_services billed by this line
+  service_costs?: number[]; // each service's logged cost (same order)
+  user_id?: string;
+  user_date?: string | null;
+}
+
+export interface TicketPreviewHeader {
+  customer: string;
+  address: string;
+  city_state_zip: string;
+  county: string;
+  well_name: string;
+  date: string;
+  ordered_by: string;
+  po_afe: string;
+  job_no: string;
+  ticket_type: "service" | "delivery";
+  comments: string;
+}
+
+export interface TicketPreview {
+  job_id: string;
+  job_number: string;
+  job_status: string;
+  wells: { key: string; well_name: string; open_days: number; last_date: string }[];
+  well_key: string;
+  well_name: string;
+  last_ticketed_date: string | null;
+  header: TicketPreviewHeader;
+  days: TicketPreviewDay[];
+  lines: TicketPreviewLine[];
+  total: number;
+  flags: string[];
+  can_edit: boolean;
+  drafts_ready: boolean; // false until "Ticket preview setup.sql" is run
+  draft_saved_by: string | null;
+  draft_saved_at: string | null;
+}
+
+const previewMoney = z.coerce.number().nonnegative();
+export const ticketPreviewDraftSchema = z.object({
+  well_name: z.string().min(1, "Pick a well."),
+  header: z
+    .object({
+      customer: z.string().optional(),
+      address: z.string().optional(),
+      city_state_zip: z.string().optional(),
+      county: z.string().optional(),
+      well_name: z.string().optional(),
+      date: z.string().optional(),
+      ordered_by: z.string().optional(),
+      po_afe: z.string().optional(),
+      job_no: z.string().optional(),
+      ticket_type: z.enum(["service", "delivery"]).optional(),
+      comments: z.string().optional(),
+    })
+    .partial()
+    .optional(),
+  overrides: z
+    .record(
+      z.object({
+        description: z.string().nullable().optional(),
+        quantity: previewMoney.nullable().optional(),
+        unit_cost: previewMoney.nullable().optional(),
+        hidden: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+  extra_lines: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        description: z.string().min(1, "Each added line needs a description."),
+        quantity: previewMoney,
+        unit_cost: previewMoney,
+        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+        note: z.string().nullable().optional(),
+      }),
+    )
+    .max(50)
+    .optional(),
+});
+export type TicketPreviewDraft = Omit<z.infer<typeof ticketPreviewDraftSchema>, "well_name">;

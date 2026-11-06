@@ -15,6 +15,7 @@ import * as XLSX from "xlsx";
 import { registerForecastRoutes } from "./forecast";
 import { openWorkOrdersByAsset, withOpenWorkOrders } from "./openWorkOrders";
 import { registerFieldTicketRoutes } from "./fieldTickets";
+import { registerTicketPreviewRoutes } from "./ticketPreview";
 import { registerRentalRoutes, stripRentalMoney } from "./rentals";
 import { AREAS, isLiveJobStatus, assetStatusFor, specificJobOf } from "@shared/schema";
 import { computeManualBilling, publicBilling, recordRateChange, todayCentral } from "./manualBilling";
@@ -625,8 +626,19 @@ function describeReportChanges(prior: any, next: any): string[] {
   cmp("well_name", prior.well_name, next.well_name);
   const pc = prior.well_context || {};
   const nc = next.well_context || {};
-  for (const k of Array.from(new Set([...Object.keys(pc), ...Object.keys(nc)])))
+  for (const k of Array.from(new Set([...Object.keys(pc), ...Object.keys(nc)]))) {
+    if (k === "cost_lines") {
+      // Cost breakdown: list the lines whose amount changed.
+      const m = (v: any) => new Map<string, number>((Array.isArray(v) ? v : []).map((l: any) => [String(l.label), Number(l.amount) || 0]));
+      const pa = m(pc[k]);
+      const na = m(nc[k]);
+      if (pa.size === 0 || na.size === 0) continue; // older report without a breakdown
+      for (const lbl of Array.from(new Set([...Array.from(pa.keys()), ...Array.from(na.keys())])))
+        cmp(lbl, pa.get(lbl) ?? 0, na.get(lbl) ?? 0);
+      continue;
+    }
     cmp(k, pc[k], nc[k]);
+  }
   const pk = prior.kpis || {};
   const nk = next.kpis || {};
   for (const k of Array.from(new Set([...Object.keys(pk), ...Object.keys(nk)])))
@@ -3100,6 +3112,7 @@ export async function registerRoutes(
 
   // ---- Field tickets: see server/fieldTickets.ts ------------------------
   registerFieldTicketRoutes(app);
+  registerTicketPreviewRoutes(app);
 
   // ==== Field daily reports =================================================
   // Field reports are stored in the unified `daily_reports` table with
@@ -6199,7 +6212,9 @@ export async function registerRoutes(
           // Also refresh the spud date (AU6) without touching other context.
           const oldCtx: any = (r as any).well_context || {};
           const newSpud = excel.well_context?.spud_date ?? null;
-          const ctxChanged = (oldCtx.spud_date ?? null) !== newSpud;
+          const newCost = excel.well_context?.cost_lines ?? null;
+          const costChanged = JSON.stringify(oldCtx.cost_lines ?? null) !== JSON.stringify(newCost);
+          const ctxChanged = (oldCtx.spud_date ?? null) !== newSpud || costChanged;
           const before = JSON.stringify(r.kpis || {});
           const after = JSON.stringify(mergedKpis);
           if (before === after && !ctxChanged) {
@@ -6207,7 +6222,7 @@ export async function registerRoutes(
             continue;
           }
           const patch: any = { kpis: mergedKpis, kpi_cell_map: excel.kpi_cell_map };
-          if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud };
+          if (ctxChanged) patch.well_context = { ...oldCtx, spud_date: newSpud, cost_lines: newCost };
           const { error: upErr } = await client
             .from("daily_reports")
             .update(patch)

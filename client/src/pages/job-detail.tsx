@@ -33,6 +33,7 @@ import {
   assetIsAssignable,
 } from "@shared/schema";
 import { FieldTicketDialog, StatusBadge } from "@/components/FieldTicketDialog";
+import { TicketPreviewDialog } from "@/components/TicketPreviewDialog";
 import { JsaFormDialog } from "@/components/JsaFormDialog";
 import { SignoffControls } from "@/components/SignoffControls";
 import { JobKpiTrend } from "@/components/JobKpiTrend";
@@ -72,7 +73,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { Camera, Paperclip, Upload, ImageIcon } from "lucide-react";
 import { prepareFile, fileSizeLabel, type PreparedFile } from "@/lib/serviceFiles";
-import { Archive, ArchiveRestore, ArrowLeft, Building2, Calendar, Check, ChevronDown, ClipboardList, DollarSign, FileText, Info, Layers, Loader2, MapPin, Navigation, Pencil, Play, Plus, Power, PowerOff, ShieldAlert, Ticket, Trash2, User, Wrench, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowLeft, Building2, Calendar, Check, ChevronDown, ClipboardList, DollarSign, Eye, FileText, Info, Layers, Loader2, MapPin, Navigation, Pencil, Play, Plus, Power, PowerOff, ShieldAlert, Ticket, Trash2, User, Wrench, X } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -1003,6 +1004,15 @@ export default function JobDetailPage() {
             </span>
           )}
         </h2>
+        <div className="flex items-center gap-2">
+        <TicketPreviewDialog
+          jobId={job.id}
+          trigger={
+            <Button size="sm" variant="outline" data-testid="button-ticket-preview">
+              <Eye className="mr-2 h-4 w-4" /> Ticket preview
+            </Button>
+          }
+        />
         {canManageAssets &&
           (isLiveJobStatus(job.status) ? (
             <FieldTicketDialog
@@ -1018,6 +1028,7 @@ export default function JobDetailPage() {
               Job not active — tickets are read-only
             </span>
           ))}
+        </div>
       </div>
       {coverage && coverage.uncovered > 0 && (
         <div className="mb-2 rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-sm" data-testid="job-ticket-coverage">
