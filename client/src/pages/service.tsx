@@ -424,6 +424,11 @@ export default function Service() {
                         <span className="text-muted-foreground">Unassigned</span>
                       )}
                     </div>
+                    {r.specific_job && (
+                      <div className="text-xs" data-testid={`text-specific-job-${r.tag}`}>
+                        {r.specific_job}
+                      </div>
+                    )}
                     <div className="text-xs text-muted-foreground">{r.area}</div>
                   </td>
                   <td className="px-3 py-1.5">

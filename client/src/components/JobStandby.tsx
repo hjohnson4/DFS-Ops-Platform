@@ -16,8 +16,8 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { Loader2, PauseCircle, PlayCircle, Trash2 } from "lucide-react";
-import type { JobWithCustomer, JobStandby } from "@shared/schema";
+import { Loader2, PauseCircle, PlayCircle, Trash2, Pencil } from "lucide-react";
+import type { JobWithCustomer, JobStandby, JobStandbyPeriod } from "@shared/schema";
 
 const money = (n: number | null | undefined) =>
   n == null
@@ -70,6 +70,19 @@ export function JobStandbyCard({
   const [rate, setRate] = useState("");
   const [startDate, setStartDate] = useState(today);
   const [endDate, setEndDate] = useState(today);
+  // Edit a standby period (dates and rate = the billed standby days).
+  const [editing, setEditing] = useState<JobStandbyPeriod | null>(null);
+  const [eRate, setERate] = useState("");
+  const [eStart, setEStart] = useState("");
+  const [eEnd, setEEnd] = useState("");
+  const [eOngoing, setEOngoing] = useState(false);
+  const openEdit = (p: JobStandbyPeriod) => {
+    setEditing(p);
+    setERate(String(p.rate));
+    setEStart(p.start_date);
+    setEEnd(p.end_date ?? today);
+    setEOngoing(!p.end_date);
+  };
 
   const calendarBilled =
     !!job.manual_day_rate &&
@@ -116,6 +129,20 @@ export function JobStandbyCard({
     },
     onError: onErr,
   });
+  const edit = useMutation({
+    mutationFn: async () =>
+      (await apiRequest("PATCH", `/api/jobs/${job.id}/standby/${editing!.id}`, {
+        rate: Number(eRate),
+        start_date: eStart,
+        end_date: eOngoing ? null : eEnd,
+      })).json(),
+    onSuccess: () => {
+      setEditing(null);
+      refresh();
+      toast({ title: "Standby days updated", description: "Job revenue now uses the new standby days." });
+    },
+    onError: onErr,
+  });
   const remove = useMutation({
     mutationFn: async (pid: string) =>
       (await apiRequest("DELETE", `/api/jobs/${job.id}/standby/${pid}`)).json(),
@@ -129,6 +156,15 @@ export function JobStandbyCard({
   const rateNum = Number(rate);
   const rateOk = Number.isFinite(rateNum) && rateNum > 0;
   const open = sb?.periods.find((p) => !p.end_date) ?? null;
+  const eRateNum = Number(eRate);
+  const eRateOk = Number.isFinite(eRateNum) && eRateNum > 0;
+  const eLast = eOngoing ? today : eEnd;
+  const eDays =
+    eStart && eLast && eStart <= eLast
+      ? Math.round((new Date(eLast + "T12:00:00Z").getTime() - new Date(eStart + "T12:00:00Z").getTime()) / 86400000) + 1
+      : 0;
+  const otherOpen = !!sb?.periods.some((p) => !p.end_date && p.id !== editing?.id);
+  const eValid = eRateOk && !!eStart && eStart <= today && (eOngoing ? !otherOpen : !!eEnd && eEnd >= eStart && eEnd <= today);
   if (!hasHistory && !canStart) return null;
 
   return (
@@ -212,7 +248,17 @@ export function JobStandbyCard({
                           : `By ${p.ended_by_name ?? "—"}`}
                     </td>
                     {canManage && (
-                      <td className="py-1.5 text-right">
+                      <td className="py-1.5 text-right whitespace-nowrap">
+                        {!job.archived_at && (
+                          <button
+                            className="mr-2 text-muted-foreground hover:text-foreground"
+                            title="Edit this standby period's days and rate"
+                            onClick={() => openEdit(p)}
+                            data-testid={`button-edit-standby-${p.id}`}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                         <button
                           className="text-muted-foreground hover:text-destructive"
                           title="Remove this standby period (entered by mistake)"
@@ -233,6 +279,84 @@ export function JobStandbyCard({
           </div>
         </>
       )}
+
+      <Dialog open={!!editing} onOpenChange={(o) => !o && setEditing(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit standby days</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div>
+              <Label htmlFor="edit-standby-rate">Standby day rate ($/day)</Label>
+              <Input
+                id="edit-standby-rate"
+                type="number"
+                inputMode="decimal"
+                min={0}
+                value={eRate}
+                onChange={(e) => setERate(e.target.value)}
+                data-testid="input-edit-standby-rate"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <Label htmlFor="edit-standby-start">First standby day</Label>
+                <Input
+                  id="edit-standby-start"
+                  type="date"
+                  max={today}
+                  value={eStart}
+                  onChange={(e) => setEStart(e.target.value)}
+                  data-testid="input-edit-standby-start"
+                />
+              </div>
+              <div>
+                <Label htmlFor="edit-standby-end">Last standby day</Label>
+                <Input
+                  id="edit-standby-end"
+                  type="date"
+                  min={eStart}
+                  max={today}
+                  value={eOngoing ? "" : eEnd}
+                  disabled={eOngoing}
+                  onChange={(e) => setEEnd(e.target.value)}
+                  data-testid="input-edit-standby-end"
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={eOngoing}
+                disabled={otherOpen}
+                onChange={(e) => setEOngoing(e.target.checked)}
+                data-testid="checkbox-edit-standby-ongoing"
+              />
+              Still on standby (bills through today)
+            </label>
+            <div className="rounded-md bg-muted px-3 py-2 tabular-nums" data-testid="edit-standby-preview">
+              {eDays} standby day{eDays === 1 ? "" : "s"} × {money(eRateOk ? eRateNum : 0)} ={" "}
+              <span className="font-semibold">{money(eDays * (eRateOk ? eRateNum : 0))}</span>
+              {editing && (
+                <div className="text-xs text-muted-foreground">
+                  Was {editing.days} day{editing.days === 1 ? "" : "s"} · {money(editing.total)}
+                </div>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Days with a daily report already bill the report's day rate, so standby has to end the day
+              before the first report.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditing(null)}>Cancel</Button>
+            <Button disabled={!eValid || edit.isPending} onClick={() => edit.mutate()} data-testid="button-save-edit-standby">
+              {edit.isPending && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={startOpen} onOpenChange={setStartOpen}>
         <DialogContent className="sm:max-w-md">

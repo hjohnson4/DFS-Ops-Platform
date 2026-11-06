@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { RentalBadge } from "@/components/Rental";
+import { specificJobOf } from "@shared/schema";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -256,7 +257,7 @@ export function NewServiceReportDialog({
                   {centrifuges.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
                       <span className="inline-flex items-center gap-1.5">
-                        {a.tag} <RentalBadge asset={a} /> — {a.category}
+                        {a.tag} <RentalBadge asset={a} /> — {specificJobOf(a as any) ?? a.category}
                       </span>
                     </SelectItem>
                   ))}
@@ -270,9 +271,11 @@ export function NewServiceReportDialog({
               {selectedAsset && (
                 <p className="text-xs text-muted-foreground">
                   {selectedAsset.area} ·{" "}
-                  {selectedAsset.job_or_well
-                    ? selectedAsset.job_or_well
-                    : "Unassigned"}
+                  {specificJobOf(selectedAsset as any)
+                    ? `${(selectedAsset as any).job?.job_number ?? ""} · ${specificJobOf(selectedAsset as any)}`
+                    : selectedAsset.job_or_well
+                      ? selectedAsset.job_or_well
+                      : "Unassigned"}
                 </p>
               )}
             </div>

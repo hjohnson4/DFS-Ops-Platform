@@ -1460,6 +1460,13 @@ var setJobReleaseSchema = z.object({
 var setProjectedRateSchema = z.object({
   projected_day_rate: z.number().nonnegative().max(1e6).nullable()
 });
+function specificJobOf(a) {
+  const j = a.job;
+  if (!j || !(j.manual_day_rate && j.manual_billing_mode === "calendar")) return null;
+  const v = String(a.job_or_well ?? "").trim();
+  if (!v || v === String(j.job_number ?? "").trim()) return null;
+  return v;
+}
 
 // server/openWorkOrders.ts
 async function openWorkOrdersByAsset(assetIds) {
@@ -5395,7 +5402,7 @@ async function registerRoutes(httpServer, app) {
       if (fieldJobIds.length === 0) return res.json([]);
     }
     let q = supabaseAnon.from("assets").select(
-      "*, maintenance_schedule:maintenance_schedules(*), job:jobs(id,job_number,well_name,area,status)"
+      "*, maintenance_schedule:maintenance_schedules(*), job:jobs(id,job_number,well_name,area,status,manual_day_rate,manual_billing_mode)"
     ).order("tag");
     if (scope) q = q.eq("area", scope);
     if (fieldJobIds) q = q.in("job_id", fieldJobIds);
@@ -5586,7 +5593,7 @@ async function registerRoutes(httpServer, app) {
       const scope = areaScopeOf(req.profile);
       const client3 = supabaseAdmin || supabaseAnon;
       const { data: asset, error } = await client3.from("assets").select(
-        "*, maintenance_schedule:maintenance_schedules(*), job:jobs(id,job_number,well_name,area,status)"
+        "*, maintenance_schedule:maintenance_schedules(*), job:jobs(id,job_number,well_name,area,status,manual_day_rate,manual_billing_mode)"
       ).eq("id", req.params.id).single();
       if (error || !asset)
         return res.status(404).json({ message: "Asset not found" });
@@ -5657,6 +5664,31 @@ async function registerRoutes(httpServer, app) {
       const { data, error } = await client3.from("assets").insert(insert).select().single();
       if (error) return res.status(400).json({ message: error.message });
       res.status(201).json(data);
+    }
+  );
+  app.patch(
+    "/api/assets/:id/specific-job",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const raw = req.body?.specific_job;
+      if (raw != null && typeof raw !== "string")
+        return res.status(400).json({ message: "Specific job must be text" });
+      const text = String(raw ?? "").trim().slice(0, 120);
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client3.from("assets").select("id, tag, area, job_id, job:jobs(id, job_number, area, manual_day_rate, manual_billing_mode)").eq("id", req.params.id).single();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && asset.area !== scope)
+        return res.status(403).json({ message: "Outside your area" });
+      const job = asset.job;
+      if (!job || !(job.manual_day_rate && job.manual_billing_mode === "calendar"))
+        return res.status(409).json({ message: "A specific job can only be set on a no-report job like the Mud Plant." });
+      if (await jobIsArchived(client3, job.id))
+        return res.status(409).json({ message: ARCHIVED_JOB_MSG });
+      const { data, error } = await client3.from("assets").update({ job_or_well: text || job.job_number }).eq("id", asset.id).select("*").single();
+      if (error) return res.status(400).json({ message: error.message });
+      res.json(data);
     }
   );
   app.patch(
@@ -5741,7 +5773,7 @@ async function registerRoutes(httpServer, app) {
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
       const client3 = supabaseAdmin || supabaseAnon;
-      let aq = client3.from("assets").select("*, job:jobs(id,job_number,area)").in("category", RUN_HOUR_CATEGORIES).order("tag");
+      let aq = client3.from("assets").select("*, job:jobs(id,job_number,area,manual_day_rate,manual_billing_mode)").in("category", RUN_HOUR_CATEGORIES).order("tag");
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) return res.status(500).json({ message: aErr.message });
@@ -5806,6 +5838,7 @@ async function registerRoutes(httpServer, app) {
             assigned,
             job_number: a.job?.job_number ?? null,
             job_or_well: a.job_or_well,
+            specific_job: specificJobOf(a),
             technician: techByAsset.get(a.id) ?? null,
             run_hours: a.run_hours,
             run_hours_since_service: st.hoursSince,
@@ -9328,6 +9361,70 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         return res.status(400).json({ message: "The last standby day can't be before the start date" });
       const { error } = await padClient().from("job_standby_periods").update({ end_date: end, ended_reason: "manual", ended_by_name: req.profile.name }).eq("id", open.id).is("end_date", null);
       if (error) return res.status(400).json({ message: error.message });
+      res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
+    }
+  );
+  app.patch(
+    "/api/jobs/:id/standby/:periodId",
+    requireAuth,
+    requireRole("admin", "area"),
+    async (req, res) => {
+      const job = await loadStandbyJob(req, res);
+      if (!job) return;
+      if (job.archived_at)
+        return res.status(400).json({ message: "This job is archived. Unarchive it first." });
+      const current = (await standbyByJob([job.id])).get(job.id);
+      const period = current?.periods.find((p) => p.id === String(req.params.periodId));
+      if (!period) return res.status(404).json({ message: "Standby period not found" });
+      const today = todayCentral();
+      const rate = req.body?.rate === void 0 ? period.rate : Number(req.body.rate);
+      if (!Number.isFinite(rate) || rate <= 0 || rate > 1e6)
+        return res.status(400).json({ message: "Enter a standby day rate greater than $0" });
+      const start = req.body?.start_date === void 0 ? period.start_date : isoDay(req.body.start_date);
+      if (!start) return res.status(400).json({ message: "Enter the first standby day" });
+      if (start > today)
+        return res.status(400).json({ message: "The first standby day can't be in the future" });
+      let end;
+      if (req.body?.end_date === void 0) end = period.end_date;
+      else if (req.body.end_date === null || req.body.end_date === "") end = null;
+      else {
+        end = isoDay(req.body.end_date);
+        if (!end) return res.status(400).json({ message: "Enter a valid last standby day" });
+      }
+      if (end && end > today)
+        return res.status(400).json({ message: "The last standby day can't be in the future" });
+      if (end && end < start)
+        return res.status(400).json({ message: "The last standby day can't be before the first standby day" });
+      const others = current.periods.filter((p) => p.id !== period.id);
+      if (!end && others.some((p) => !p.end_date))
+        return res.status(409).json({ message: "Another standby period is still ongoing. End that one first." });
+      const last = end ?? today;
+      const clash = others.find((p) => p.start_date <= last && (p.end_date ?? today) >= start);
+      if (clash)
+        return res.status(400).json({
+          message: `Those dates overlap the standby period starting ${clash.start_date}. Change or remove that one first.`
+        });
+      const { data: reps } = await padClient().from("daily_reports").select("report_date").eq("job_id", job.id).gte("report_date", start).lte("report_date", last).order("report_date", { ascending: true }).limit(1);
+      const repDay = reps?.[0]?.report_date ? String(reps[0].report_date).slice(0, 10) : null;
+      if (repDay && end)
+        return res.status(400).json({
+          message: `There's a daily report dated ${repDay} inside those dates, and that day already bills the report's day rate. End standby on ${addDaysIso(repDay, -1)} or earlier.`
+        });
+      const changes = {
+        rate: Math.round(rate * 100) / 100,
+        start_date: start,
+        end_date: end
+      };
+      if (end !== period.end_date) {
+        changes.ended_reason = end ? "manual" : null;
+        changes.ended_by_name = end ? req.profile.name : null;
+      }
+      const { error } = await padClient().from("job_standby_periods").update(changes).eq("id", period.id).eq("job_id", job.id);
+      if (error) {
+        if (error.code === "23505")
+          return res.status(409).json({ message: "This job already has an ongoing standby period." });
+        return res.status(400).json({ message: error.message });
+      }
       res.json(publicStandby((await standbyByJob([job.id])).get(job.id)));
     }
   );

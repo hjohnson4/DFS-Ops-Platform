@@ -283,14 +283,26 @@ export default function JobDetailPage() {
   // Centrifuge slot on this job ("1"-"4", or "none"). Only shown/sent for
   // run-hour assets (centrifuges).
   const [editSlot, setEditSlot] = useState<string>("none");
+  // No-report (calendar-billed) jobs like the Mud Plant: the well/location
+  // field is the unit's free-text "Specific job" instead, editable by
+  // supervisors too, and the centrifuge slot doesn't apply.
+  const noReportJob = !!(job?.manual_day_rate && job?.manual_billing_mode === "calendar");
   const openEditAsset = (a: Asset) => {
     setEditAsset(a);
-    setEditWell(a.job_or_well ?? "");
+    setEditWell(
+      noReportJob && (a.job_or_well ?? "") === (job?.job_number ?? "") ? "" : a.job_or_well ?? "",
+    );
     setEditSlot(a.centrifuge_slot != null ? String(a.centrifuge_slot) : "none");
   };
   const editAssetWell = useMutation({
     mutationFn: async () => {
       if (!editAsset) return;
+      if (noReportJob) {
+        const r = await apiRequest("PATCH", `/api/assets/${editAsset.id}/specific-job`, {
+          specific_job: editWell.trim(),
+        });
+        return r.json();
+      }
       const body: any = {
         job_or_well: editWell.trim() === "" ? null : editWell.trim(),
       };
@@ -772,8 +784,10 @@ export default function JobDetailPage() {
               <span className="font-medium">{a.tag}</span>
               <RentalBadge asset={a} withVendor />
               <span className="text-muted-foreground">{a.category}</span>
-              {a.job_or_well && (
-                <span className="text-muted-foreground">· {a.job_or_well}</span>
+              {a.job_or_well && !(noReportJob && a.job_or_well === job.job_number) && (
+                <span className="text-muted-foreground" data-testid={`text-asset-where-${a.id}`}>
+                  · {a.job_or_well}
+                </span>
               )}
               {isCent &&
                 (slot != null && slot >= 1 && slot <= 4 ? (
@@ -794,6 +808,21 @@ export default function JobDetailPage() {
               <span className="ml-auto inline-flex rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                 {a.status}
               </span>
+              {!canEditRow && noReportJob && profile?.role === "super" && isLiveJobStatus(job.status) && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7 text-muted-foreground"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openEditAsset(a);
+                  }}
+                  aria-label="Edit specific job"
+                  data-testid={`button-edit-asset-${a.id}`}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              )}
               {canEditRow && (
                 <div
                   className="flex items-center gap-0.5"
@@ -902,19 +931,21 @@ export default function JobDetailPage() {
             <DialogTitle>Edit {editAsset?.tag}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
-            <Label htmlFor="edit-asset-well">Well / location</Label>
+            <Label htmlFor="edit-asset-well">{noReportJob ? "Specific job" : "Well / location"}</Label>
             <Input
               id="edit-asset-well"
               value={editWell}
               onChange={(e) => setEditWell(e.target.value)}
-              placeholder="e.g. well name or pad location"
+              placeholder={noReportJob ? "e.g. Dewatering, barite recovery" : "e.g. well name or pad location"}
+              maxLength={noReportJob ? 120 : undefined}
               data-testid="input-edit-asset-well"
             />
             <p className="text-xs text-muted-foreground">
-              Updates where this asset is working on Job {job.job_number}. To move
-              it to a different job, release it and add it there.
+              {noReportJob
+                ? `What ${editAsset?.tag ?? "this unit"} is doing on ${job.job_number}. Supervisors see it when they pick the unit for service. Leave blank to clear it.`
+                : `Updates where this asset is working on Job ${job.job_number}. To move it to a different job, release it and add it there.`}
             </p>
-            {editAsset && tracksRunHours(editAsset.category) && (
+            {editAsset && tracksRunHours(editAsset.category) && !noReportJob && (
               <div className="pt-1">
                 <Label htmlFor="edit-asset-slot">Centrifuge slot (on this job)</Label>
                 <Select value={editSlot} onValueChange={setEditSlot}>

@@ -648,6 +648,8 @@ export interface ServiceAssetRow {
   assigned: boolean; // true when the centrifuge is assigned to a job
   job_number: string | null;
   job_or_well: string | null;
+  // Free-text "specific job" on a no-report job like the Mud Plant.
+  specific_job?: string | null;
   technician: string | null; // supervisor who last filed a service report
   run_hours: number | null;
   run_hours_since_service: number | null;
@@ -2712,3 +2714,19 @@ export interface RevenueProjection {
 export const setProjectedRateSchema = z.object({
   projected_day_rate: z.number().nonnegative().max(1000000).nullable(),
 });
+
+
+// "Specific job" a unit is doing on a no-report (calendar-billed) job such as
+// the Mud Plant — typed freely on the job page and stored in the asset's
+// job_or_well field. Returns null for report jobs, or when the field still
+// just holds the job number (the default when a unit is added).
+export function specificJobOf(a: {
+  job_or_well?: string | null;
+  job?: { job_number?: string | null; manual_day_rate?: boolean | null; manual_billing_mode?: string | null } | null;
+}): string | null {
+  const j = a.job;
+  if (!j || !(j.manual_day_rate && j.manual_billing_mode === "calendar")) return null;
+  const v = String(a.job_or_well ?? "").trim();
+  if (!v || v === String(j.job_number ?? "").trim()) return null;
+  return v;
+}
