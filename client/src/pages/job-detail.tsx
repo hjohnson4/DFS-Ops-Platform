@@ -38,6 +38,7 @@ import { JsaFormDialog } from "@/components/JsaFormDialog";
 import { SignoffControls } from "@/components/SignoffControls";
 import { JobKpiTrend } from "@/components/JobKpiTrend";
 import { WellRunHours } from "@/components/WellRunHours";
+import { WorkbookViewer, downloadReportWorkbook } from "@/components/WorkbookViewer";
 import { DeleteJobDialog } from "@/components/DeleteJobDialog";
 import {
   AlertDialog,
@@ -73,6 +74,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { Camera, Paperclip, Upload, ImageIcon } from "lucide-react";
 import { prepareFile, fileSizeLabel, type PreparedFile } from "@/lib/serviceFiles";
+import { Download } from "lucide-react";
 import { Archive, ArchiveRestore, ArrowLeft, Building2, Calendar, Check, ChevronDown, ClipboardList, DollarSign, Eye, FileText, Info, Layers, Loader2, MapPin, Navigation, Pencil, Play, Plus, Power, PowerOff, ShieldAlert, Ticket, Trash2, User, Wrench, X } from "lucide-react";
 import { parseDisplayDate } from "@/lib/utils";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -518,6 +520,9 @@ export default function JobDetailPage() {
           </span>
         </div>
       )}
+
+      {/* Most recent daily report — view like the Daily Reports module, or download */}
+      <LatestReportBar jobId={job.id} />
 
       {/* Detail card */}
       <div className="mt-4 rounded-lg border border-card-border bg-card p-4 grid sm:grid-cols-3 gap-4 text-sm">
@@ -2863,6 +2868,67 @@ function PadCard({
 // Daily reports are emailed in to the intake inbox and reviewed under Daily
 // Reports. Here we only surface this job's KPI trend, read from the emailed
 // Excel "Report Day" sheets matched to this job.
+// ---- Latest daily report -----------------------------------------------------
+// The job's newest report by report date (the day the work happened), with the
+// same in-app viewer and download the Daily Reports module uses.
+function LatestReportBar({ jobId }: { jobId: string }) {
+  const { toast } = useToast();
+  const { data: allReports, isLoading } = useQuery<DailyReportWithLinks[]>({
+    queryKey: ["/api/daily-reports"],
+    enabled: !!jobId,
+  });
+  const [viewOpen, setViewOpen] = useState(false);
+  const [dlBusy, setDlBusy] = useState(false);
+  const mine = (allReports ?? []).filter((r) => r.job_id === jobId && r.has_attachment);
+  const key = (r: DailyReportWithLinks) => `${r.report_date ?? ""}|${r.received_at ?? r.created_at ?? ""}`;
+  const latest = mine.reduce<DailyReportWithLinks | null>((best, r) => (!best || key(r) > key(best) ? r : best), null);
+  if (isLoading || !latest) return null;
+  const day = latest.report_day ?? latest.report_number;
+  const download = async () => {
+    setDlBusy(true);
+    try {
+      await downloadReportWorkbook(latest.id);
+    } catch (e: any) {
+      toast({ title: "Could not download the report", description: e.message, variant: "destructive" });
+    } finally {
+      setDlBusy(false);
+    }
+  };
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-card-border bg-card px-4 py-3 text-sm" data-testid="latest-report-bar">
+      <FileText className="h-4 w-4 text-primary shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">Latest daily report</div>
+        <div className="text-xs text-muted-foreground truncate" data-testid="latest-report-info">
+          {[latest.well_name, day != null ? `Day ${day}` : null, fmtDate(latest.report_date ?? latest.received_at ?? null), latest.status]
+            .filter(Boolean)
+            .join(" · ")}
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button size="sm" variant="outline" onClick={() => setViewOpen(true)} data-testid="button-view-latest-report">
+          <Eye className="mr-1.5 h-4 w-4" /> View
+        </Button>
+        <Button size="sm" variant="outline" disabled={dlBusy} onClick={download} data-testid="button-download-latest-report">
+          {dlBusy ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Download className="mr-1.5 h-4 w-4" />} Download
+        </Button>
+        <Link href={`/daily-reports/${latest.id}`} className="text-xs text-primary hover:underline" data-testid="link-latest-report-detail">
+          Details
+        </Link>
+      </div>
+      {viewOpen && (
+        <WorkbookViewer
+          reportId={latest.id}
+          fileName={latest.attachment_name}
+          sourceSheet={(latest as any).source_sheet ?? null}
+          open={viewOpen}
+          onOpenChange={setViewOpen}
+        />
+      )}
+    </div>
+  );
+}
+
 function FieldDailyReportsSection({ job }: { job: JobWithCustomer }) {
   const { data: allReports } = useQuery<DailyReportWithLinks[]>({
     queryKey: ["/api/daily-reports"],
