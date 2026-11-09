@@ -2756,9 +2756,16 @@ export interface TicketPreviewDay {
   on_ticket: number | null; // field ticket # this day is already on
 }
 
+// A standby day (equipment on location, no crew) on the preview's well.
+export interface TicketPreviewStandbyDay {
+  date: string; // yyyy-mm-dd
+  rate: number; // standby day rate
+  on_ticket: number | null; // field ticket # this day is already on
+}
+
 export interface TicketPreviewLine {
-  key: string; // stable key used for edits (pkg:<start>, extra:<label>, svc:<type>, user:<id>)
-  kind: "package" | "extra" | "service" | "user";
+  key: string; // stable key used for edits (pkg:<start>, extra:<label>, svc:<type>, standby:<start>, user:<id>)
+  kind: "package" | "extra" | "service" | "standby" | "user";
   description: string;
   dates_label: string | null; // "10/25 – 11/5" for package lines
   start_date: string | null;
@@ -2800,6 +2807,7 @@ export interface TicketPreview {
   last_ticketed_date: string | null;
   header: TicketPreviewHeader;
   days: TicketPreviewDay[];
+  standby: TicketPreviewStandbyDay[]; // standby days on this well (open and ticketed)
   lines: TicketPreviewLine[];
   total: number;
   flags: string[];

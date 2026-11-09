@@ -74,6 +74,8 @@ export function previewToLineItems(p: TicketPreview): LineItem[] {
       start_date: l.start_date,
       end_date: l.end_date && l.end_date !== l.start_date ? l.end_date : null,
       well_name: well,
+      // Marks standby days as ticketed so the next preview leaves them out.
+      ...(l.kind === "standby" ? { section: "Standby" } : {}),
     });
   }
   return out;
@@ -204,6 +206,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
   const busy = saveMut.isPending || resetMut.isPending || makeMut.isPending;
   const openDays = p ? p.days.filter((d) => d.on_ticket == null) : [];
   const lastCum = openDays.length ? openDays[openDays.length - 1].cumulative : null;
+  const openStandby = p ? (p.standby ?? []).filter((s) => s.on_ticket == null) : [];
 
   const printPdf = () => {
     if (!view) return;
@@ -406,7 +409,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
                       <td className="border-x-2 border-neutral-900 px-2 py-3 text-neutral-500" colSpan={1}>
                         {view.last_ticketed_date
                           ? `Every report day through ${mdy(view.last_ticketed_date)} is already on a field ticket.`
-                          : "No report days on this job yet."}
+                          : "No report or standby days on this job yet."}
                       </td>
                       <td className="border-x-2 border-neutral-900" />
                       <td className="border-x-2 border-neutral-900" />
@@ -559,7 +562,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
 
             {/* ------------------------------------------------ day by day */}
             <div className="bg-white dark:bg-neutral-950 shadow p-4 lg:w-[400px] shrink-0 text-sm self-start" data-testid="preview-days">
-              <div className="font-semibold text-[#0d5c3f]">Day by day (from daily reports)</div>
+              <div className="font-semibold text-[#0d5c3f]">Day by day (from daily reports{(view.standby ?? []).length ? " and standby" : ""})</div>
               <div className="text-xs text-muted-foreground mb-2">
                 {view.well_name || "—"}
                 {view.last_ticketed_date ? ` · on tickets through ${mdy(view.last_ticketed_date)}` : ""}
@@ -575,28 +578,60 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
                   </tr>
                 </thead>
                 <tbody>
-                  {view.days.map((d) => (
-                    <tr key={d.report_id} className={`border-b border-neutral-200 dark:border-neutral-800 ${d.on_ticket != null ? "text-muted-foreground" : ""}`}>
-                      <td className="py-1">{d.report_day ?? ""}</td>
-                      <td>{md(d.date)}</td>
-                      <td className="text-right tabular-nums">{money0(d.day_cost)}</td>
-                      <td className="text-right tabular-nums">{money0(d.cumulative)}</td>
+                  {[
+                    ...view.days.map((d) => ({ date: d.date, d, s: null as null | NonNullable<typeof view.standby>[number] })),
+                    ...(view.standby ?? []).map((s) => ({ date: s.date, d: null as null | (typeof view.days)[number], s })),
+                  ]
+                    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+                    .map(({ d, s }) =>
+                      s ? (
+                        <tr key={`sb-${s.date}`} className={`border-b border-neutral-200 dark:border-neutral-800 ${s.on_ticket != null ? "text-muted-foreground" : ""}`} data-testid={`preview-standby-${s.date}`}>
+                          <td className="py-1 text-[11px] text-sky-800 dark:text-sky-300">SB</td>
+                          <td>{md(s.date)}</td>
+                          <td className="text-right tabular-nums">{money0(s.rate)}</td>
+                          <td className="text-right" />
+                          <td className="pl-2">
+                            {s.on_ticket != null ? (
+                              <span className="text-[11px]">Ticket #{s.on_ticket}</span>
+                            ) : (
+                              <span className="text-[11px] rounded-full px-2 py-0.5 bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200">Standby</span>
+                            )}
+                          </td>
+                        </tr>
+                      ) : (
+                    <tr key={d!.report_id} className={`border-b border-neutral-200 dark:border-neutral-800 ${d!.on_ticket != null ? "text-muted-foreground" : ""}`}>
+                      <td className="py-1">{d!.report_day ?? ""}</td>
+                      <td>{md(d!.date)}</td>
+                      <td className="text-right tabular-nums">{money0(d!.day_cost)}</td>
+                      <td className="text-right tabular-nums">{money0(d!.cumulative)}</td>
                       <td className="pl-2">
-                        {d.on_ticket != null ? (
-                          <span className="text-[11px]">Ticket #{d.on_ticket}</span>
+                        {d!.on_ticket != null ? (
+                          <span className="text-[11px]">Ticket #{d!.on_ticket}</span>
                         ) : (
-                          <span className={`text-[11px] rounded-full px-2 py-0.5 ${STATUS_PILL[d.status] ?? "bg-neutral-100 text-neutral-700"}`}>{d.status}</span>
+                          <span className={`text-[11px] rounded-full px-2 py-0.5 ${STATUS_PILL[d!.status] ?? "bg-neutral-100 text-neutral-700"}`}>{d!.status}</span>
                         )}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {openDays.length > 0 && (
+              {(openDays.length > 0 || openStandby.length > 0) && (
                 <div className="mt-3 rounded-md bg-emerald-50 dark:bg-emerald-950/30 p-2.5 text-xs leading-5">
-                  <b>Open days:</b> {openDays.length} ({md(openDays[0].date)} – {md(openDays[openDays.length - 1].date)})
-                  <br />
-                  Report day costs: {money0(round2(openDays.reduce((s, d) => s + (d.day_cost ?? 0), 0)))} · Ticket: {money0(view.total)}
+                  {openDays.length > 0 && (
+                    <>
+                      <b>Open report days:</b> {openDays.length} ({md(openDays[0].date)} – {md(openDays[openDays.length - 1].date)})
+                      <br />
+                      Report day costs: {money0(round2(openDays.reduce((s, d) => s + (d.day_cost ?? 0), 0)))}
+                      <br />
+                    </>
+                  )}
+                  {openStandby.length > 0 && (
+                    <>
+                      <b>Open standby days:</b> {openStandby.length} ({md(openStandby[0].date)} – {md(openStandby[openStandby.length - 1].date)}) · {money0(round2(openStandby.reduce((s, d) => s + d.rate, 0)))}
+                      <br />
+                    </>
+                  )}
+                  Ticket: {money0(view.total)}
                   {lastCum != null && (
                     <>
                       <br />

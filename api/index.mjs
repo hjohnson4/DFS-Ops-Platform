@@ -2689,6 +2689,98 @@ async function recordRateChange(before, after, by) {
   await c.from("job_rate_events").insert(rows);
 }
 
+// server/standby.ts
+var client2 = () => supabaseAdmin || supabaseAnon;
+function addDaysIso(iso, n) {
+  const d = /* @__PURE__ */ new Date(iso + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function publicStandby(s) {
+  if (!s) return null;
+  const { byDay: _b, ...rest } = s;
+  return rest;
+}
+function dayOf(r) {
+  const d = r?.report_date ? String(r.report_date).slice(0, 10) : null;
+  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  return null;
+}
+async function standbyByJob(jobIds) {
+  const out = /* @__PURE__ */ new Map();
+  if (!jobIds.length) return out;
+  const { data, error } = await client2().from("job_standby_periods").select("*").in("job_id", jobIds).order("start_date", { ascending: true });
+  if (error) {
+    if (!/does not exist|schema cache/i.test(error.message))
+      console.error("[standby] load", error.message);
+    return out;
+  }
+  const rows = (data || []).sort(
+    (a, b) => String(a.start_date) < String(b.start_date) ? -1 : 1
+  );
+  if (!rows.length) return out;
+  const today = todayCentral();
+  const open = rows.filter((p) => !p.end_date);
+  if (open.length) {
+    const openJobIds = Array.from(new Set(open.map((p) => p.job_id)));
+    const minStart = open.reduce((m, p) => p.start_date < m ? p.start_date : m, open[0].start_date);
+    const { data: reps } = await client2().from("daily_reports").select("job_id, report_date").in("job_id", openJobIds).gte("report_date", minStart);
+    for (const p of open) {
+      let first = null;
+      for (const r of reps ?? []) {
+        if (r.job_id !== p.job_id) continue;
+        const d = dayOf(r);
+        if (!d || d < p.start_date || d > today) continue;
+        if (!first || d < first) first = d;
+      }
+      if (!first) continue;
+      const end = addDaysIso(first, -1);
+      p.end_date = end;
+      p.ended_reason = "report";
+      p.ended_by_name = `Daily report ${first}`;
+      const { error: upErr } = await client2().from("job_standby_periods").update({ end_date: end, ended_reason: "report", ended_by_name: p.ended_by_name }).eq("id", p.id).is("end_date", null);
+      if (upErr) console.error("[standby] auto-end", upErr.message);
+    }
+  }
+  for (const p of rows) {
+    const rate = Number(p.rate);
+    const start = String(p.start_date).slice(0, 10);
+    const lastRaw = p.end_date ? String(p.end_date).slice(0, 10) : today;
+    const last = lastRaw > today ? today : lastRaw;
+    const cur = out.get(p.job_id) ?? { active: false, rate: null, start_date: null, days: 0, total: 0, periods: [], byDay: /* @__PURE__ */ new Map() };
+    let days = 0;
+    if (Number.isFinite(rate) && rate >= 0 && start <= last) {
+      for (let d = start; d <= last; d = addDaysIso(d, 1)) {
+        if (cur.byDay.has(d)) continue;
+        cur.byDay.set(d, rate);
+        days++;
+      }
+    }
+    const total = Math.round(days * (Number.isFinite(rate) ? rate : 0) * 100) / 100;
+    cur.days += days;
+    cur.total = Math.round((cur.total + total) * 100) / 100;
+    if (!p.end_date) {
+      cur.active = true;
+      cur.rate = rate;
+      cur.start_date = start;
+    }
+    cur.periods.unshift({
+      id: p.id,
+      rate,
+      start_date: start,
+      end_date: p.end_date ? String(p.end_date).slice(0, 10) : null,
+      ended_reason: p.ended_reason ?? null,
+      created_by_name: p.created_by_name ?? null,
+      ended_by_name: p.ended_by_name ?? null,
+      created_at: p.created_at ?? null,
+      days,
+      total
+    });
+    out.set(p.job_id, cur);
+  }
+  return out;
+}
+
 // server/ticketPreview.ts
 var db3 = () => supabaseAdmin || supabaseAnon;
 var MANAGE2 = ["admin", "area"];
@@ -2713,7 +2805,7 @@ var range = (a, b) => a === b ? md(a) : `${md(a)} \u2013 ${md(b)}`;
 var STATUS_RANK = { "Signed off": 3, "Pending Review": 2, "Correction pending": 2, "Changes requested": 1 };
 async function loadJob(req, res) {
   const scope = areaScopeOf(req.profile);
-  const { data: job } = await db3().from("jobs").select("id,job_number,area,status,crewing,customer:customers(name)").eq("id", req.params.id).single();
+  const { data: job } = await db3().from("jobs").select("id,job_number,area,status,crewing,well_name,customer:customers(name)").eq("id", req.params.id).single();
   if (!job || scope && job.area !== scope) {
     res.status(404).json({ message: "Job not found" });
     return null;
@@ -2735,12 +2827,15 @@ async function loadDraft(jobId, wk) {
     at: data.updated_at ?? null
   };
 }
-async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
-  const [{ data: reports }, { data: tickets }, { data: services }] = await Promise.all([
+async function buildTicketPreview(job, wellParam, canEdit, costOverride, standbyOverride) {
+  const [{ data: reports }, { data: tickets }, { data: services }, standbyMap] = await Promise.all([
     db3().from("daily_reports").select("id,report_day,report_date,well_name,status,kpis,well_context,analysis,created_at").eq("job_id", job.id),
     db3().from("field_tickets").select("ticket_number,ticket_date,well_name,county,po_afe,ordered_by,line_items,created_at").eq("job_id", job.id).order("created_at", { ascending: false }),
-    db3().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: true })
+    db3().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: true }),
+    standbyByJob([job.id])
   ]);
+  const standbyByDay = standbyOverride ?? standbyMap.get(job.id)?.byDay ?? /* @__PURE__ */ new Map();
+  const standbyActive = standbyMap.get(job.id)?.active ?? false;
   if (costOverride) {
     for (const r of reports || [])
       if (costOverride.has(r.id)) r.well_context = { ...r.well_context || {}, cost_lines: costOverride.get(r.id) };
@@ -2759,9 +2854,16 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
       best.set(k, r);
   }
   const covered = /* @__PURE__ */ new Map();
+  const standbyCovered = /* @__PURE__ */ new Map();
+  const isStandbyLine = (l) => /standby/i.test(String(l.section ?? "")) || /^\s*standby\b/i.test(String(l.description ?? ""));
   for (const t of tickets || []) {
     for (const l of Array.isArray(t.line_items) ? t.line_items : []) {
       if (!l.start_date || l.service_id) continue;
+      if (isStandbyLine(l)) {
+        const end2 = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
+        for (let d = l.start_date; d <= end2; d = addDays2(d, 1)) if (!standbyCovered.has(d)) standbyCovered.set(d, t.ticket_number);
+        continue;
+      }
       const wk2 = wellKey(l.well_name || t.well_name);
       if (!wk2) continue;
       const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
@@ -2779,6 +2881,38 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
     if (date > w.last_date) w.last_date = date;
     wells.set(wk2, w);
   });
+  const reportDates = /* @__PURE__ */ new Map();
+  best.forEach((_r, k) => {
+    const [w, date] = k.split("|");
+    const arr = reportDates.get(w) || [];
+    arr.push(date);
+    reportDates.set(w, arr);
+  });
+  const standbyWell = (d) => {
+    let before = null;
+    let after = null;
+    reportDates.forEach((dates, w) => {
+      for (const x of dates) {
+        if (x < d && (!before || x > before.date)) before = { wk: w, date: x };
+        if (x > d && (!after || x < after.date)) after = { wk: w, date: x };
+      }
+    });
+    return before?.wk ?? after?.wk ?? "";
+  };
+  const jobWellName = String(job.well_name ?? "").trim() || "Standby";
+  const standbyDays = [];
+  Array.from(standbyByDay.keys()).sort().forEach((date) => {
+    let w = standbyWell(date);
+    if (!w) {
+      w = wellKey(jobWellName);
+      if (!wells.has(w)) wells.set(w, { well_name: jobWellName, open_days: 0, last_date: "", total_days: 0 });
+    }
+    const on = standbyCovered.get(date) ?? null;
+    standbyDays.push({ date, rate: standbyByDay.get(date), wk: w, on_ticket: on });
+    const rec = wells.get(w);
+    if (on == null) rec.open_days += 1;
+    if (date > rec.last_date) rec.last_date = date;
+  });
   const wellList = Array.from(wells.entries()).map(([wk2, w]) => ({ key: wk2, ...w })).sort((a, b) => a.last_date < b.last_date ? 1 : -1);
   let wk = wellParam ? wellKey(wellParam) : "";
   if (!wk || !wells.has(wk)) wk = (wellList.find((w) => w.open_days > 0) || wellList[0])?.key ?? "";
@@ -2789,7 +2923,8 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
     if (k.startsWith(wk + "|")) allDays.push(r);
   });
   allDays.sort((a, b) => a.report_date < b.report_date ? -1 : 1);
-  const lastTicketed = Array.from(coveredHere.keys()).sort().pop() ?? null;
+  const standbyHere = standbyDays.filter((s) => s.wk === wk);
+  const lastTicketed = [...Array.from(coveredHere.keys()), ...standbyHere.filter((s) => s.on_ticket != null).map((s) => s.date)].sort().pop() ?? null;
   const days = [];
   for (const r of allDays) {
     const date = String(r.report_date).slice(0, 10);
@@ -2895,6 +3030,44 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
       service_ids: []
     });
   });
+  const openStandby = standbyHere.filter((s) => s.on_ticket == null && s.rate > 0);
+  let sRun = null;
+  const flushStandby = () => {
+    if (!sRun) return;
+    lines.push({
+      key: `standby:${sRun.start}`,
+      kind: "standby",
+      description: "Standby",
+      dates_label: range(sRun.start, sRun.end),
+      start_date: sRun.start,
+      end_date: sRun.end,
+      quantity: sRun.days,
+      unit_cost: sRun.rate,
+      total: round22(sRun.days * sRun.rate),
+      breakdown: [],
+      notes: ["Equipment on location, no crew"],
+      edited: false,
+      hidden: false,
+      service_ids: []
+    });
+    sRun = null;
+  };
+  for (const s of openStandby) {
+    if (sRun && s.rate === sRun.rate && addDays2(sRun.end, 1) === s.date) {
+      sRun.end = s.date;
+      sRun.days += 1;
+    } else {
+      flushStandby();
+      sRun = { start: s.date, end: s.date, rate: s.rate, days: 1 };
+    }
+  }
+  flushStandby();
+  {
+    const dated = lines.filter((l) => l.kind === "package" || l.kind === "standby");
+    const rest = lines.filter((l) => l.kind !== "package" && l.kind !== "standby");
+    dated.sort((a, b) => String(a.start_date) < String(b.start_date) ? -1 : 1);
+    lines.splice(0, lines.length, ...dated, ...rest);
+  }
   const billed = /* @__PURE__ */ new Set();
   for (const t of tickets || [])
     for (const l of Array.isArray(t.line_items) ? t.line_items : []) if (l.service_id) billed.add(l.service_id);
@@ -2946,7 +3119,7 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
       kind: "user",
       description: x.description,
       dates_label: null,
-      start_date: x.date || open[open.length - 1]?.date || todayCentral(),
+      start_date: x.date || [...open.map((d) => d.date), ...openStandby.map((s) => s.date)].sort().pop() || todayCentral(),
       end_date: null,
       quantity: x.quantity,
       unit_cost: x.unit_cost,
@@ -2973,9 +3146,23 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
   for (let i = 1; i < days.length; i++) {
     const from = addDays2(days[i - 1].date, 1);
     const to = addDays2(days[i].date, -1);
-    if (from <= to && days[i].on_ticket == null)
-      flags.push(`No report in DFS Ops for ${from === to ? md(from) : `${md(from)} \u2013 ${md(to)}`}.`);
+    if (!(from <= to && days[i].on_ticket == null)) continue;
+    let gs = null;
+    for (let d = from; d <= addDays2(to, 1); d = addDays2(d, 1)) {
+      const hole = d <= to && !standbyByDay.has(d);
+      if (hole && !gs) gs = d;
+      if (!hole && gs) {
+        const ge = addDays2(d, -1);
+        flags.push(`No report in DFS Ops for ${gs === ge ? md(gs) : `${md(gs)} \u2013 ${md(ge)}`}.`);
+        gs = null;
+      }
+    }
   }
+  if (openStandby.length && standbyActive && openStandby[openStandby.length - 1].date === todayCentral())
+    flags.push(`The job is still on standby, so the standby line counts through today (${md(todayCentral())}).`);
+  const zeroStandby = standbyHere.filter((s) => s.on_ticket == null && !(s.rate > 0));
+  if (zeroStandby.length)
+    flags.push(`${zeroStandby.length} standby day${zeroStandby.length === 1 ? " has" : "s have"} a $0 rate and ${zeroStandby.length === 1 ? "is" : "are"} left off the ticket.`);
   if (zeroDays.length)
     flags.push(
       `${zeroDays.length} day${zeroDays.length === 1 ? " has" : "s have"} a $0 day cost and ${zeroDays.length === 1 ? "is" : "are"} left off the ticket (${zeroDays.slice(0, 6).map((d) => md(d.date)).join(", ")}${zeroDays.length > 6 ? ", \u2026" : ""}).`
@@ -3012,6 +3199,7 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride) {
     last_ticketed_date: lastTicketed,
     header,
     days,
+    standby: standbyHere.map(({ date, rate, on_ticket }) => ({ date, rate, on_ticket })),
     lines,
     total,
     flags,
@@ -3294,98 +3482,6 @@ function registerRentalRoutes(app) {
     if (error) return res.status(400).json({ message: error.message });
     res.status(204).end();
   });
-}
-
-// server/standby.ts
-var client2 = () => supabaseAdmin || supabaseAnon;
-function addDaysIso(iso, n) {
-  const d = /* @__PURE__ */ new Date(iso + "T12:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-function publicStandby(s) {
-  if (!s) return null;
-  const { byDay: _b, ...rest } = s;
-  return rest;
-}
-function dayOf(r) {
-  const d = r?.report_date ? String(r.report_date).slice(0, 10) : null;
-  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-  return null;
-}
-async function standbyByJob(jobIds) {
-  const out = /* @__PURE__ */ new Map();
-  if (!jobIds.length) return out;
-  const { data, error } = await client2().from("job_standby_periods").select("*").in("job_id", jobIds).order("start_date", { ascending: true });
-  if (error) {
-    if (!/does not exist|schema cache/i.test(error.message))
-      console.error("[standby] load", error.message);
-    return out;
-  }
-  const rows = (data || []).sort(
-    (a, b) => String(a.start_date) < String(b.start_date) ? -1 : 1
-  );
-  if (!rows.length) return out;
-  const today = todayCentral();
-  const open = rows.filter((p) => !p.end_date);
-  if (open.length) {
-    const openJobIds = Array.from(new Set(open.map((p) => p.job_id)));
-    const minStart = open.reduce((m, p) => p.start_date < m ? p.start_date : m, open[0].start_date);
-    const { data: reps } = await client2().from("daily_reports").select("job_id, report_date").in("job_id", openJobIds).gte("report_date", minStart);
-    for (const p of open) {
-      let first = null;
-      for (const r of reps ?? []) {
-        if (r.job_id !== p.job_id) continue;
-        const d = dayOf(r);
-        if (!d || d < p.start_date || d > today) continue;
-        if (!first || d < first) first = d;
-      }
-      if (!first) continue;
-      const end = addDaysIso(first, -1);
-      p.end_date = end;
-      p.ended_reason = "report";
-      p.ended_by_name = `Daily report ${first}`;
-      const { error: upErr } = await client2().from("job_standby_periods").update({ end_date: end, ended_reason: "report", ended_by_name: p.ended_by_name }).eq("id", p.id).is("end_date", null);
-      if (upErr) console.error("[standby] auto-end", upErr.message);
-    }
-  }
-  for (const p of rows) {
-    const rate = Number(p.rate);
-    const start = String(p.start_date).slice(0, 10);
-    const lastRaw = p.end_date ? String(p.end_date).slice(0, 10) : today;
-    const last = lastRaw > today ? today : lastRaw;
-    const cur = out.get(p.job_id) ?? { active: false, rate: null, start_date: null, days: 0, total: 0, periods: [], byDay: /* @__PURE__ */ new Map() };
-    let days = 0;
-    if (Number.isFinite(rate) && rate >= 0 && start <= last) {
-      for (let d = start; d <= last; d = addDaysIso(d, 1)) {
-        if (cur.byDay.has(d)) continue;
-        cur.byDay.set(d, rate);
-        days++;
-      }
-    }
-    const total = Math.round(days * (Number.isFinite(rate) ? rate : 0) * 100) / 100;
-    cur.days += days;
-    cur.total = Math.round((cur.total + total) * 100) / 100;
-    if (!p.end_date) {
-      cur.active = true;
-      cur.rate = rate;
-      cur.start_date = start;
-    }
-    cur.periods.unshift({
-      id: p.id,
-      rate,
-      start_date: start,
-      end_date: p.end_date ? String(p.end_date).slice(0, 10) : null,
-      ended_reason: p.ended_reason ?? null,
-      created_by_name: p.created_by_name ?? null,
-      ended_by_name: p.ended_by_name ?? null,
-      created_at: p.created_at ?? null,
-      days,
-      total
-    });
-    out.set(p.job_id, cur);
-  }
-  return out;
 }
 
 // server/routes.ts

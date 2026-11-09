@@ -6,7 +6,12 @@
 //     breakdown under it;
 //   - one line per extra charge (screens, trucking, disposal, drive-by ...)
 //     with the dated counts under it;
-//   - service charges logged on the job that aren't on a ticket yet.
+//   - service charges logged on the job that aren't on a ticket yet;
+//   - standby days (equipment on location, no crew; see server/standby.ts),
+//     one line per run of days at the same standby rate. A standby day goes
+//     on the well the equipment was last on (the well with the latest report
+//     before it; else the next well; else the job itself when it has no
+//     reports). Standby days already on any ticket on the job are left out.
 // Days already on a field ticket (any status) for the well are left out, so a
 // well can have as many tickets as needed and the preview always starts after
 // the last one.
@@ -19,6 +24,7 @@ import type { Express, Request, Response } from "express";
 import { supabaseAnon, supabaseAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf } from "./auth";
 import { todayCentral } from "./manualBilling";
+import { standbyByJob } from "./standby";
 import {
   wellKey,
   ticketPreviewDraftSchema,
@@ -27,6 +33,7 @@ import {
   type TicketPreview,
   type TicketPreviewDay,
   type TicketPreviewLine,
+  type TicketPreviewStandbyDay,
   type TicketPreviewDraft,
 } from "@shared/schema";
 
@@ -59,7 +66,7 @@ async function loadJob(req: Request, res: Response) {
   const scope = areaScopeOf(req.profile!);
   const { data: job } = await db()
     .from("jobs")
-    .select("id,job_number,area,status,crewing,customer:customers(name)")
+    .select("id,job_number,area,status,crewing,well_name,customer:customers(name)")
     .eq("id", req.params.id)
     .single();
   if (!job || (scope && job.area !== scope)) {
@@ -96,8 +103,10 @@ export async function buildTicketPreview(
   canEdit: boolean,
   // Testing aid: cost breakdowns to use in place of what's stored.
   costOverride?: Map<string, CostLine[]>,
+  // Testing aid: standby days (date -> rate) to use in place of what's stored.
+  standbyOverride?: Map<string, number>,
 ): Promise<TicketPreview> {
-  const [{ data: reports }, { data: tickets }, { data: services }] = await Promise.all([
+  const [{ data: reports }, { data: tickets }, { data: services }, standbyMap] = await Promise.all([
     db()
       .from("daily_reports")
       .select("id,report_day,report_date,well_name,status,kpis,well_context,analysis,created_at")
@@ -108,7 +117,10 @@ export async function buildTicketPreview(
       .eq("job_id", job.id)
       .order("created_at", { ascending: false }),
     db().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: true }),
+    standbyByJob([job.id]),
   ]);
+  const standbyByDay: Map<string, number> = standbyOverride ?? standbyMap.get(job.id)?.byDay ?? new Map();
+  const standbyActive = standbyMap.get(job.id)?.active ?? false;
 
   if (costOverride)
     for (const r of (reports || []) as any[])
@@ -130,9 +142,18 @@ export async function buildTicketPreview(
 
   // Days covered by real ticket lines (not service-charge lines), per well.
   const covered = new Map<string, Map<string, number>>(); // wk -> date -> ticket #
+  // Standby days on any ticket on the job (a "Standby" section or a line
+  // that says standby), whatever well it was written to.
+  const standbyCovered = new Map<string, number>(); // date -> ticket #
+  const isStandbyLine = (l: LineItem) => /standby/i.test(String(l.section ?? "")) || /^\s*standby\b/i.test(String(l.description ?? ""));
   for (const t of (tickets || []) as any[]) {
     for (const l of (Array.isArray(t.line_items) ? t.line_items : []) as LineItem[]) {
       if (!l.start_date || l.service_id) continue;
+      if (isStandbyLine(l)) {
+        const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
+        for (let d = l.start_date; d <= end; d = addDays(d, 1)) if (!standbyCovered.has(d)) standbyCovered.set(d, t.ticket_number);
+        continue;
+      }
       const wk = wellKey(l.well_name || t.well_name);
       if (!wk) continue;
       const end = l.end_date && l.end_date > l.start_date ? l.end_date : l.start_date;
@@ -152,6 +173,44 @@ export async function buildTicketPreview(
     if (date > w.last_date) w.last_date = date;
     wells.set(wk, w);
   });
+
+  // Standby days -> well: the well with the latest report before the day,
+  // else the first well after it, else the job (no reports at all).
+  const reportDates = new Map<string, string[]>(); // wk -> sorted dates
+  best.forEach((_r, k) => {
+    const [w, date] = k.split("|");
+    const arr = reportDates.get(w) || [];
+    arr.push(date);
+    reportDates.set(w, arr);
+  });
+  const standbyWell = (d: string): string => {
+    let before: { wk: string; date: string } | null = null;
+    let after: { wk: string; date: string } | null = null;
+    reportDates.forEach((dates, w) => {
+      for (const x of dates) {
+        if (x < d && (!before || x > before.date)) before = { wk: w, date: x };
+        if (x > d && (!after || x < after.date)) after = { wk: w, date: x };
+      }
+    });
+    return (before as any)?.wk ?? (after as any)?.wk ?? "";
+  };
+  const jobWellName = String(job.well_name ?? "").trim() || "Standby";
+  const standbyDays: { date: string; rate: number; wk: string; on_ticket: number | null }[] = [];
+  Array.from(standbyByDay.keys())
+    .sort()
+    .forEach((date) => {
+      let w = standbyWell(date);
+      if (!w) {
+        w = wellKey(jobWellName);
+        if (!wells.has(w)) wells.set(w, { well_name: jobWellName, open_days: 0, last_date: "", total_days: 0 });
+      }
+      const on = standbyCovered.get(date) ?? null;
+      standbyDays.push({ date, rate: standbyByDay.get(date)!, wk: w, on_ticket: on });
+      const rec = wells.get(w)!;
+      if (on == null) rec.open_days += 1;
+      if (date > rec.last_date) rec.last_date = date;
+    });
+
   const wellList = Array.from(wells.entries())
     .map(([wk, w]) => ({ key: wk, ...w }))
     .sort((a, b) => (a.last_date < b.last_date ? 1 : -1));
@@ -168,7 +227,9 @@ export async function buildTicketPreview(
     if (k.startsWith(wk + "|")) allDays.push(r);
   });
   allDays.sort((a, b) => (a.report_date < b.report_date ? -1 : 1));
-  const lastTicketed = Array.from(coveredHere.keys()).sort().pop() ?? null;
+  const standbyHere = standbyDays.filter((s) => s.wk === wk);
+  const lastTicketed =
+    [...Array.from(coveredHere.keys()), ...standbyHere.filter((s) => s.on_ticket != null).map((s) => s.date)].sort().pop() ?? null;
 
   const days: TicketPreviewDay[] = [];
   for (const r of allDays) {
@@ -285,6 +346,47 @@ export async function buildTicketPreview(
     });
   });
 
+  // Standby: one line per run of consecutive open standby days at one rate.
+  const openStandby = standbyHere.filter((s) => s.on_ticket == null && s.rate > 0);
+  let sRun: { start: string; end: string; rate: number; days: number } | null = null;
+  const flushStandby = () => {
+    if (!sRun) return;
+    lines.push({
+      key: `standby:${sRun.start}`,
+      kind: "standby",
+      description: "Standby",
+      dates_label: range(sRun.start, sRun.end),
+      start_date: sRun.start,
+      end_date: sRun.end,
+      quantity: sRun.days,
+      unit_cost: sRun.rate,
+      total: round2(sRun.days * sRun.rate),
+      breakdown: [],
+      notes: ["Equipment on location, no crew"],
+      edited: false,
+      hidden: false,
+      service_ids: [],
+    });
+    sRun = null;
+  };
+  for (const s of openStandby) {
+    if (sRun && s.rate === sRun.rate && addDays(sRun.end, 1) === s.date) {
+      sRun.end = s.date;
+      sRun.days += 1;
+    } else {
+      flushStandby();
+      sRun = { start: s.date, end: s.date, rate: s.rate, days: 1 };
+    }
+  }
+  flushStandby();
+  // Keep the ticket in date order: package and standby runs by start date.
+  {
+    const dated = lines.filter((l) => l.kind === "package" || l.kind === "standby");
+    const rest = lines.filter((l) => l.kind !== "package" && l.kind !== "standby");
+    dated.sort((a, b) => (String(a.start_date) < String(b.start_date) ? -1 : 1));
+    lines.splice(0, lines.length, ...dated, ...rest);
+  }
+
   // Service charges on this well (or with no well) not yet on a ticket, on or
   // after the last ticketed day.
   const billed = new Set<string>();
@@ -340,7 +442,7 @@ export async function buildTicketPreview(
       kind: "user",
       description: x.description,
       dates_label: null,
-      start_date: x.date || open[open.length - 1]?.date || todayCentral(),
+      start_date: x.date || [...open.map((d) => d.date), ...openStandby.map((s) => s.date)].sort().pop() || todayCentral(),
       end_date: null,
       quantity: x.quantity,
       unit_cost: x.unit_cost,
@@ -372,9 +474,24 @@ export async function buildTicketPreview(
   for (let i = 1; i < days.length; i++) {
     const from = addDays(days[i - 1].date, 1);
     const to = addDays(days[i].date, -1);
-    if (from <= to && days[i].on_ticket == null)
-      flags.push(`No report in DFS Ops for ${from === to ? md(from) : `${md(from)} – ${md(to)}`}.`);
+    if (!(from <= to && days[i].on_ticket == null)) continue;
+    // Standby days fill a gap; only flag the days that are neither.
+    let gs: string | null = null;
+    for (let d = from; d <= addDays(to, 1); d = addDays(d, 1)) {
+      const hole = d <= to && !standbyByDay.has(d);
+      if (hole && !gs) gs = d;
+      if (!hole && gs) {
+        const ge = addDays(d, -1);
+        flags.push(`No report in DFS Ops for ${gs === ge ? md(gs) : `${md(gs)} – ${md(ge)}`}.`);
+        gs = null;
+      }
+    }
   }
+  if (openStandby.length && standbyActive && openStandby[openStandby.length - 1].date === todayCentral())
+    flags.push(`The job is still on standby, so the standby line counts through today (${md(todayCentral())}).`);
+  const zeroStandby = standbyHere.filter((s) => s.on_ticket == null && !(s.rate > 0));
+  if (zeroStandby.length)
+    flags.push(`${zeroStandby.length} standby day${zeroStandby.length === 1 ? " has" : "s have"} a $0 rate and ${zeroStandby.length === 1 ? "is" : "are"} left off the ticket.`);
   if (zeroDays.length)
     flags.push(
       `${zeroDays.length} day${zeroDays.length === 1 ? " has" : "s have"} a $0 day cost and ${zeroDays.length === 1 ? "is" : "are"} left off the ticket (${zeroDays.slice(0, 6).map((d) => md(d.date)).join(", ")}${zeroDays.length > 6 ? ", …" : ""}).`,
@@ -414,6 +531,7 @@ export async function buildTicketPreview(
     last_ticketed_date: lastTicketed,
     header,
     days,
+    standby: standbyHere.map(({ date, rate, on_ticket }) => ({ date, rate, on_ticket })) as TicketPreviewStandbyDay[],
     lines,
     total,
     flags,
