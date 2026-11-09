@@ -2843,6 +2843,8 @@ export const ticketPreviewDraftSchema = z.object({
         quantity: previewMoney.nullable().optional(),
         unit_cost: previewMoney.nullable().optional(),
         hidden: z.boolean().optional(),
+        // Edited note lines under the description (null = use the report's).
+        notes: z.array(z.string().max(300)).max(60).nullable().optional(),
       }),
     )
     .optional(),

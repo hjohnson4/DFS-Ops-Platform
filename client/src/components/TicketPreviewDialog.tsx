@@ -20,7 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
 import { buildFieldTicketHtml, printFieldTicket } from "@/lib/fieldTicketExport";
-import { AlertTriangle, CheckCircle2, EyeOff, FileDown, Loader2, Pencil, Plus, RotateCcw, Trash2, Undo2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, EyeOff, FileDown, Loader2, Pencil, Plus, RotateCcw, Trash2, Undo2, X } from "lucide-react";
 
 const money0 = (n: number | null | undefined) =>
   n == null ? "—" : n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
@@ -34,7 +34,7 @@ const mdy = (d?: string | null) => {
 };
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-type Override = { description?: string | null; quantity?: number | null; unit_cost?: number | null; hidden?: boolean };
+type Override = { description?: string | null; quantity?: number | null; unit_cost?: number | null; hidden?: boolean; notes?: string[] | null };
 type UserLine = { id: string; description: string; quantity: number; unit_cost: number; date: string | null; note: string | null };
 
 // Ticket lines the preview turns into (also used for Print / PDF).
@@ -65,7 +65,7 @@ export function previewToLineItems(p: TicketPreview): LineItem[] {
     let desc = l.description;
     if (l.dates_label) desc += ` ${l.dates_label}`;
     if (l.breakdown.length) desc += ` (${l.breakdown.map((b) => `${b.label.trim()} ${money0(b.amount)}`).join(", ")})`;
-    if (l.notes.length) desc += ` (${l.notes.join("; ")})`;
+    if (l.notes.some(Boolean)) desc += ` (${l.notes.filter(Boolean).join("; ")})`;
     out.push({
       description: desc,
       quantity: l.quantity,
@@ -113,7 +113,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
     setHdr({ ...p.header });
     const o: Record<string, Override> = {};
     for (const l of p.lines)
-      if (l.kind !== "user" && l.edited) o[l.key] = { description: l.description, quantity: l.quantity, unit_cost: l.unit_cost, hidden: l.hidden };
+      if (l.kind !== "user" && l.edited) o[l.key] = { description: l.description, quantity: l.quantity, unit_cost: l.unit_cost, hidden: l.hidden, notes: l.notes };
     setOvr(o);
     setUserLines(
       p.lines
@@ -189,7 +189,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
         if (!o) return l;
         const q = o.quantity ?? l.quantity;
         const u = o.unit_cost ?? l.unit_cost;
-        return { ...l, description: o.description ?? l.description, quantity: q, unit_cost: u, total: round2(q * u), hidden: !!o.hidden, edited: true };
+        return { ...l, description: o.description ?? l.description, notes: o.notes ?? l.notes, quantity: q, unit_cost: u, total: round2(q * u), hidden: !!o.hidden, edited: true };
       });
     for (const u of userLines)
       lines.push({
@@ -270,7 +270,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
       }}
     >
       <DialogTrigger asChild>{trigger}</DialogTrigger>
-      <DialogContent className="max-w-[1200px] w-[96vw] max-h-[94vh] overflow-y-auto p-0" data-testid="dialog-ticket-preview">
+      <DialogContent className="max-w-[1200px] w-[96vw] max-h-[94vh] overflow-y-auto p-0 [&>button:last-child]:hidden" data-testid="dialog-ticket-preview">
         <DialogHeader className={`px-5 py-3 ${editing ? "bg-amber-600" : "bg-[#0d5c3f]"} text-white sticky top-0 z-10`}>
           <DialogTitle className="text-base font-semibold flex flex-wrap items-center gap-x-3 gap-y-2">
             <span>{editing ? "Editing ticket preview" : "Ticket preview"}{p ? ` — ${p.job_number}` : ""}</span>
@@ -335,6 +335,22 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
                   </Button>
                 </>
               )}
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-8 w-8 text-white hover:bg-white/20 hover:text-white"
+                title="Close"
+                aria-label="Close ticket preview"
+                disabled={busy}
+                onClick={() => {
+                  if (editing && !window.confirm("Close without saving your edits?")) return;
+                  setEditing(false);
+                  setOpen(false);
+                }}
+                data-testid="button-preview-close"
+              >
+                <X className="h-5 w-5" />
+              </Button>
             </span>
           </DialogTitle>
         </DialogHeader>
@@ -426,7 +442,7 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
                       ...(l.breakdown.length
                         ? [<span key="b" className="block pl-4 text-[11px] text-neutral-600 leading-4">{l.breakdown.map((b) => `${b.label.trim()} ${money0(b.amount)}`).join(" · ")}</span>]
                         : []),
-                      ...l.notes.map((n, i) => (
+                      ...l.notes.filter(Boolean).map((n, i) => (
                         <span key={i} className="block pl-4 font-[cursive] text-indigo-900 text-[13px]">{n}</span>
                       )),
                     ];
@@ -481,6 +497,20 @@ export function TicketPreviewDialog({ jobId, trigger }: { jobId: string; trigger
                               onChange={(e) => setU({ note: e.target.value || null })}
                               data-testid={`preview-note-${l.key}`}
                             />
+                          ) : editing ? (
+                            <>
+                              {sub.slice(0, l.breakdown.length ? 1 : 0)}
+                              {(l.notes.length ? l.notes : [""]).map((n, i, all) => (
+                                <Input
+                                  key={i}
+                                  className="h-7 mt-1 bg-amber-50 border-amber-500 text-neutral-900 text-xs"
+                                  value={n}
+                                  placeholder="Note (optional)"
+                                  onChange={(e) => setO({ notes: all.map((x, j) => (j === i ? e.target.value : x)) })}
+                                  data-testid={`preview-note-${l.key}-${i}`}
+                                />
+                              ))}
+                            </>
                           ) : (
                             sub
                           )}

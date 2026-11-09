@@ -433,6 +433,11 @@ export async function buildTicketPreview(
     if (o.quantity != null) l.quantity = o.quantity;
     if (o.unit_cost != null) l.unit_cost = o.unit_cost;
     if (o.hidden) l.hidden = true;
+    if (Array.isArray(o.notes)) {
+      const n = o.notes.map((x) => String(x ?? "").trim());
+      // Service lines keep one note per service (blanks hold their place).
+      l.notes = l.kind === "service" && l.service_ids.length ? n : n.filter(Boolean);
+    }
     l.total = round2(l.quantity * l.unit_cost);
     l.edited = true;
   }

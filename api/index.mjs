@@ -1514,7 +1514,9 @@ var ticketPreviewDraftSchema = z.object({
       description: z.string().nullable().optional(),
       quantity: previewMoney.nullable().optional(),
       unit_cost: previewMoney.nullable().optional(),
-      hidden: z.boolean().optional()
+      hidden: z.boolean().optional(),
+      // Edited note lines under the description (null = use the report's).
+      notes: z.array(z.string().max(300)).max(60).nullable().optional()
     })
   ).optional(),
   extra_lines: z.array(
@@ -3110,6 +3112,10 @@ async function buildTicketPreview(job, wellParam, canEdit, costOverride, standby
     if (o.quantity != null) l.quantity = o.quantity;
     if (o.unit_cost != null) l.unit_cost = o.unit_cost;
     if (o.hidden) l.hidden = true;
+    if (Array.isArray(o.notes)) {
+      const n = o.notes.map((x) => String(x ?? "").trim());
+      l.notes = l.kind === "service" && l.service_ids.length ? n : n.filter(Boolean);
+    }
     l.total = round22(l.quantity * l.unit_cost);
     l.edited = true;
   }
