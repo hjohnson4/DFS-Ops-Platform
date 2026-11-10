@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { RefurbishmentHistory } from "@/components/RefurbishmentHistory";
+import { AssetMoveLog } from "@/components/AssetMoveLog";
 import { ServiceReportDetailDialog } from "@/components/ServiceReportDetailDialog";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -1079,6 +1080,8 @@ function AssetDetailDialog({
                 </div>
               )}
             </div>
+
+            {canSeeRefurb && <AssetMoveLog assetId={data.id} />}
 
             {canSeeRefurb && <RefurbishmentHistory assetId={data.id} />}
           </div>

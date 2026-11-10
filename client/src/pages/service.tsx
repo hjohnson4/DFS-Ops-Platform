@@ -489,8 +489,10 @@ export default function Service() {
         after the centrifuge’s last service report (a report on the same date
         as the service counts toward the earlier period). “Service soon” shows
         from {Math.round(SERVICE_INTERVAL_HOURS * 0.9)} hrs; “Overdue” at{" "}
-        {SERVICE_INTERVAL_HOURS} hrs or more. A centrifuge with no service
-        report on file counts every logged hour. The due and overdue counts
+        {SERVICE_INTERVAL_HOURS} hrs or more. When a centrifuge moves to a new
+        job, its count starts over at 0 (it is treated as serviced at the shop
+        before it left); only hours on the new job count. A centrifuge with no
+        service report that hasn’t changed jobs counts every logged hour. The due and overdue counts
         above include only centrifuges on a job.
       </p>
 

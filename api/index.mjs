@@ -3530,6 +3530,22 @@ function hoursAfter(rows, afterDate) {
   return Math.round(t * 100) / 100;
 }
 var round24 = (n) => Math.round(n * 100) / 100;
+function serviceHoursFor(rows, lastService, currentJobId) {
+  const after = rows.filter((r) => !lastService || r.report_date && String(r.report_date) > lastService);
+  if (!currentJobId) return { since: hoursAfter(after, null), moved: false };
+  let cutoff = null;
+  let moved = false;
+  for (const r of after) {
+    if (r.job_id && r.job_id !== currentJobId) {
+      moved = true;
+      const d = r.report_date ? String(r.report_date) : null;
+      if (d && (!cutoff || d > cutoff)) cutoff = d;
+    }
+  }
+  if (!moved) return { since: hoursAfter(after, null), moved: false };
+  const onJob = after.filter((r) => r.job_id === currentJobId && (!cutoff || r.report_date && String(r.report_date) > cutoff));
+  return { since: hoursAfter(onJob, null), moved: true };
+}
 async function hoursSinceServiceFor(client3, assets) {
   const ids = assets.map((a) => a.id);
   const out = /* @__PURE__ */ new Map();
@@ -3542,13 +3558,14 @@ async function hoursSinceServiceFor(client3, assets) {
   for (const a of assets) {
     const lastService = last.get(a.id) ?? null;
     let since;
-    if (log2.ready) since = hoursAfter(log2.rows.filter((r) => r.asset_id === a.id), lastService);
+    let moved = false;
+    if (log2.ready) ({ since, moved } = serviceHoursFor(log2.rows.filter((r) => r.asset_id === a.id), lastService, a.job_id));
     else {
       const meter = Number(a.run_hours ?? 0) || 0;
       const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
       since = round24(Math.max(0, meter - base));
     }
-    const st = hoursServiceStatusFor(since, !!lastService);
+    const st = hoursServiceStatusFor(since, !!lastService || moved);
     out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
   }
   return out;
@@ -4114,7 +4131,7 @@ async function registerRoutes(httpServer, app) {
       const items = [];
       const myId = req.profile.id;
       const myEmail = (req.profile.email || "").toLowerCase();
-      let aq = client3.from("assets").select("id, tag, category, area, run_hours, run_hours_at_service, service_hours_interval").in("category", RUN_HOUR_CATEGORIES);
+      let aq = client3.from("assets").select("id, tag, category, area, job_id, run_hours, run_hours_at_service, service_hours_interval").in("category", RUN_HOUR_CATEGORIES);
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
       if (aErr) console.error("[notifications] assets", aErr.message);
@@ -4993,7 +5010,7 @@ async function registerRoutes(httpServer, app) {
       d.setUTCDate(d.getUTCDate() - 6);
       return d.toISOString().slice(0, 10);
     })();
-    const { data: assets } = await client3.from("assets").select("id, tag, category, run_hours, run_hours_at_service, service_hours_interval").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES).order("tag", { ascending: true });
+    const { data: assets } = await client3.from("assets").select("id, tag, category, job_id, run_hours, run_hours_at_service, service_hours_interval").eq("job_id", job.id).in("category", RUN_HOUR_CATEGORIES).order("tag", { ascending: true });
     const list = assets || [];
     const { data: rows } = await client3.from("asset_run_hours").select("asset_id, report_date, hours, entered_by_name, created_at").eq("job_id", job.id).is("daily_report_id", null).gte("report_date", from).lte("report_date", to).order("report_date", { ascending: false });
     const monthStart = to.slice(0, 8) + "01";
@@ -6369,14 +6386,15 @@ async function registerRoutes(httpServer, app) {
           const lastService = lastServiceByAsset.get(a.id) ?? null;
           const entries = logByAsset.get(a.id) ?? [];
           let since;
+          let moved = false;
           if (log2.ready) {
-            since = hoursAfter(entries, lastService);
+            ({ since, moved } = serviceHoursFor(entries, lastService, a.job_id));
           } else {
             const meter = Number(a.run_hours ?? 0) || 0;
             const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
             since = round24(Math.max(0, meter - base));
           }
-          const st = hoursServiceStatusFor(since, !!lastService);
+          const st = hoursServiceStatusFor(since, !!lastService || moved);
           const currentJobHours = assigned && log2.ready ? round24(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0)) : null;
           const deployed = (a.status || "").toLowerCase() !== "available";
           return {
@@ -6398,7 +6416,7 @@ async function registerRoutes(httpServer, app) {
             service_hours_interval: SERVICE_INTERVAL_HOURS,
             hours_since_service: st.hoursSince,
             service_interval_hours: SERVICE_INTERVAL_HOURS,
-            never_serviced: !lastService,
+            never_serviced: !lastService && !moved,
             current_job_hours: currentJobHours,
             last_service_date: lastService,
             last_maintained: a.last_maintained,
@@ -6462,13 +6480,14 @@ async function registerRoutes(httpServer, app) {
       const lastService = history[0]?.report_date ? String(history[0].report_date) : null;
       const log2 = await loadRunHoursLog(client3, [a.id]);
       let since;
-      if (log2.ready) since = hoursAfter(log2.rows, lastService);
+      let moved = false;
+      if (log2.ready) ({ since, moved } = serviceHoursFor(log2.rows, lastService, a.job_id));
       else {
         const meter = Number(a.run_hours ?? 0) || 0;
         const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
         since = round24(Math.max(0, meter - base));
       }
-      const st = hoursServiceStatusFor(since, !!lastService);
+      const st = hoursServiceStatusFor(since, !!lastService || moved);
       const jobsMap = /* @__PURE__ */ new Map();
       for (const r of log2.rows) {
         const key = r.job_id ?? "none";
@@ -6517,7 +6536,7 @@ async function registerRoutes(httpServer, app) {
         hours_since_service: st.hoursSince,
         service_interval_hours: SERVICE_INTERVAL_HOURS,
         service_state: st.state,
-        never_serviced: !lastService,
+        never_serviced: !lastService && !moved,
         last_service_date: lastService,
         last_service_supervisor: history[0]?.supervisor_name ?? null,
         current_job_hours: a.job_id ? log2.ready ? current?.hours ?? 0 : null : null,
@@ -7147,6 +7166,118 @@ async function registerRoutes(httpServer, app) {
         open,
         history
       });
+    }
+  );
+  app.get(
+    "/api/assets/:id/moves",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req, res) => {
+      const client3 = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client3.from("assets").select("id, area, job_id").eq("id", req.params.id).maybeSingle();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile);
+      if (scope && asset.area !== scope) return res.status(404).json({ message: "Asset not found" });
+      const [{ data: st, error: stErr }, { data: first }, { data: wos }, { data: hrs }] = await Promise.all([
+        client3.from("asset_job_stints").select("job_id, start_date, end_date, created_at").eq("asset_id", req.params.id).order("start_date", { ascending: true }).order("created_at", { ascending: true }),
+        client3.from("asset_job_stints").select("created_at").order("created_at", { ascending: true }).limit(1),
+        client3.from("work_orders").select("id, wo_number, vendor, status, sent_on, returned_on, created_at").eq("asset_id", req.params.id),
+        client3.from("asset_run_hours").select("job_id, report_date").eq("asset_id", req.params.id)
+      ]);
+      if (stErr) return res.status(500).json({ message: stErr.message });
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
+      const centralDate = (ts) => ts ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ts)) : null;
+      const rep = /* @__PURE__ */ new Map();
+      for (const h of hrs || []) {
+        if (!h.job_id || !h.report_date) continue;
+        const r = rep.get(h.job_id) || { first: h.report_date, last: h.report_date, days: /* @__PURE__ */ new Set() };
+        if (h.report_date < r.first) r.first = h.report_date;
+        if (h.report_date > r.last) r.last = h.report_date;
+        r.days.add(h.report_date);
+        rep.set(h.job_id, r);
+      }
+      const stays = [];
+      for (const s of st || []) {
+        const prev = stays[stays.length - 1];
+        if (prev && prev.job_id === s.job_id && prev.end && s.start_date <= prev.end) {
+          prev.end = s.end_date;
+          continue;
+        }
+        stays.push({ job_id: s.job_id, start: s.start_date, end: s.end_date });
+      }
+      const jobIds = Array.from(new Set([...stays.map((s) => s.job_id), ...Array.from(rep.keys())].filter(Boolean)));
+      const jobs = /* @__PURE__ */ new Map();
+      if (jobIds.length) {
+        const { data: jr } = await client3.from("jobs").select("id, job_number, well_name, area, archived_at").in("id", jobIds);
+        (jr || []).forEach((j) => jobs.set(j.id, j));
+      }
+      const jobLabel = (id) => {
+        const j = id ? jobs.get(id) : null;
+        return j ? { job_id: j.id, job_number: j.job_number, well_name: j.well_name ?? null, area: j.area } : { job_id: id, job_number: null, well_name: null, area: null };
+      };
+      const repFor = (id) => {
+        const r = id ? rep.get(id) : null;
+        return r ? { first_report: r.first, last_report: r.last, report_days: r.days.size } : { first_report: null, last_report: null, report_days: 0 };
+      };
+      const out = [];
+      const seenJob = /* @__PURE__ */ new Set();
+      stays.forEach((s, i) => {
+        const next = stays[i + 1];
+        const j = s.job_id ? jobs.get(s.job_id) : null;
+        let ended = null;
+        if (s.end) {
+          if (next && next.start === s.end) ended = "moved";
+          else if (!j) ended = "job_deleted";
+          else if (j.archived_at && centralDate(j.archived_at) === s.end) ended = "job_archived";
+          else ended = "taken_off";
+        }
+        const r = repFor(s.job_id);
+        const earlier = !seenJob.has(String(s.job_id)) && r.first_report && r.first_report < s.start;
+        seenJob.add(String(s.job_id));
+        out.push({
+          kind: "job",
+          ...jobLabel(s.job_id),
+          start: earlier ? r.first_report : s.start,
+          start_from_reports: !!earlier,
+          end: s.end,
+          ended,
+          moved_to: ended === "moved" && next ? jobLabel(next.job_id).job_number : null,
+          ...r
+        });
+        if (s.end && (!next || next.start > s.end)) {
+          const gapEnd = next ? next.start : null;
+          if (gapEnd || !asset.job_id)
+            out.push({ kind: "unassigned", area: asset.area, start: s.end, end: gapEnd });
+        }
+      });
+      for (const [jid, r] of Array.from(rep.entries())) {
+        if (seenJob.has(jid)) continue;
+        out.push({ kind: "job", ...jobLabel(jid), start: r.first, start_from_reports: true, end: r.last, end_from_reports: true, ended: "reports_only", moved_to: null, ...repFor(jid) });
+      }
+      for (const w of wos || []) {
+        const sent = w.sent_on || centralDate(w.created_at);
+        if (!sent) continue;
+        out.push({
+          kind: "work_order",
+          wo_number: w.wo_number,
+          vendor: w.vendor ?? null,
+          start: sent,
+          end: w.status === "Completed" ? w.returned_on || null : null,
+          open: w.status !== "Completed"
+        });
+      }
+      if (out.some((e) => e.kind === "work_order" && e.open)) {
+        const k = out.findIndex((e) => e.kind === "unassigned" && !e.end);
+        if (k >= 0) out.splice(k, 1);
+      }
+      const dayMs = 864e5;
+      out.forEach((e) => {
+        const endD = e.end || today;
+        e.days = Math.max(0, Math.round((Date.parse(endD) - Date.parse(e.start)) / dayMs));
+        e.current = !e.end && !e.end_from_reports && (e.kind !== "work_order" || e.open);
+      });
+      out.sort((a, b) => b.start === a.start ? a.kind === "unassigned" ? -1 : 1 : b.start.localeCompare(a.start));
+      res.json({ tracking_since: centralDate(first?.[0]?.created_at) ?? null, today, moves: out });
     }
   );
   app.delete(

@@ -152,6 +152,32 @@ function hoursAfter(rows: any[], afterDate: string | null): number {
 }
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+// Hours since service for one centrifuge. Starts from hours after the last
+// service report; then, if the unit is now on a job and has hours from a
+// DIFFERENT job since that service, it moved to a new job — we assume it was
+// fully serviced at the shop before it left, so only hours on the current job
+// after its last report on the previous job count. `moved` = that applied.
+function serviceHoursFor(
+  rows: any[],
+  lastService: string | null,
+  currentJobId: string | null | undefined,
+): { since: number; moved: boolean } {
+  const after = rows.filter((r) => !lastService || (r.report_date && String(r.report_date) > lastService));
+  if (!currentJobId) return { since: hoursAfter(after, null), moved: false };
+  let cutoff: string | null = null;
+  let moved = false;
+  for (const r of after) {
+    if (r.job_id && r.job_id !== currentJobId) {
+      moved = true;
+      const d = r.report_date ? String(r.report_date) : null;
+      if (d && (!cutoff || d > cutoff)) cutoff = d;
+    }
+  }
+  if (!moved) return { since: hoursAfter(after, null), moved: false };
+  const onJob = after.filter((r) => r.job_id === currentJobId && (!cutoff || (r.report_date && String(r.report_date) > cutoff)));
+  return { since: hoursAfter(onJob, null), moved: true };
+}
+
 // Hours-since-service for a set of centrifuges (assets need id, run_hours,
 // run_hours_at_service). Same rule as the Service dashboard.
 async function hoursSinceServiceFor(
@@ -173,13 +199,14 @@ async function hoursSinceServiceFor(
   for (const a of assets) {
     const lastService = last.get(a.id) ?? null;
     let since: number;
-    if (log.ready) since = hoursAfter(log.rows.filter((r) => r.asset_id === a.id), lastService);
+    let moved = false;
+    if (log.ready) ({ since, moved } = serviceHoursFor(log.rows.filter((r) => r.asset_id === a.id), lastService, a.job_id));
     else {
       const meter = Number(a.run_hours ?? 0) || 0;
       const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
       since = round2(Math.max(0, meter - base));
     }
-    const st = hoursServiceStatusFor(since, !!lastService);
+    const st = hoursServiceStatusFor(since, !!lastService || moved);
     out.set(a.id, { hoursSince: st.hoursSince, state: st.state, lastService });
   }
   return out;
@@ -1061,7 +1088,7 @@ export async function registerRoutes(
       // 1) Assets due / overdue for service (run-hour centrifuges).
       let aq = client
         .from("assets")
-        .select("id, tag, category, area, run_hours, run_hours_at_service, service_hours_interval")
+        .select("id, tag, category, area, job_id, run_hours, run_hours_at_service, service_hours_interval")
         .in("category", RUN_HOUR_CATEGORIES as unknown as string[]);
       if (scope) aq = aq.eq("area", scope);
       const { data: assetsData, error: aErr } = await aq;
@@ -2284,7 +2311,7 @@ export async function registerRoutes(
     })();
     const { data: assets } = await client
       .from("assets")
-      .select("id, tag, category, run_hours, run_hours_at_service, service_hours_interval")
+      .select("id, tag, category, job_id, run_hours, run_hours_at_service, service_hours_interval")
       .eq("job_id", job.id)
       .in("category", RUN_HOUR_CATEGORIES as unknown as string[])
       .order("tag", { ascending: true });
@@ -4308,8 +4335,9 @@ export async function registerRoutes(
           const lastService = lastServiceByAsset.get(a.id) ?? null;
           const entries = logByAsset.get(a.id) ?? [];
           let since: number;
+          let moved = false;
           if (log.ready) {
-            since = hoursAfter(entries, lastService);
+            ({ since, moved } = serviceHoursFor(entries, lastService, a.job_id));
           } else {
             // Log not set up yet: use the meter (hours since the meter
             // baseline captured at the last service, or the whole meter).
@@ -4317,7 +4345,7 @@ export async function registerRoutes(
             const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
             since = round2(Math.max(0, meter - base));
           }
-          const st = hoursServiceStatusFor(since, !!lastService);
+          const st = hoursServiceStatusFor(since, !!lastService || moved);
           const currentJobHours = assigned && log.ready
             ? round2(entries.filter((e) => e.job_id === a.job_id).reduce((t, e) => t + (Number(e.hours) || 0), 0))
             : null;
@@ -4341,7 +4369,7 @@ export async function registerRoutes(
             service_hours_interval: SERVICE_INTERVAL_HOURS,
             hours_since_service: st.hoursSince,
             service_interval_hours: SERVICE_INTERVAL_HOURS,
-            never_serviced: !lastService,
+            never_serviced: !lastService && !moved,
             current_job_hours: currentJobHours,
             last_service_date: lastService,
             last_maintained: a.last_maintained,
@@ -4434,13 +4462,14 @@ export async function registerRoutes(
 
       const log = await loadRunHoursLog(client, [a.id]);
       let since: number;
-      if (log.ready) since = hoursAfter(log.rows, lastService);
+      let moved = false;
+      if (log.ready) ({ since, moved } = serviceHoursFor(log.rows, lastService, a.job_id));
       else {
         const meter = Number(a.run_hours ?? 0) || 0;
         const base = lastService && a.run_hours_at_service != null ? Number(a.run_hours_at_service) : 0;
         since = round2(Math.max(0, meter - base));
       }
-      const st = hoursServiceStatusFor(since, !!lastService);
+      const st = hoursServiceStatusFor(since, !!lastService || moved);
 
       // Group the log by job, then by well.
       const jobsMap = new Map<string, JobHours & { _wells: Map<string, any> }>();
@@ -4496,7 +4525,7 @@ export async function registerRoutes(
         hours_since_service: st.hoursSince,
         service_interval_hours: SERVICE_INTERVAL_HOURS,
         service_state: st.state,
-        never_serviced: !lastService,
+        never_serviced: !lastService && !moved,
         last_service_date: lastService,
         last_service_supervisor: history[0]?.supervisor_name ?? null,
         current_job_hours: a.job_id ? (log.ready ? current?.hours ?? 0 : null) : null,
@@ -5402,6 +5431,153 @@ export async function registerRoutes(
         open,
         history,
       });
+    },
+  );
+
+  // ---- Move log for one asset ---------------------------------------------
+  // Every time a unit goes on or off a job, the assets_job_stint database
+  // trigger writes a row to asset_job_stints (start/end date per job). This
+  // turns those rows into a readable log: each job stay, the unassigned
+  // (yard) gaps in between, trips out on work orders, and the daily-report
+  // days logged on each job. Admin / Area Manager / Supervisor, area-scoped.
+  app.get(
+    "/api/assets/:id/moves",
+    requireAuth,
+    requireRole("admin", "area", "super"),
+    async (req: Request, res: Response) => {
+      const client = supabaseAdmin || supabaseAnon;
+      const { data: asset } = await client
+        .from("assets")
+        .select("id, area, job_id")
+        .eq("id", req.params.id)
+        .maybeSingle();
+      if (!asset) return res.status(404).json({ message: "Asset not found" });
+      const scope = areaScopeOf(req.profile!);
+      if (scope && (asset as any).area !== scope) return res.status(404).json({ message: "Asset not found" });
+      const [{ data: st, error: stErr }, { data: first }, { data: wos }, { data: hrs }] = await Promise.all([
+        client
+          .from("asset_job_stints")
+          .select("job_id, start_date, end_date, created_at")
+          .eq("asset_id", req.params.id)
+          .order("start_date", { ascending: true })
+          .order("created_at", { ascending: true }),
+        client.from("asset_job_stints").select("created_at").order("created_at", { ascending: true }).limit(1),
+        client
+          .from("work_orders")
+          .select("id, wo_number, vendor, status, sent_on, returned_on, created_at")
+          .eq("asset_id", req.params.id),
+        client.from("asset_run_hours").select("job_id, report_date").eq("asset_id", req.params.id),
+      ]);
+      if (stErr) return res.status(500).json({ message: stErr.message });
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+      const centralDate = (ts: string | null | undefined) =>
+        ts ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ts)) : null;
+
+      // Daily-report days per job (from run-hours rows).
+      const rep = new Map<string, { first: string; last: string; days: Set<string> }>();
+      for (const h of (hrs || []) as any[]) {
+        if (!h.job_id || !h.report_date) continue;
+        const r = rep.get(h.job_id) || { first: h.report_date, last: h.report_date, days: new Set<string>() };
+        if (h.report_date < r.first) r.first = h.report_date;
+        if (h.report_date > r.last) r.last = h.report_date;
+        r.days.add(h.report_date);
+        rep.set(h.job_id, r);
+      }
+
+      // Merge back-to-back rows for the same job (a day-rate change also
+      // writes a new row) into one stay.
+      const stays: { job_id: string | null; start: string; end: string | null }[] = [];
+      for (const s of (st || []) as any[]) {
+        const prev = stays[stays.length - 1];
+        if (prev && prev.job_id === s.job_id && prev.end && s.start_date <= prev.end) {
+          prev.end = s.end_date;
+          continue;
+        }
+        stays.push({ job_id: s.job_id, start: s.start_date, end: s.end_date });
+      }
+
+      const jobIds = Array.from(new Set([...stays.map((s) => s.job_id), ...Array.from(rep.keys())].filter(Boolean))) as string[];
+      const jobs = new Map<string, any>();
+      if (jobIds.length) {
+        const { data: jr } = await client
+          .from("jobs")
+          .select("id, job_number, well_name, area, archived_at")
+          .in("id", jobIds);
+        (jr || []).forEach((j: any) => jobs.set(j.id, j));
+      }
+      const jobLabel = (id: string | null) => {
+        const j = id ? jobs.get(id) : null;
+        return j ? { job_id: j.id, job_number: j.job_number, well_name: j.well_name ?? null, area: j.area } : { job_id: id, job_number: null, well_name: null, area: null };
+      };
+      const repFor = (id: string | null) => {
+        const r = id ? rep.get(id) : null;
+        return r ? { first_report: r.first, last_report: r.last, report_days: r.days.size } : { first_report: null, last_report: null, report_days: 0 };
+      };
+
+      type Entry = Record<string, any> & { kind: string; start: string; end: string | null };
+      const out: Entry[] = [];
+      const seenJob = new Set<string>();
+      stays.forEach((s, i) => {
+        const next = stays[i + 1];
+        const j = s.job_id ? jobs.get(s.job_id) : null;
+        let ended: string | null = null;
+        if (s.end) {
+          if (next && next.start === s.end) ended = "moved";
+          else if (!j) ended = "job_deleted";
+          else if (j.archived_at && centralDate(j.archived_at) === s.end) ended = "job_archived";
+          else ended = "taken_off";
+        }
+        const r = repFor(s.job_id);
+        // First tracked stay on a job: daily reports may show it got there earlier.
+        const earlier = !seenJob.has(String(s.job_id)) && r.first_report && r.first_report < s.start;
+        seenJob.add(String(s.job_id));
+        out.push({
+          kind: "job",
+          ...jobLabel(s.job_id),
+          start: earlier ? (r.first_report as string) : s.start,
+          start_from_reports: !!earlier,
+          end: s.end,
+          ended,
+          moved_to: ended === "moved" && next ? jobLabel(next.job_id).job_number : null,
+          ...r,
+        });
+        // Unassigned (yard) gap until the next stay, or until today.
+        if (s.end && (!next || next.start > s.end)) {
+          const gapEnd = next ? next.start : null;
+          if (gapEnd || !(asset as any).job_id)
+            out.push({ kind: "unassigned", area: (asset as any).area, start: s.end, end: gapEnd });
+        }
+      });
+      // Jobs seen only in daily reports (before move tracking started).
+      for (const [jid, r] of Array.from(rep.entries())) {
+        if (seenJob.has(jid)) continue;
+        out.push({ kind: "job", ...jobLabel(jid), start: r.first, start_from_reports: true, end: r.last, end_from_reports: true, ended: "reports_only", moved_to: null, ...repFor(jid) });
+      }
+      for (const w of (wos || []) as any[]) {
+        const sent = w.sent_on || centralDate(w.created_at);
+        if (!sent) continue;
+        out.push({
+          kind: "work_order",
+          wo_number: w.wo_number,
+          vendor: w.vendor ?? null,
+          start: sent,
+          end: w.status === "Completed" ? w.returned_on || null : null,
+          open: w.status !== "Completed",
+        });
+      }
+      // Out at a vendor right now: it is not sitting in the yard.
+      if (out.some((e) => e.kind === "work_order" && e.open)) {
+        const k = out.findIndex((e) => e.kind === "unassigned" && !e.end);
+        if (k >= 0) out.splice(k, 1);
+      }
+      const dayMs = 86400000;
+      out.forEach((e) => {
+        const endD = e.end || today;
+        e.days = Math.max(0, Math.round((Date.parse(endD) - Date.parse(e.start)) / dayMs));
+        e.current = !e.end && !e.end_from_reports && (e.kind !== "work_order" || e.open);
+      });
+      out.sort((a, b) => (b.start === a.start ? (a.kind === "unassigned" ? -1 : 1) : b.start.localeCompare(a.start)));
+      res.json({ tracking_since: centralDate((first as any)?.[0]?.created_at) ?? null, today, moves: out });
     },
   );
 
