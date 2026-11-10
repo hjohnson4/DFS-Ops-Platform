@@ -25,6 +25,7 @@ import { useToast } from "@/hooks/use-toast";
 import LockedKpiTable from "@/components/LockedKpiTable";
 import { ReplaceWorkbookDialog } from "@/components/ReplaceWorkbookDialog";
 import { WorkbookViewer, downloadReportWorkbook } from "@/components/WorkbookViewer";
+import { ReportNewWellPrompt } from "@/components/ReportNewWellPrompt";
 import {
   ArrowLeft,
   Building2,
@@ -496,6 +497,11 @@ export default function DailyReportDetailPage() {
           <Chip icon={Building2}>{report.customer_name || "Customer not linked"}</Chip>
         )}
       </div>
+
+      {/* New well on this report that isn't on a pad yet: same choice as the job page */}
+      {report.job_id && report.well_name && (
+        <ReportNewWellPrompt reportId={report.id} jobId={report.job_id} wellName={report.well_name} />
+      )}
 
       {/* Needs-job-match review queue action */}
       {needsMatch && (

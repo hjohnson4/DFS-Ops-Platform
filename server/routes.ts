@@ -9444,9 +9444,15 @@ export async function registerRoutes(
       const attached = new Set(
         (wells ?? []).map((w: any) => normWellName(w.name)),
       );
+      // ?well=<name>: just that one well (the daily report page asks whether
+      // the well on the report it is showing still needs a pad). Archived
+      // jobs are read-only, so they never prompt from a report.
+      const onlyWell = typeof req.query.well === "string" && req.query.well.trim() ? normWellName(req.query.well) : null;
+      if (onlyWell && (await jobIsArchived(client, job.id))) return res.json([]);
       const { byName, currentKey } = await wellReportStats(job.id);
       const out = Array.from(byName.entries())
         .filter(([key]) => !attached.has(key))
+        .filter(([key]) => !onlyWell || key === onlyWell)
         .map(([key, s]) => ({
           name: s.display,
           report_days: s.days,

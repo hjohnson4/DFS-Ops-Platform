@@ -9953,8 +9953,10 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
       const attached = new Set(
         (wells ?? []).map((w) => normWellName(w.name))
       );
+      const onlyWell = typeof req.query.well === "string" && req.query.well.trim() ? normWellName(req.query.well) : null;
+      if (onlyWell && await jobIsArchived(client3, job.id)) return res.json([]);
       const { byName, currentKey } = await wellReportStats(job.id);
-      const out = Array.from(byName.entries()).filter(([key]) => !attached.has(key)).map(([key, s]) => ({
+      const out = Array.from(byName.entries()).filter(([key]) => !attached.has(key)).filter(([key]) => !onlyWell || key === onlyWell).map(([key, s]) => ({
         name: s.display,
         report_days: s.days,
         first_report: s.first,
