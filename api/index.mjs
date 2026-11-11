@@ -9039,7 +9039,7 @@ async function registerRoutes(httpServer, app) {
       "attachment_size"
     ].join(", ");
     let q = supabaseAnon.from("daily_reports").select(
-      `${LIST_COLUMNS}, customer:customers(name), job:jobs(job_number), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)`
+      `${LIST_COLUMNS}, customer:customers(name), job:jobs(job_number, archived_at), submitter:profiles!daily_reports_submitted_by_fkey(name), signer:profiles!daily_reports_signed_by_fkey(name)`
     ).order("report_date", { ascending: false, nullsFirst: false }).order("received_at", { ascending: false });
     if (scope) q = q.eq("area", scope);
     const srcFilter = String(req.query.source || "").toLowerCase();
@@ -9050,6 +9050,7 @@ async function registerRoutes(httpServer, app) {
       ...r,
       customer_name: r.customer?.name ?? null,
       job_number: r.job?.job_number ?? null,
+      job_archived: !!r.job?.archived_at,
       submitted_by_name: r.submitter?.name ?? null,
       signed_by_name: r.signer?.name ?? null,
       // The workbook bytes are no longer fetched in the list query (see

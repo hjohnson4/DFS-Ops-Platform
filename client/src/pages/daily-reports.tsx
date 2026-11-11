@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   MapPin,
+  Archive,
 } from "lucide-react";
 import {
   Select,
@@ -368,12 +369,34 @@ export default function DailyReportsPage() {
     } catch {}
   };
   const activeArea = isAdmin && areaFilter !== "all" ? areaFilter : null;
-  const all = useMemo(
+  // Active / Archived: reports on an archived job move to Archived, the same
+  // way the job itself does on Field Ops & Jobs. Kept for the browser session.
+  const [view, setViewState] = useState<"active" | "archived">(() => {
+    try {
+      return sessionStorage.getItem("daily-reports-view") === "archived" ? "archived" : "active";
+    } catch {
+      return "active";
+    }
+  });
+  const setView = (v: "active" | "archived") => {
+    setViewState(v);
+    setSelected(new Set());
+    try {
+      sessionStorage.setItem("daily-reports-view", v);
+    } catch {}
+  };
+  const showingArchived = view === "archived";
+  const inArea = useMemo(
     () => (reports || []).filter((r) => !activeArea || r.area === activeArea),
     [reports, activeArea],
   );
-  const pending = all.filter((r) => r.status === "Pending Review").length;
-  const needsMatch = all.filter((r) => r.status === "Needs job match").length;
+  const all = useMemo(
+    () => inArea.filter((r) => !!r.job_archived === showingArchived),
+    [inArea, showingArchived],
+  );
+  const activeOnly = inArea.filter((r) => !r.job_archived);
+  const pending = activeOnly.filter((r) => r.status === "Pending Review").length;
+  const needsMatch = activeOnly.filter((r) => r.status === "Needs job match").length;
 
   const q = search.trim().toLowerCase();
   const rows = useMemo(() => {
@@ -597,9 +620,9 @@ export default function DailyReportsPage() {
 
   return (
     <div className="p-4 md:p-6 max-w-5xl">
-      <div className="flex items-center justify-between gap-2 mb-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
         <h1 className="text-xl font-semibold">Daily Reports</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {canManage && (
             <Button
               size="sm"
@@ -663,6 +686,30 @@ export default function DailyReportsPage() {
       </p>
 
       <div className="flex flex-wrap items-center gap-3 mb-4">
+        {/* Active / Archived view toggle (same as Field Ops & Jobs) */}
+        <div className="inline-flex rounded-md border border-card-border p-0.5 text-sm">
+          <button
+            type="button"
+            onClick={() => setView("active")}
+            className={`rounded px-3 py-1 font-medium transition-colors ${
+              !showingArchived ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+            data-testid="tab-reports-active"
+          >
+            Active
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("archived")}
+            className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-medium transition-colors ${
+              showingArchived ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+            data-testid="tab-reports-archived"
+          >
+            <Archive className="h-3.5 w-3.5" /> Archived
+          </button>
+        </div>
+
         <ToggleGroup
           type="single"
           value={statusFilter}
@@ -781,12 +828,14 @@ export default function DailyReportsPage() {
           <Inbox className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
           <div className="text-sm text-muted-foreground">
             {all.length === 0
-              ? "No daily reports yet."
+              ? showingArchived
+                ? "No reports on archived jobs."
+                : "No daily reports yet."
               : q
                 ? "No reports match your search."
                 : "No reports match these filters."}
           </div>
-          {all.length === 0 && (
+          {all.length === 0 && !showingArchived && (
             <div className="text-xs text-muted-foreground mt-1">
               Reports appear here after the daily email check imports them from
               the intake inbox.

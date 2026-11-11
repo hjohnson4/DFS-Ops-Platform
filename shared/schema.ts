@@ -1220,6 +1220,8 @@ export interface DailyReportWithLinks extends DailyReport {
   customer_name: string | null;
   job_number: string | null;
   job_status: JobStatus | null;
+  /** The report's job has been archived (shown under Archived on Daily Reports). */
+  job_archived?: boolean;
 }
 
 export interface DailyReportEvent {
