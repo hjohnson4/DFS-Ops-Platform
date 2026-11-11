@@ -17,6 +17,7 @@ import { openWorkOrdersByAsset, withOpenWorkOrders } from "./openWorkOrders";
 import { registerFieldTicketRoutes } from "./fieldTickets";
 import { registerTicketPreviewRoutes } from "./ticketPreview";
 import { registerRentalRoutes, stripRentalMoney } from "./rentals";
+import { registerBoardRoutes, boardNotifications } from "./board";
 import { AREAS, isLiveJobStatus, assetStatusFor, specificJobOf } from "@shared/schema";
 import { computeManualBilling, publicBilling, recordRateChange, todayCentral } from "./manualBilling";
 import { standbyByJob, publicStandby, addDaysIso } from "./standby";
@@ -1073,7 +1074,8 @@ export async function registerRoutes(
           | "new_report"
           | "changes_requested"
           | "missing_data"
-          | "service_charge";
+          | "service_charge"
+          | "board_task";
         severity: "warning" | "info";
         title: string;
         detail: string;
@@ -1282,6 +1284,13 @@ export async function registerRoutes(
             ts: v.created_at || null,
           });
         }
+      }
+
+      // Area board: open tasks / supply requests assigned to me.
+      try {
+        items.push(...(await boardNotifications(req.profile! as any)));
+      } catch (e) {
+        console.error("[notifications] board", e);
       }
 
       // Warnings first, then by most recent timestamp.
@@ -10588,6 +10597,7 @@ export async function registerRoutes(
 
   // Forecast: upcoming work + centrifuge planning (server/forecast.ts)
   registerRentalRoutes(app);
+  registerBoardRoutes(app);
   registerForecastRoutes(app);
 
   return httpServer;

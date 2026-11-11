@@ -29,6 +29,7 @@ import AuditTrailPage from "@/pages/audit-trail";
 import AssetsPage from "@/pages/assets";
 import RevenuePage from "@/pages/revenue";
 import Settings from "@/pages/settings";
+import BoardPage from "@/pages/board";
 import NotFound from "@/pages/not-found";
 import { Loader2 } from "lucide-react";
 
@@ -68,6 +69,8 @@ function Protected() {
         <Route path="/assets" component={AssetsPage} />
         <Route path="/service" component={ServicePage} />
         <Route path="/audit-trail" component={AuditTrailPage} />
+        {profile?.role !== "field" && <Route path="/board" component={BoardPage} />}
+        {profile?.role !== "field" && <Route path="/board/task/:id" component={BoardPage} />}
         {(profile?.role === "admin" || profile?.role === "area") && (
           <Route path="/revenue" component={RevenuePage} />
         )}

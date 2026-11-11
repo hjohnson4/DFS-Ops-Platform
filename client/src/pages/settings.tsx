@@ -1,3 +1,4 @@
+import { PhoneAlertsSection } from "@/components/PhoneAlerts";
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
@@ -88,6 +89,8 @@ export default function Settings() {
           </Button>
         </div>
       </div>
+
+      {profile?.role !== "field" && <TaskAlerts />}
 
       <div className="rounded-lg border border-card-border bg-card p-4 mt-6">
         <h2 className="text-sm font-semibold mb-1">Password</h2>
@@ -197,6 +200,91 @@ function DailyReportSource() {
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+type AlertPrefs = { phone: string; task_email: boolean; task_sms: boolean; email_ready: boolean; sms_ready: boolean };
+
+function TaskAlerts() {
+  const { toast } = useToast();
+  const { data } = useQuery<AlertPrefs>({ queryKey: ["/api/board/alert-prefs"] });
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState(true);
+  const [sms, setSms] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (data) {
+      setPhone(data.phone || "");
+      setEmail(data.task_email);
+      setSms(data.task_sms);
+    }
+  }, [data]);
+
+  async function save() {
+    setBusy(true);
+    try {
+      await apiRequest("PUT", "/api/board/alert-prefs", { phone: phone.trim() || null, task_email: email, task_sms: sms });
+      queryClient.invalidateQueries({ queryKey: ["/api/board/alert-prefs"] });
+      toast({ title: "Task alerts saved" });
+    } catch (e: any) {
+      toast({ title: "Save failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function test() {
+    setBusy(true);
+    try {
+      const r = await (await apiRequest("POST", "/api/board/alert-prefs/test")).json();
+      const bits = [r.email?.ok ? "Test email sent" : `Email: ${r.email?.error || "not sent"}`];
+      if (sms) bits.push(r.sms?.ok ? "test text sent" : `Text: ${r.sms?.error || "not sent"}`);
+      toast({ title: bits.join(" · ") });
+    } catch (e: any) {
+      toast({ title: "Test failed", description: e.message, variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-card-border bg-card p-4 mt-6" data-testid="card-task-alerts">
+      <h2 className="text-sm font-semibold mb-1">Task alerts</h2>
+      <p className="text-xs text-muted-foreground mb-3">
+        When someone assigns you a task or supply request on the Area Board, or marks one you asked for done. You'll always see it in the bell too.
+      </p>
+      <PhoneAlertsSection />
+      <div className="flex items-start justify-between gap-4 py-3.5 border-b border-card-border">
+        <div>
+          <div className="text-sm font-medium">Email me</div>
+          <div className="text-xs text-muted-foreground">Sent to your sign-in email.</div>
+        </div>
+        <Switch checked={email} onCheckedChange={setEmail} data-testid="switch-task-email" />
+      </div>
+      <div className="flex items-start justify-between gap-4 py-3.5">
+        <div>
+          <div className="text-sm font-medium">Text me</div>
+          <div className="text-xs text-muted-foreground">
+            {data && !data.sms_ready
+              ? "Texts aren't switched on for DFS Ops yet. You can add your number now and turn this on; texts start once the company sets them up."
+              : "By turning this on you agree to get task texts from DFS Ops at this number. Message and data rates may apply. Reply STOP to opt out."}
+          </div>
+        </div>
+        <Switch checked={sms} onCheckedChange={setSms} data-testid="switch-task-sms" />
+      </div>
+      <div className="max-w-xs">
+        <label className="text-xs text-muted-foreground mb-1 block">Cell number</label>
+        <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="432-555-0123" inputMode="tel" data-testid="input-task-phone" />
+      </div>
+      <div className="pt-4 flex gap-2">
+        <Button onClick={save} disabled={busy} data-testid="button-save-task-alerts">
+          {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          Save task alerts
+        </Button>
+        <Button variant="outline" onClick={test} disabled={busy} data-testid="button-test-task-alerts">
+          Send me a test
+        </Button>
+      </div>
     </div>
   );
 }

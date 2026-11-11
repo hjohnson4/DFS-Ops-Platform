@@ -105,9 +105,9 @@ async function jobScopeOf(p) {
 import nodemailer from "nodemailer";
 var RESEND_API_KEY = process.env.RESEND_API_KEY || "";
 var FROM = process.env.EMAIL_FROM || "DFS Ops <onboarding@resend.dev>";
-async function deliver(to, subject, html) {
+async function deliver(to, subject2, html) {
   if (!RESEND_API_KEY) {
-    console.log(`[email:stub] would send to ${to} \u2014 "${subject}"`);
+    console.log(`[email:stub] would send to ${to} \u2014 "${subject2}"`);
     return false;
   }
   try {
@@ -117,7 +117,7 @@ async function deliver(to, subject, html) {
         Authorization: `Bearer ${RESEND_API_KEY}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ from: FROM, to, subject, html })
+      body: JSON.stringify({ from: FROM, to, subject: subject2, html })
     });
     if (!r.ok) {
       console.error("[email] send failed", await r.text());
@@ -188,7 +188,7 @@ var gmailTransport = null;
 function gmailConfigured() {
   return !!(GMAIL_USER && GMAIL_APP_PASSWORD);
 }
-async function deliverChangeRequest(to, subject, html, text) {
+async function deliverChangeRequest(to, subject2, html, text, fromName = "DFS Daily Reports") {
   if (gmailConfigured()) {
     try {
       if (!gmailTransport) {
@@ -200,9 +200,9 @@ async function deliverChangeRequest(to, subject, html, text) {
         });
       }
       await gmailTransport.sendMail({
-        from: `DFS Daily Reports <${GMAIL_USER}>`,
+        from: `${fromName} <${GMAIL_USER}>`,
         to,
-        subject,
+        subject: subject2,
         html,
         text
       });
@@ -214,7 +214,7 @@ async function deliverChangeRequest(to, subject, html, text) {
       return { ok: false, via: "gmail", error: friendly };
     }
   }
-  const ok = await deliver(to, subject, html);
+  const ok = await deliver(to, subject2, html);
   return ok ? { ok: true, via: "resend" } : { ok: false, via: RESEND_API_KEY ? "resend" : "none", error: RESEND_API_KEY ? "The email service rejected the message." : "Email sending isn't set up yet." };
 }
 function escapeHtml(s) {
@@ -285,6 +285,12 @@ async function sendNotificationEmails(kind, ctx) {
         );
     }
   }
+}
+async function sendBoardEmail(to, subject2, html, text) {
+  return deliverChangeRequest(to, subject2, html, text, "DFS Ops Board");
+}
+function boardEmailReady() {
+  return gmailConfigured() || !!RESEND_API_KEY;
 }
 
 // server/excelDailyReport.ts
@@ -1529,6 +1535,70 @@ var ticketPreviewDraftSchema = z.object({
       note: z.string().nullable().optional()
     })
   ).max(50).optional()
+});
+var BOARD_TASK_STATUSES = ["Open", "Assigned", "In progress", "Done", "Cancelled"];
+var BOARD_PRIORITIES = ["Low", "Normal", "High", "Urgent"];
+var optUuid = z.string().uuid().nullable().optional();
+var boardOptDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date").nullable().optional();
+var boardPostSchema = z.object({
+  area: z.enum(AREAS),
+  body: z.string().trim().max(4e3, "Keep posts under 4,000 characters"),
+  parent_id: optUuid,
+  job_id: optUuid,
+  // Photos are uploaded right after the post is created.
+  has_photos: z.boolean().optional(),
+  // Area Managers / Admins only: pin to the top, ask everyone to tap "Got it".
+  pin: z.boolean().optional(),
+  needs_ack: z.boolean().optional()
+}).refine((v) => v.body.length > 0 || v.has_photos, { message: "Write something first", path: ["body"] });
+var boardPinSchema = z.object({
+  pinned: z.boolean(),
+  needs_ack: z.boolean().optional()
+});
+var boardFileUploadSchema = z.object({
+  post_id: optUuid,
+  task_id: optUuid,
+  comment_id: optUuid,
+  file_name: z.string().trim().min(1).max(200),
+  file_mime: z.string().max(100).regex(/^image\//, "Only photos can be added"),
+  file_base64: z.string().min(10)
+}).refine((v) => [v.post_id, v.task_id, v.comment_id].filter(Boolean).length === 1, { message: "Attach the photo to one item" });
+var boardPushSubscribeSchema = z.object({
+  endpoint: z.string().url().max(2e3),
+  keys: z.object({ p256dh: z.string().min(10).max(500), auth: z.string().min(4).max(200) })
+});
+var boardPostEditSchema = z.object({
+  body: z.string().trim().min(1, "Write something first").max(4e3, "Keep posts under 4,000 characters")
+});
+var boardTaskCreateSchema = z.object({
+  area: z.enum(AREAS),
+  kind: z.enum(["task", "supply"]).default("task"),
+  title: z.string().trim().min(1, "Give it a short title").max(160, "Keep the title under 160 characters"),
+  details: z.string().max(4e3).nullable().optional(),
+  priority: z.enum(BOARD_PRIORITIES).default("Normal"),
+  due_date: boardOptDate,
+  job_id: optUuid,
+  asset_id: optUuid,
+  assignee_id: optUuid
+});
+var boardTaskUpdateSchema = z.object({
+  title: z.string().trim().min(1).max(160).optional(),
+  details: z.string().max(4e3).nullable().optional(),
+  priority: z.enum(BOARD_PRIORITIES).optional(),
+  due_date: boardOptDate,
+  job_id: optUuid,
+  asset_id: optUuid,
+  assignee_id: optUuid,
+  status: z.enum(BOARD_TASK_STATUSES).optional()
+});
+var boardCommentSchema = z.object({
+  body: z.string().trim().max(4e3),
+  has_photos: z.boolean().optional()
+}).refine((v) => v.body.length > 0 || v.has_photos, { message: "Write something first", path: ["body"] });
+var boardAlertPrefsSchema = z.object({
+  phone: z.string().max(30).nullable().optional(),
+  task_email: z.boolean(),
+  task_sms: z.boolean()
 });
 
 // server/openWorkOrders.ts
@@ -3490,6 +3560,819 @@ function registerRentalRoutes(app) {
   });
 }
 
+// server/sms.ts
+var SID = (process.env.TWILIO_ACCOUNT_SID || "").trim();
+var TOKEN = (process.env.TWILIO_AUTH_TOKEN || "").trim();
+var SERVICE = (process.env.TWILIO_MESSAGING_SERVICE_SID || "").trim();
+var FROM2 = (process.env.TWILIO_FROM || "").trim();
+function smsConfigured() {
+  return !!(SID && TOKEN && (SERVICE || FROM2));
+}
+function normalizeUsPhone(raw) {
+  const d = String(raw || "").replace(/\D/g, "");
+  if (d.length === 10) return `+1${d}`;
+  if (d.length === 11 && d.startsWith("1")) return `+${d}`;
+  return null;
+}
+async function sendSms(to, body) {
+  if (!smsConfigured()) return { ok: false, error: "Text messages aren't set up yet." };
+  const phone = normalizeUsPhone(to);
+  if (!phone) return { ok: false, error: "That isn't a 10-digit US phone number." };
+  const form = new URLSearchParams({ To: phone, Body: body.slice(0, 600) });
+  if (SERVICE) form.set("MessagingServiceSid", SERVICE);
+  else form.set("From", FROM2);
+  try {
+    const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${SID}/Messages.json`, {
+      method: "POST",
+      headers: {
+        Authorization: "Basic " + Buffer.from(`${SID}:${TOKEN}`).toString("base64"),
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: form.toString()
+    });
+    if (r.ok) return { ok: true };
+    const j = await r.json().catch(() => ({}));
+    console.error("[sms] send failed", r.status, j?.message);
+    return { ok: false, error: j?.message ? `Twilio: ${String(j.message).slice(0, 160)}` : `Twilio error ${r.status}` };
+  } catch (e) {
+    console.error("[sms] send failed", e?.message || e);
+    return { ok: false, error: "Couldn't reach Twilio." };
+  }
+}
+
+// server/push.ts
+import webpush from "web-push";
+var db5 = () => supabaseAdmin || supabaseAnon;
+var cached = null;
+function subject() {
+  const s = (process.env.VAPID_SUBJECT || "").trim();
+  if (s) return s;
+  const g2 = (process.env.GMAIL_USER || "").trim();
+  return `mailto:${g2 || "dfsdailyreports@gmail.com"}`;
+}
+async function getPushKeys() {
+  if (cached) return cached;
+  const envPub = (process.env.VAPID_PUBLIC_KEY || "").trim();
+  const envPriv = (process.env.VAPID_PRIVATE_KEY || "").trim();
+  if (envPub && envPriv) return cached = { publicKey: envPub, privateKey: envPriv, subject: subject() };
+  const read3 = async () => {
+    const { data, error } = await db5().from("board_push_config").select("public_key,private_key").eq("id", 1).maybeSingle();
+    if (error) return { err: error.message };
+    return { row: data };
+  };
+  let r = await read3();
+  if ("err" in r) return null;
+  if (!r.row) {
+    const k = webpush.generateVAPIDKeys();
+    await db5().from("board_push_config").insert({ id: 1, public_key: k.publicKey, private_key: k.privateKey });
+    r = await read3();
+    if ("err" in r || !r.row) return null;
+  }
+  return cached = { publicKey: r.row.public_key, privateKey: r.row.private_key, subject: subject() };
+}
+async function sendPush(userIds, msg) {
+  const ids = Array.from(new Set(userIds.filter(Boolean)));
+  const out = { sent: 0, failed: 0 };
+  if (!ids.length) return out;
+  try {
+    const keys = await getPushKeys();
+    if (!keys) return out;
+    const { data: subs } = await db5().from("board_push_subscriptions").select("id,user_id,endpoint,p256dh,auth").in("user_id", ids);
+    if (!subs?.length) return out;
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: msg.url || "/#/board", tag: msg.tag });
+    await Promise.all(
+      subs.map(async (s) => {
+        try {
+          await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, {
+            TTL: 60 * 60 * 24,
+            urgency: "high",
+            timeout: 8e3,
+            vapidDetails: { subject: keys.subject, publicKey: keys.publicKey, privateKey: keys.privateKey }
+          });
+          out.sent++;
+          await db5().from("board_push_subscriptions").update({ last_ok_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", s.id);
+        } catch (e) {
+          out.failed++;
+          if (e?.statusCode === 404 || e?.statusCode === 410) {
+            await db5().from("board_push_subscriptions").delete().eq("id", s.id);
+          }
+        }
+      })
+    );
+  } catch {
+  }
+  return out;
+}
+
+// server/board.ts
+var db6 = () => supabaseAdmin || supabaseAnon;
+var BOARD_ROLES = ["admin", "area", "super"];
+var OPEN_STATUSES = ["Open", "Assigned", "In progress"];
+function canViewArea(p, area) {
+  if (p.role === "admin" || p.role === "area") return true;
+  if (p.role === "super") return p.area === area;
+  return false;
+}
+function canWriteArea(p, area) {
+  if (p.role === "admin") return true;
+  if (p.role === "area" || p.role === "super") return p.area === area;
+  return false;
+}
+function viewableAreas(p) {
+  return AREAS.filter((a) => canViewArea(p, a));
+}
+var nameOf = (p) => p.name || p.email || "Someone";
+var taskNo = (n) => `T-${n ?? "?"}`;
+var isManagerOf = (p, area) => p.role === "admin" || p.role === "area" && p.area === area;
+var FILE_MAX_BYTES = 6 * 1024 * 1024;
+var short = (t, n = 120) => t.length > n ? t.slice(0, n - 1).trimEnd() + "\u2026" : t;
+async function areaMembers(area) {
+  const { data } = await db6().from("profiles").select("id,name,email,role,area,active").eq("area", area).in("role", ["area", "super"]).eq("active", true);
+  return (data || []).map((u) => ({ id: u.id, name: u.name || u.email || "Someone" }));
+}
+async function filesFor(col, ids) {
+  const m = /* @__PURE__ */ new Map();
+  if (!ids.length) return m;
+  const { data } = await db6().from("board_files").select(`id,${col},file_name,file_mime,created_at`).in(col, ids).order("created_at");
+  (data || []).forEach((f) => {
+    const k = f[col];
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push({ id: f.id, file_name: f.file_name, file_mime: f.file_mime });
+  });
+  return m;
+}
+function appUrl(req) {
+  return ((process.env.APP_URL || "").trim() || (req.get("host") ? `${req.protocol}://${req.get("host")}` : "") || "https://dfs-ops-platform.vercel.app").replace(/\/$/, "");
+}
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = /* @__PURE__ */ new Date(iso.slice(0, 10) + "T12:00:00Z");
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+async function logActivity(task, actor, action, detail) {
+  await db6().from("board_activity").insert({
+    area: task.area,
+    task_id: task.id,
+    actor_id: actor.id,
+    actor_name: nameOf(actor),
+    action,
+    detail: detail || null
+  });
+}
+async function loadTask(id) {
+  const { data } = await db6().from("board_tasks").select("*").eq("id", id).maybeSingle();
+  return data;
+}
+async function decorate(tasks) {
+  if (!tasks.length) return tasks;
+  const ids = (k) => Array.from(new Set(tasks.map((t) => t[k]).filter(Boolean)));
+  const [people, jobs, assets, comments, photos] = await Promise.all([
+    ids("assignee_id").length ? db6().from("profiles").select("id,name,email").in("id", ids("assignee_id")) : Promise.resolve({ data: [] }),
+    ids("job_id").length ? db6().from("jobs").select("id,job_number,well_name").in("id", ids("job_id")) : Promise.resolve({ data: [] }),
+    ids("asset_id").length ? db6().from("assets").select("id,tag").in("id", ids("asset_id")) : Promise.resolve({ data: [] }),
+    db6().from("board_task_comments").select("task_id").in("task_id", tasks.map((t) => t.id)),
+    db6().from("board_files").select("task_id").in("task_id", tasks.map((t) => t.id))
+  ]);
+  const pc = /* @__PURE__ */ new Map();
+  (photos.data || []).forEach((f) => pc.set(f.task_id, (pc.get(f.task_id) || 0) + 1));
+  const pm = new Map((people.data || []).map((p) => [p.id, p.name || p.email]));
+  const jm = new Map((jobs.data || []).map((j) => [j.id, j]));
+  const am = new Map((assets.data || []).map((a) => [a.id, a]));
+  const cc = /* @__PURE__ */ new Map();
+  (comments.data || []).forEach((c) => cc.set(c.task_id, (cc.get(c.task_id) || 0) + 1));
+  return tasks.map((t) => ({
+    ...t,
+    assignee_name: t.assignee_id ? pm.get(t.assignee_id) || null : null,
+    job_number: t.job_id ? jm.get(t.job_id)?.job_number || null : null,
+    asset_tag: t.asset_id ? am.get(t.asset_id)?.tag || null : null,
+    comment_count: cc.get(t.id) || 0,
+    photo_count: pc.get(t.id) || 0
+  }));
+}
+async function alertAssignee(req, task, actor) {
+  const out = { email: "skipped", sms: "skipped", push: 0 };
+  if (!task.assignee_id || task.assignee_id === actor.id) return out;
+  const [{ data: person }, { data: prefs }] = await Promise.all([
+    db6().from("profiles").select("id,name,email,active").eq("id", task.assignee_id).maybeSingle(),
+    db6().from("notification_prefs").select("phone,task_email,task_sms").eq("user_id", task.assignee_id).maybeSingle()
+  ]);
+  if (!person || person.active === false) return out;
+  let jobNumber = null;
+  if (task.job_id) {
+    const { data: j } = await db6().from("jobs").select("job_number").eq("id", task.job_id).maybeSingle();
+    jobNumber = j?.job_number || null;
+  }
+  const link = `${appUrl(req)}/#/board/task/${task.id}`;
+  const what = task.kind === "supply" ? "Supply request" : "Task";
+  const due = task.due_date ? ` \xB7 due ${fmtDate(task.due_date)}` : "";
+  const by = nameOf(actor);
+  const wantEmail = prefs?.task_email !== false;
+  if (wantEmail && person.email) {
+    const subject2 = `${what} ${taskNo(task.number)} assigned to you: ${task.title}`;
+    const rows = [
+      ["Area", task.area],
+      ["Priority", task.priority],
+      task.due_date ? ["Due", fmtDate(task.due_date)] : null,
+      jobNumber ? ["Job", jobNumber] : null,
+      ["Assigned by", by]
+    ].filter(Boolean);
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937">
+<p>${esc(by)} assigned you a ${what.toLowerCase()} on the ${esc(task.area)} board.</p>
+<p style="font-size:16px;font-weight:bold;margin:12px 0 4px">${esc(taskNo(task.number))} \xB7 ${esc(task.title)}</p>
+${task.details ? `<p style="white-space:pre-wrap;margin:0 0 12px">${esc(task.details)}</p>` : ""}
+<table style="border-collapse:collapse;margin:8px 0 16px">${rows.map((r2) => `<tr><td style="padding:2px 12px 2px 0;color:#6b7280">${esc(r2[0])}</td><td style="padding:2px 0">${esc(String(r2[1]))}</td></tr>`).join("")}</table>
+<p><a href="${link}" style="background:#2f6b3f;color:#fff;padding:9px 16px;border-radius:6px;text-decoration:none">Open in DFS Ops</a></p>
+<p style="color:#9ca3af;font-size:12px">You can turn these emails off in DFS Ops under Settings \u2192 Task alerts.</p></div>`;
+    const text = `${by} assigned you ${what.toLowerCase()} ${taskNo(task.number)}: ${task.title}${due}
+${task.details || ""}
+
+Open: ${link}`;
+    const r = await sendBoardEmail(person.email, subject2, html, text).catch(() => ({ ok: false }));
+    out.email = r.ok ? "sent" : "failed";
+  }
+  const phone = normalizeUsPhone(prefs?.phone);
+  if (prefs?.task_sms && phone && smsConfigured()) {
+    const body = `DFS Ops: ${by} assigned you ${taskNo(task.number)} - ${task.title}${due}. ${link} Reply STOP to opt out.`;
+    const r = await sendSms(phone, body);
+    out.sms = r.ok ? "sent" : "failed";
+  }
+  const pr = await sendPush([task.assignee_id], {
+    title: `${what} ${taskNo(task.number)} for you`,
+    body: `${short(task.title)}${due} \xB7 from ${by}`,
+    url: `/#/board/task/${task.id}`,
+    tag: `task-${task.id}`
+  });
+  out.push = pr.sent;
+  return out;
+}
+async function alertRequesterDone(req, task, actor) {
+  const out = { email: "skipped", push: 0 };
+  if (!task.created_by || task.created_by === actor.id) return out;
+  const [{ data: person }, { data: prefs }] = await Promise.all([
+    db6().from("profiles").select("id,name,email,active").eq("id", task.created_by).maybeSingle(),
+    db6().from("notification_prefs").select("task_email").eq("user_id", task.created_by).maybeSingle()
+  ]);
+  if (!person || person.active === false) return out;
+  const what = task.kind === "supply" ? "Supply request" : "Task";
+  const by = nameOf(actor);
+  const link = `${appUrl(req)}/#/board/task/${task.id}`;
+  if (prefs?.task_email !== false && person.email) {
+    const subject2 = `Done: ${what} ${taskNo(task.number)} ${task.title}`;
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937">
+<p>${esc(by)} marked your ${what.toLowerCase()} done on the ${esc(task.area)} board.</p>
+<p style="font-size:16px;font-weight:bold;margin:12px 0 16px">${esc(taskNo(task.number))} \xB7 ${esc(task.title)}</p>
+<p><a href="${link}" style="background:#2f6b3f;color:#fff;padding:9px 16px;border-radius:6px;text-decoration:none">Open in DFS Ops</a></p>
+<p style="color:#9ca3af;font-size:12px">You can turn these emails off in DFS Ops under Settings \u2192 Task alerts.</p></div>`;
+    const text = `${by} marked your ${what.toLowerCase()} ${taskNo(task.number)} done: ${task.title}
+
+Open: ${link}`;
+    const r = await sendBoardEmail(person.email, subject2, html, text).catch(() => ({ ok: false }));
+    out.email = r.ok ? "sent" : "failed";
+  }
+  const pr = await sendPush([task.created_by], {
+    title: `Done: ${what} ${taskNo(task.number)}`,
+    body: `${short(task.title)} \xB7 marked done by ${by}`,
+    url: `/#/board/task/${task.id}`,
+    tag: `task-${task.id}`
+  });
+  out.push = pr.sent;
+  return out;
+}
+async function boardNotifications(p) {
+  if (!BOARD_ROLES.includes(p.role)) return [];
+  const { data } = await db6().from("board_tasks").select("id,number,kind,title,area,priority,due_date,status,created_by_name,updated_at").eq("assignee_id", p.id).in("status", OPEN_STATUSES).order("updated_at", { ascending: false }).limit(25);
+  const today = todayCentral();
+  const since = new Date(Date.now() - 3 * 24 * 3600 * 1e3).toISOString();
+  const { data: finished } = await db6().from("board_tasks").select("id,number,kind,title,status,done_at,done_by,done_by_name").eq("created_by", p.id).eq("status", "Done").gt("done_at", since).order("done_at", { ascending: false }).limit(10);
+  const doneItems = (finished || []).filter((t) => t.done_by !== p.id).map((t) => ({
+    id: `board-done-${t.id}`,
+    type: "board_task",
+    severity: "info",
+    title: `Done: ${t.kind === "supply" ? "Supply request" : "Task"} ${taskNo(t.number)} ${t.title}`,
+    detail: t.done_by_name ? `Marked done by ${t.done_by_name}` : "Marked done",
+    href: `/board/task/${t.id}`,
+    ts: t.done_at || null
+  }));
+  const assigned = (data || []).map((t) => {
+    const overdue = !!t.due_date && t.due_date < today;
+    return {
+      id: `board-task-${t.id}`,
+      type: "board_task",
+      severity: overdue || t.priority === "Urgent" ? "warning" : "info",
+      title: `${t.kind === "supply" ? "Supply request" : "Task"} ${taskNo(t.number)}: ${t.title}`,
+      detail: [
+        t.status,
+        t.due_date ? overdue ? `overdue since ${fmtDate(t.due_date)}` : `due ${fmtDate(t.due_date)}` : null,
+        t.created_by_name ? `from ${t.created_by_name}` : null
+      ].filter(Boolean).join(" \xB7 "),
+      href: `/board/task/${t.id}`,
+      ts: t.updated_at || null
+    };
+  });
+  return [...assigned, ...doneItems];
+}
+function registerBoardRoutes(app) {
+  const guard = [requireAuth, requireRole("admin", "area", "super")];
+  const pickArea = (req) => {
+    const p = req.profile;
+    const a = String(req.query.area || "");
+    if (AREAS.includes(a)) return a;
+    return p.area && AREAS.includes(p.area) ? p.area : AREAS[0];
+  };
+  app.get("/api/board/meta", ...guard, async (req, res) => {
+    const p = req.profile;
+    const area = pickArea(req);
+    if (!canViewArea(p, area)) return res.status(403).json({ message: "You can't view that area's board." });
+    const [{ data: people }, { data: jobs }, { data: assets }] = await Promise.all([
+      db6().from("profiles").select("id,name,email,role,area").eq("active", true).in("role", ["admin", "area", "super"]).order("name"),
+      db6().from("jobs").select("id,job_number,well_name,status").eq("area", area).is("archived_at", null).order("job_number"),
+      db6().from("assets").select("id,tag,category").eq("area", area).order("tag")
+    ]);
+    const members = (people || []).filter((u) => u.role === "admin" || u.area === area).map((u) => ({ id: u.id, name: u.name || u.email, role: u.role, area: u.area }));
+    res.json({
+      area,
+      areas: viewableAreas(p),
+      can_write: canWriteArea(p, area),
+      members,
+      jobs: (jobs || []).map((j) => ({ id: j.id, job_number: j.job_number, well_name: j.well_name })),
+      assets: (assets || []).map((a) => ({ id: a.id, label: a.tag, category: a.category })),
+      email_ready: boardEmailReady(),
+      sms_ready: smsConfigured()
+    });
+  });
+  app.get("/api/board/posts", ...guard, async (req, res) => {
+    const p = req.profile;
+    const area = pickArea(req);
+    if (!canViewArea(p, area)) return res.status(403).json({ message: "You can't view that area's board." });
+    const { data: top, error } = await db6().from("board_posts").select("*").eq("area", area).is("parent_id", null).is("deleted_at", null).order("created_at", { ascending: false }).limit(100);
+    if (error) return res.status(400).json({ message: error.message });
+    const ids = (top || []).map((t) => t.id);
+    const { data: replies } = ids.length ? await db6().from("board_posts").select("*").in("parent_id", ids).is("deleted_at", null).order("created_at") : { data: [] };
+    const jobIds = Array.from(new Set([...top || [], ...replies || []].map((x) => x.job_id).filter(Boolean)));
+    const { data: jobs } = jobIds.length ? await db6().from("jobs").select("id,job_number").in("id", jobIds) : { data: [] };
+    const jm = new Map((jobs || []).map((j) => [j.id, j.job_number]));
+    const fm = await filesFor("post_id", [...ids, ...(replies || []).map((r) => r.id)]);
+    const withJob = (x) => ({ ...x, job_number: x.job_id ? jm.get(x.job_id) || null : null, files: fm.get(x.id) || [] });
+    const ackIds = (top || []).filter((t) => t.needs_ack).map((t) => t.id);
+    const [{ data: acks }, members] = ackIds.length ? await Promise.all([db6().from("board_post_acks").select("post_id,user_id,user_name,created_at").in("post_id", ackIds), areaMembers(area)]) : [{ data: [] }, []];
+    const ackInfo = (t) => {
+      if (!t.needs_ack) return null;
+      const mine = (acks || []).filter((a) => a.post_id === t.id);
+      const ackedIds = new Set(mine.map((a) => a.user_id));
+      const audience = members.filter((m) => m.id !== t.author_id);
+      const canSeeMissing = isManagerOf(p, area) || t.author_id === p.id;
+      return {
+        done: audience.filter((m) => ackedIds.has(m.id)).length,
+        total: audience.length,
+        mine: ackedIds.has(p.id),
+        acked: mine.map((a) => ({ name: a.user_name || "Someone", at: a.created_at })),
+        missing: canSeeMissing ? audience.filter((m) => !ackedIds.has(m.id)).map((m) => m.name) : null
+      };
+    };
+    const list = (top || []).map((t) => ({
+      ...withJob(t),
+      ack: ackInfo(t),
+      replies: (replies || []).filter((r) => r.parent_id === t.id).map(withJob)
+    }));
+    const pinned = list.filter((x) => x.pinned_at).sort((a, b) => a.pinned_at < b.pinned_at ? 1 : -1);
+    res.json([...pinned, ...list.filter((x) => !x.pinned_at)]);
+  });
+  app.post("/api/board/posts", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardPostSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const v = parsed.data;
+    if (!canWriteArea(p, v.area)) return res.status(403).json({ message: "You can only post on your own area's board." });
+    if (v.parent_id) {
+      const { data: parent } = await db6().from("board_posts").select("id,area,parent_id").eq("id", v.parent_id).maybeSingle();
+      if (!parent || parent.area !== v.area) return res.status(400).json({ message: "That post no longer exists." });
+      if (parent.parent_id) v.parent_id = parent.parent_id;
+    }
+    const pin = !v.parent_id && !!(v.pin || v.needs_ack);
+    if (pin && !isManagerOf(p, v.area))
+      return res.status(403).json({ message: "Only Area Managers and Admins can pin posts." });
+    const { data, error } = await db6().from("board_posts").insert({
+      area: v.area,
+      body: v.body.trim(),
+      parent_id: v.parent_id || null,
+      job_id: v.job_id || null,
+      author_id: p.id,
+      author_name: nameOf(p),
+      ...pin ? { pinned_at: (/* @__PURE__ */ new Date()).toISOString(), pinned_by_name: nameOf(p), needs_ack: !!v.needs_ack } : {}
+    }).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    const preview = short(v.body.trim() || "Photo", 140);
+    if (pin) {
+      const members = await areaMembers(v.area);
+      await sendPush(
+        members.map((m) => m.id).filter((id) => id !== p.id),
+        {
+          title: v.needs_ack ? `Please read: ${v.area} board` : `Pinned on the ${v.area} board`,
+          body: `${nameOf(p)}: ${preview}`,
+          url: "/#/board",
+          tag: `post-${data.id}`
+        }
+      );
+    } else if (v.parent_id) {
+      const { data: parent } = await db6().from("board_posts").select("author_id").eq("id", v.parent_id).maybeSingle();
+      if (parent?.author_id && parent.author_id !== p.id)
+        await sendPush([parent.author_id], {
+          title: `${nameOf(p)} replied to your post`,
+          body: preview,
+          url: "/#/board",
+          tag: `post-${v.parent_id}`
+        });
+    }
+    res.json(data);
+  });
+  app.post("/api/board/posts/:id/pin", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardPinSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const { data: post } = await db6().from("board_posts").select("*").eq("id", req.params.id).maybeSingle();
+    if (!post || post.deleted_at || post.parent_id) return res.status(404).json({ message: "Post not found." });
+    if (!isManagerOf(p, post.area)) return res.status(403).json({ message: "Only Area Managers and Admins can pin posts." });
+    const patch = parsed.data.pinned ? { pinned_at: (/* @__PURE__ */ new Date()).toISOString(), pinned_by_name: nameOf(p), needs_ack: parsed.data.needs_ack ?? post.needs_ack ?? false } : { pinned_at: null, pinned_by_name: null, needs_ack: false };
+    const { data, error } = await db6().from("board_posts").update(patch).eq("id", post.id).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    if (parsed.data.pinned && !post.pinned_at) {
+      const members = await areaMembers(post.area);
+      await sendPush(
+        members.map((m) => m.id).filter((id) => id !== p.id),
+        {
+          title: patch.needs_ack ? `Please read: ${post.area} board` : `Pinned on the ${post.area} board`,
+          body: `${post.author_name || "Someone"}: ${short(post.body || "Photo", 140)}`,
+          url: "/#/board",
+          tag: `post-${post.id}`
+        }
+      );
+    }
+    res.json(data);
+  });
+  app.post("/api/board/posts/:id/ack", ...guard, async (req, res) => {
+    const p = req.profile;
+    const { data: post } = await db6().from("board_posts").select("id,area,needs_ack,deleted_at").eq("id", req.params.id).maybeSingle();
+    if (!post || post.deleted_at) return res.status(404).json({ message: "Post not found." });
+    if (!canViewArea(p, post.area)) return res.status(403).json({ message: "You can't view that area's board." });
+    const { data: had } = await db6().from("board_post_acks").select("post_id").eq("post_id", post.id).eq("user_id", p.id).maybeSingle();
+    if (!had) {
+      const { error } = await db6().from("board_post_acks").insert({ post_id: post.id, user_id: p.id, user_name: nameOf(p) });
+      if (error) return res.status(400).json({ message: error.message });
+    }
+    res.json({ ok: true });
+  });
+  app.post("/api/board/files", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardFileUploadSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const v = parsed.data;
+    let area = null;
+    let ownerOk = false;
+    if (v.post_id) {
+      const { data: data2 } = await db6().from("board_posts").select("area,author_id").eq("id", v.post_id).maybeSingle();
+      area = data2?.area || null;
+      ownerOk = data2?.author_id === p.id;
+    } else if (v.task_id) {
+      const t = await loadTask(v.task_id);
+      area = t?.area || null;
+      ownerOk = true;
+    } else if (v.comment_id) {
+      const { data: c } = await db6().from("board_task_comments").select("task_id,author_id").eq("id", v.comment_id).maybeSingle();
+      const t = c ? await loadTask(c.task_id) : null;
+      area = t?.area || null;
+      ownerOk = c?.author_id === p.id;
+    }
+    if (!area) return res.status(404).json({ message: "That item no longer exists." });
+    if (!canWriteArea(p, area) || !ownerOk) return res.status(403).json({ message: "You can't add photos here." });
+    const b64 = v.file_base64.replace(/^data:[^,]*,/, "");
+    const size = Buffer.byteLength(b64, "base64");
+    if (size > FILE_MAX_BYTES) return res.status(400).json({ message: `${v.file_name} is too large (max 6 MB).` });
+    const { data, error } = await db6().from("board_files").insert({
+      area,
+      post_id: v.post_id || null,
+      task_id: v.task_id || null,
+      comment_id: v.comment_id || null,
+      file_name: v.file_name,
+      file_mime: v.file_mime,
+      file_size: size,
+      file_base64: b64,
+      uploaded_by: p.id,
+      uploaded_by_name: nameOf(p)
+    }).select("id,file_name,file_mime").single();
+    if (error)
+      return res.status(400).json({
+        message: /board_files/.test(error.message) ? "Photos aren't set up yet \u2014 run the Area Board SQL in Supabase." : error.message
+      });
+    res.status(201).json(data);
+  });
+  app.get("/api/board/files/:id", ...guard, async (req, res) => {
+    const p = req.profile;
+    const { data: f } = await db6().from("board_files").select("area,file_name,file_mime,file_base64").eq("id", req.params.id).maybeSingle();
+    if (!f || !canViewArea(p, f.area)) return res.status(404).json({ message: "Photo not found." });
+    res.setHeader("Content-Type", f.file_mime || "application/octet-stream");
+    res.setHeader("Content-Disposition", `inline; filename="${String(f.file_name).replace(/[^\x20-\x7e]|["\\]/g, "_")}"`);
+    res.setHeader("Cache-Control", "private, max-age=86400");
+    res.send(Buffer.from(f.file_base64, "base64"));
+  });
+  app.delete("/api/board/files/:id", ...guard, async (req, res) => {
+    const p = req.profile;
+    const { data: f } = await db6().from("board_files").select("id,area,uploaded_by").eq("id", req.params.id).maybeSingle();
+    if (!f) return res.status(404).json({ message: "Photo not found." });
+    if (f.uploaded_by !== p.id && !isManagerOf(p, f.area))
+      return res.status(403).json({ message: "Only the person who added it or an Area Manager can remove it." });
+    await db6().from("board_files").delete().eq("id", f.id);
+    res.json({ ok: true });
+  });
+  app.patch("/api/board/posts/:id", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardPostEditSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const { data: post } = await db6().from("board_posts").select("*").eq("id", req.params.id).maybeSingle();
+    if (!post || post.deleted_at) return res.status(404).json({ message: "Post not found." });
+    if (post.author_id !== p.id) return res.status(403).json({ message: "Only the person who wrote it can edit it." });
+    const { data, error } = await db6().from("board_posts").update({ body: parsed.data.body.trim(), edited_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", post.id).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    res.json(data);
+  });
+  app.delete("/api/board/posts/:id", ...guard, async (req, res) => {
+    const p = req.profile;
+    const { data: post } = await db6().from("board_posts").select("*").eq("id", req.params.id).maybeSingle();
+    if (!post || post.deleted_at) return res.status(404).json({ message: "Post not found." });
+    const mine = post.author_id === p.id;
+    const manager = p.role === "admin" || p.role === "area" && p.area === post.area;
+    if (!mine && !manager) return res.status(403).json({ message: "Only the writer or an Area Manager can remove it." });
+    const { error } = await db6().from("board_posts").update({ deleted_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", post.id);
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true });
+  });
+  app.get("/api/board/tasks", ...guard, async (req, res) => {
+    const p = req.profile;
+    const area = pickArea(req);
+    if (!canViewArea(p, area)) return res.status(403).json({ message: "You can't view that area's board." });
+    const view = String(req.query.view || "open");
+    let q = db6().from("board_tasks").select("*").eq("area", area);
+    if (view === "open") q = q.in("status", OPEN_STATUSES);
+    else if (view === "done") q = q.in("status", ["Done", "Cancelled"]);
+    else if (view === "mine") q = q.eq("assignee_id", p.id).in("status", OPEN_STATUSES);
+    if (req.query.job_id) q = q.eq("job_id", String(req.query.job_id));
+    if (req.query.asset_id) q = q.eq("asset_id", String(req.query.asset_id));
+    const { data, error } = await q.order(view === "done" ? "done_at" : "created_at", { ascending: false, nullsFirst: false }).limit(view === "done" || view === "all" ? 200 : 500);
+    if (error) return res.status(400).json({ message: error.message });
+    res.json(await decorate(data || []));
+  });
+  app.get("/api/board/tasks/:id", ...guard, async (req, res) => {
+    const p = req.profile;
+    const task = await loadTask(String(req.params.id));
+    if (!task || !canViewArea(p, task.area)) return res.status(404).json({ message: "Task not found." });
+    const [[full], { data: comments }, { data: activity }] = await Promise.all([
+      decorate([task]),
+      db6().from("board_task_comments").select("*").eq("task_id", task.id).order("created_at"),
+      db6().from("board_activity").select("*").eq("task_id", task.id).order("created_at")
+    ]);
+    const [tf, cf] = await Promise.all([filesFor("task_id", [task.id]), filesFor("comment_id", (comments || []).map((c) => c.id))]);
+    res.json({
+      ...full,
+      files: tf.get(task.id) || [],
+      can_write: canWriteArea(p, task.area),
+      comments: (comments || []).map((c) => ({ ...c, files: cf.get(c.id) || [] })),
+      activity: activity || []
+    });
+  });
+  app.post("/api/board/tasks", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardTaskCreateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const v = parsed.data;
+    if (!canWriteArea(p, v.area)) return res.status(403).json({ message: "You can only add tasks on your own area's board." });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const { data: task, error } = await db6().from("board_tasks").insert({
+      area: v.area,
+      kind: v.kind,
+      title: v.title.trim(),
+      details: v.details?.trim() || null,
+      priority: v.priority,
+      due_date: v.due_date || null,
+      job_id: v.job_id || null,
+      asset_id: v.asset_id || null,
+      assignee_id: v.assignee_id || null,
+      status: v.assignee_id ? "Assigned" : "Open",
+      created_by: p.id,
+      created_by_name: nameOf(p),
+      created_at: now,
+      updated_at: now
+    }).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    await logActivity(task, p, "created", v.kind === "supply" ? "Supply request" : "Task");
+    let alerts = { email: "skipped", sms: "skipped", push: 0 };
+    if (task.assignee_id) {
+      const [person] = await decorate([task]);
+      await logActivity(task, p, "assigned", person.assignee_name);
+      alerts = await alertAssignee(req, task, p);
+    }
+    res.json({ ...task, alerts });
+  });
+  app.patch("/api/board/tasks/:id", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardTaskUpdateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const v = parsed.data;
+    const task = await loadTask(String(req.params.id));
+    if (!task) return res.status(404).json({ message: "Task not found." });
+    if (!canWriteArea(p, task.area)) return res.status(403).json({ message: "This area's board is view-only for you." });
+    if (v.status === "Cancelled") {
+      const manager = p.role === "admin" || p.role === "area" || task.created_by === p.id;
+      if (!manager) return res.status(403).json({ message: "Only the person who created it or an Area Manager can cancel it." });
+    }
+    const patch = { updated_at: (/* @__PURE__ */ new Date()).toISOString() };
+    const notes = [];
+    for (const k of ["title", "details", "priority", "due_date", "job_id", "asset_id"]) {
+      if (v[k] === void 0) continue;
+      const nv = typeof v[k] === "string" ? v[k].trim() || null : v[k] || null;
+      if (k === "title" && !nv) continue;
+      if (nv !== (task[k] || null)) patch[k] = nv;
+    }
+    if (Object.keys(patch).length > 1) notes.push(["edited", null]);
+    let reassigned = false;
+    if (v.assignee_id !== void 0 && (v.assignee_id || null) !== (task.assignee_id || null)) {
+      patch.assignee_id = v.assignee_id || null;
+      reassigned = !!v.assignee_id;
+      if (task.status === "Open" && v.assignee_id && v.status === void 0) patch.status = "Assigned";
+      if (!v.assignee_id && task.status === "Assigned" && v.status === void 0) patch.status = "Open";
+    }
+    if (v.status !== void 0 && v.status !== task.status) patch.status = v.status;
+    if (patch.status === "Done") {
+      patch.done_at = (/* @__PURE__ */ new Date()).toISOString();
+      patch.done_by_name = nameOf(p);
+      patch.done_by = p.id;
+    } else if (patch.status && task.status === "Done") {
+      patch.done_at = null;
+      patch.done_by_name = null;
+      patch.done_by = null;
+    }
+    const { data: updated, error } = await db6().from("board_tasks").update(patch).eq("id", task.id).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    if (patch.assignee_id !== void 0) {
+      const [d] = await decorate([updated]);
+      notes.push([d.assignee_name ? "assigned" : "unassigned", d.assignee_name || null]);
+    }
+    if (patch.status && patch.status !== task.status) notes.push(["status", `${task.status} \u2192 ${patch.status}`]);
+    for (const [a, d] of notes) await logActivity(updated, p, a, d);
+    const alerts = reassigned ? await alertAssignee(req, updated, p) : { email: "skipped", sms: "skipped", push: 0 };
+    if (patch.status === "Done" && task.status !== "Done") alerts.requester = await alertRequesterDone(req, updated, p);
+    res.json({ ...updated, alerts });
+  });
+  app.post("/api/board/tasks/:id/comments", ...guard, async (req, res) => {
+    const p = req.profile;
+    const parsed = boardCommentSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const task = await loadTask(String(req.params.id));
+    if (!task) return res.status(404).json({ message: "Task not found." });
+    if (!canWriteArea(p, task.area)) return res.status(403).json({ message: "This area's board is view-only for you." });
+    const { data, error } = await db6().from("board_task_comments").insert({ task_id: task.id, author_id: p.id, author_name: nameOf(p), body: parsed.data.body.trim() }).select().single();
+    if (error) return res.status(400).json({ message: error.message });
+    await db6().from("board_tasks").update({ updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", task.id);
+    await sendPush(
+      [task.created_by, task.assignee_id].filter((id) => id && id !== p.id),
+      {
+        title: `${nameOf(p)} commented on ${taskNo(task.number)}`,
+        body: short(parsed.data.body.trim() || "Photo", 140),
+        url: `/#/board/task/${task.id}`,
+        tag: `task-${task.id}`
+      }
+    );
+    res.json(data);
+  });
+  const homeAreas = (p) => p.role === "admin" ? AREAS.slice() : p.area ? [p.area] : [];
+  app.get("/api/board/unread", ...guard, async (req, res) => {
+    const p = req.profile;
+    const areas = homeAreas(p);
+    if (!areas.length) return res.json({ total: 0, by_area: {} });
+    const { data: reads } = await db6().from("board_reads").select("area,seen_at").eq("user_id", p.id);
+    const seen = new Map((reads || []).map((r) => [r.area, r.seen_at]));
+    const fallback = new Date(Date.now() - 3 * 24 * 3600 * 1e3).toISOString();
+    const by_area = {};
+    await Promise.all(
+      areas.map(async (a) => {
+        const since = seen.get(a) || fallback;
+        const [{ data: posts }, { data: tasks }] = await Promise.all([
+          db6().from("board_posts").select("id,author_id").eq("area", a).is("deleted_at", null).gt("created_at", since).limit(200),
+          db6().from("board_tasks").select("id,created_by").eq("area", a).gt("created_at", since).limit(200)
+        ]);
+        const count = (posts || []).filter((x) => x.author_id !== p.id).length + (tasks || []).filter((x) => x.created_by !== p.id).length;
+        by_area[a] = { count, seen_at: since };
+      })
+    );
+    const total = Object.values(by_area).reduce((n, x) => n + x.count, 0);
+    res.json({ total, by_area });
+  });
+  app.post("/api/board/seen", ...guard, async (req, res) => {
+    const p = req.profile;
+    const area = String(req.body?.area || "");
+    if (!AREAS.includes(area) || !canViewArea(p, area)) return res.status(400).json({ message: "Unknown area." });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const { data: had } = await db6().from("board_reads").select("user_id").eq("user_id", p.id).eq("area", area).maybeSingle();
+    const { error } = had ? await db6().from("board_reads").update({ seen_at: now }).eq("user_id", p.id).eq("area", area) : await db6().from("board_reads").insert({ user_id: p.id, area, seen_at: now });
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true });
+  });
+  app.get("/api/board/my-tasks", ...guard, async (req, res) => {
+    const p = req.profile;
+    const [{ data: mine }, { data: asked }] = await Promise.all([
+      db6().from("board_tasks").select("*").eq("assignee_id", p.id).in("status", OPEN_STATUSES).order("created_at", { ascending: false }).limit(50),
+      db6().from("board_tasks").select("*").eq("created_by", p.id).in("status", OPEN_STATUSES).order("created_at", { ascending: false }).limit(50)
+    ]);
+    const today = todayCentral();
+    const rank = (t) => t.due_date && t.due_date < today ? 0 : t.priority === "Urgent" ? 1 : t.priority === "High" ? 2 : 3;
+    const sorted = (mine || []).sort((a, b) => rank(a) - rank(b) || String(a.due_date || "9999").localeCompare(String(b.due_date || "9999")));
+    res.json({
+      assigned: await decorate(sorted),
+      requested: await decorate((asked || []).filter((t) => t.assignee_id !== p.id)),
+      today
+    });
+  });
+  app.get("/api/board/push/key", requireAuth, async (_req, res) => {
+    const k = await getPushKeys();
+    if (!k) return res.status(503).json({ message: "Phone alerts aren't set up yet \u2014 run the Area Board SQL in Supabase." });
+    res.json({ key: k.publicKey });
+  });
+  app.post("/api/board/push/subscribe", requireAuth, async (req, res) => {
+    const parsed = boardPushSubscribeSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: "That phone didn't send a valid alert subscription." });
+    const v = parsed.data;
+    const row = {
+      user_id: req.profile.id,
+      endpoint: v.endpoint,
+      p256dh: v.keys.p256dh,
+      auth: v.keys.auth,
+      user_agent: String(req.get("user-agent") || "").slice(0, 300)
+    };
+    const { data: had } = await db6().from("board_push_subscriptions").select("id").eq("endpoint", v.endpoint).maybeSingle();
+    const { error } = had ? await db6().from("board_push_subscriptions").update(row).eq("id", had.id) : await db6().from("board_push_subscriptions").insert(row);
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true });
+  });
+  app.post("/api/board/push/unsubscribe", requireAuth, async (req, res) => {
+    const endpoint = String(req.body?.endpoint || "");
+    if (endpoint) await db6().from("board_push_subscriptions").delete().eq("endpoint", endpoint).eq("user_id", req.profile.id);
+    res.json({ ok: true });
+  });
+  app.post("/api/board/push/test", requireAuth, async (req, res) => {
+    const r = await sendPush([req.profile.id], {
+      title: "DFS Ops test alert",
+      body: "Phone alerts are working. Tap to open the board.",
+      url: "/#/board",
+      tag: "test"
+    });
+    res.json(r);
+  });
+  app.get("/api/board/alert-prefs", requireAuth, async (req, res) => {
+    const { data } = await db6().from("notification_prefs").select("phone,task_email,task_sms").eq("user_id", req.profile.id).maybeSingle();
+    res.json({
+      phone: data?.phone || "",
+      task_email: data?.task_email !== false,
+      task_sms: !!data?.task_sms,
+      email_ready: boardEmailReady(),
+      sms_ready: smsConfigured()
+    });
+  });
+  app.get("/api/board/push/devices", requireAuth, async (req, res) => {
+    const { data } = await db6().from("board_push_subscriptions").select("id,user_agent,created_at").eq("user_id", req.profile.id);
+    res.json({ count: (data || []).length });
+  });
+  app.put("/api/board/alert-prefs", requireAuth, async (req, res) => {
+    const parsed = boardAlertPrefsSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
+    const v = parsed.data;
+    const phone = v.phone ? normalizeUsPhone(v.phone) : null;
+    if (v.phone && !phone) return res.status(400).json({ message: "Enter a 10-digit US cell number." });
+    if (v.task_sms && !phone) return res.status(400).json({ message: "Add your cell number to get texts." });
+    const { data: existing } = await db6().from("notification_prefs").select("user_id,task_sms,sms_consent_at").eq("user_id", req.profile.id).maybeSingle();
+    const row = { user_id: req.profile.id, phone, task_email: v.task_email, task_sms: v.task_sms };
+    if (v.task_sms && !existing?.task_sms) row.sms_consent_at = (/* @__PURE__ */ new Date()).toISOString();
+    const { error } = existing ? await db6().from("notification_prefs").update(row).eq("user_id", req.profile.id) : await db6().from("notification_prefs").insert(row);
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true, phone: phone || "" });
+  });
+  app.post("/api/board/alert-prefs/test", requireAuth, async (req, res) => {
+    const p = req.profile;
+    const { data } = await db6().from("notification_prefs").select("phone,task_sms").eq("user_id", p.id).maybeSingle();
+    const link = `${appUrl(req)}/#/board`;
+    const email = p.email ? await sendBoardEmail(
+      p.email,
+      "DFS Ops test: task alerts are working",
+      `<p style="font-family:Arial,sans-serif">This is a test. When someone assigns you a task on the area board you'll get an email like this.</p><p><a href="${link}">Open the board</a></p>`,
+      `This is a test. When someone assigns you a task on the area board you'll get an email like this.
+${link}`
+    ).catch(() => ({ ok: false, error: "Email failed." })) : { ok: false, error: "Your account has no email." };
+    let sms = { ok: false, error: "Texts are off." };
+    if (data?.task_sms && data?.phone) sms = await sendSms(data.phone, "DFS Ops: test text. Task alerts are working. Reply STOP to opt out.");
+    res.json({ email, sms });
+  });
+}
+
 // server/routes.ts
 async function logRunHours(client3, report, alloc) {
   if (!alloc.length) return;
@@ -4061,13 +4944,13 @@ async function registerRoutes(httpServer, app) {
     try {
       const { data: profile } = await supabaseAdmin.from("profiles").select("id,email,name,active").eq("email", email).single();
       if (!profile || !profile.active) return ok();
-      const appUrl = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
+      const appUrl2 = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
       const token = signInvite({
         uid: profile.id,
         email: profile.email,
         exp: Date.now() + 60 * 60 * 1e3
       });
-      const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+      const link = `${appUrl2.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
       await sendPasswordResetEmail({ to: profile.email, name: profile.name, link });
     } catch (e) {
       console.error("[forgot-password] error", e);
@@ -4165,13 +5048,13 @@ async function registerRoutes(httpServer, app) {
           const well = r.well_name ? ` \xB7 ${r.well_name}` : "";
           const missing = Array.isArray(r.analysis?.missing_fields) ? r.analysis.missing_fields : [];
           if (missing.length) {
-            const short = missing.map((m) => m.split(" (")[0]).join(", ");
+            const short2 = missing.map((m) => m.split(" (")[0]).join(", ");
             items.push({
               id: `missing-${r.id}`,
               type: "missing_data",
               severity: "warning",
               title: `Report missing critical data`,
-              detail: `${r.well_name || who}${r.report_day != null ? ` \xB7 Day ${r.report_day}` : ""} \xB7 ${short}`,
+              detail: `${r.well_name || who}${r.report_day != null ? ` \xB7 Day ${r.report_day}` : ""} \xB7 ${short2}`,
               href: `/daily-reports/${r.id}`,
               ts: r.received_at || r.report_date || null
             });
@@ -4271,6 +5154,11 @@ async function registerRoutes(httpServer, app) {
             ts: v.created_at || null
           });
         }
+      }
+      try {
+        items.push(...await boardNotifications(req.profile));
+      } catch (e) {
+        console.error("[notifications] board", e);
       }
       items.sort((x, y) => {
         if (x.severity !== y.severity) return x.severity === "warning" ? -1 : 1;
@@ -4555,13 +5443,13 @@ async function registerRoutes(httpServer, app) {
       });
       let invited = false;
       if (mode === "invite") {
-        const appUrl = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
+        const appUrl2 = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
         const token = signInvite({
           uid: created.user.id,
           email,
           exp: Date.now() + 7 * 24 * 60 * 60 * 1e3
         });
-        const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+        const link = `${appUrl2.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
         invited = await sendInviteEmail({
           to: email,
           name,
@@ -4590,13 +5478,13 @@ async function registerRoutes(httpServer, app) {
       const { data: profile, error: pErr } = await supabaseAdmin.from("profiles").select("id,email,name").eq("id", req.params.id).single();
       if (pErr || !profile)
         return res.status(404).json({ message: "User not found" });
-      const appUrl = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
+      const appUrl2 = (process.env.APP_URL || "").trim() || `${req.protocol}://${req.get("host")}` || "https://dfs-ops-platform.vercel.app";
       const token = signInvite({
         uid: profile.id,
         email: profile.email,
         exp: Date.now() + 7 * 24 * 60 * 60 * 1e3
       });
-      const link = `${appUrl.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
+      const link = `${appUrl2.replace(/\/$/, "")}/#/set-password?token=${encodeURIComponent(token)}`;
       const sent = await sendInviteEmail({
         to: profile.email,
         name: profile.name,
@@ -6020,7 +6908,7 @@ async function registerRoutes(httpServer, app) {
         if (hi < lo) return 0;
         return Math.round((hi - lo) / MS_DAY) + 1;
       };
-      const esc = (v) => {
+      const esc2 = (v) => {
         if (v === null || v === void 0) return "";
         const s = String(v);
         return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
@@ -6048,18 +6936,18 @@ async function registerRoutes(httpServer, app) {
         const utilPct = daysDeployed === null ? null : Math.round(daysDeployed / windowDays * 1e3) / 10;
         const estRevenue = daysDeployed === null || a.day_rate === null || a.day_rate === void 0 ? null : Math.round(Number(a.day_rate) * daysDeployed * 100) / 100;
         lines.push([
-          esc(a.tag),
-          esc(a.category),
-          esc(a.area),
-          esc(wo ? "Unavailable" : a.status),
-          esc(location),
-          esc(a.day_rate),
-          esc(a.run_hours),
-          esc(daysDeployed),
-          esc(windowDays),
-          esc(utilPct),
-          esc(estRevenue),
-          esc(mCount.get(a.id) || 0)
+          esc2(a.tag),
+          esc2(a.category),
+          esc2(a.area),
+          esc2(wo ? "Unavailable" : a.status),
+          esc2(location),
+          esc2(a.day_rate),
+          esc2(a.run_hours),
+          esc2(daysDeployed),
+          esc2(windowDays),
+          esc2(utilPct),
+          esc2(estRevenue),
+          esc2(mCount.get(a.id) || 0)
         ].join(","));
       }
       const csv = lines.join("\n");
@@ -8615,9 +9503,9 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     }
   );
   const JSA_LIST_COLS = "id, email_message_id, sender_email, sender_name, subject, received_at, jsa_date, area, customer_id, job_id, job_number_raw, attachment_name, attachment_mime, attachment_size, status, signed_off_by, signed_off_by_name, signed_off_at, created_at";
-  const parseJobNumber = (subject) => {
-    if (!subject) return null;
-    const m = subject.match(/\b[A-Za-z]{1,4}[-\s]?\d{2,6}\b/);
+  const parseJobNumber = (subject2) => {
+    if (!subject2) return null;
+    const m = subject2.match(/\b[A-Za-z]{1,4}[-\s]?\d{2,6}\b/);
     return m ? m[0].replace(/\s+/g, "-").toUpperCase() : null;
   };
   const readJsaRigNameFromWorkbook = (base64, mime) => {
@@ -8693,13 +9581,13 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
   const findJobInText = (text, jobs) => {
     if (!text) return null;
     const hay = " " + normJobId(String(text).replace(/\.(xlsx?|xlsm|xlsb|docx?|pdf)\b/gi, " ").replace(/_+/g, " ")) + " ";
-    const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const esc2 = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     let best = [];
     let bestLen = 0;
     for (const j of jobs) {
       const n = normJobId(j.job_number);
       if (n.replace(/\s/g, "").length < 4) continue;
-      const re = new RegExp("(^|[^A-Z0-9])" + esc(n) + "(?=[^A-Z0-9]|$)");
+      const re = new RegExp("(^|[^A-Z0-9])" + esc2(n) + "(?=[^A-Z0-9]|$)");
       if (!re.test(hay)) continue;
       if (n.length > bestLen) {
         best = [j];
@@ -10568,7 +11456,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
           }
         }
       }
-      const esc = (v) => {
+      const esc2 = (v) => {
         const s = v == null ? "" : String(v);
         return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
       };
@@ -10589,14 +11477,14 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         const dr = standby.get(j.id)?.active ? standby.get(j.id).rate : manualBill.has(j.id) ? fallback : currentRateByJob.get(j.id) ?? fallback;
         lines.push(
           [
-            esc(j.job_number),
-            esc(j.area),
-            esc(j.customer_id ? custName.get(j.customer_id) ?? "" : ""),
-            esc(dr ?? ""),
-            esc(reportDaysByJob.get(j.id) ?? 0),
-            esc(acc.revenue ?? ""),
-            esc(standby.get(j.id)?.days ?? 0),
-            esc(standby.get(j.id)?.total ?? 0)
+            esc2(j.job_number),
+            esc2(j.area),
+            esc2(j.customer_id ? custName.get(j.customer_id) ?? "" : ""),
+            esc2(dr ?? ""),
+            esc2(reportDaysByJob.get(j.id) ?? 0),
+            esc2(acc.revenue ?? ""),
+            esc2(standby.get(j.id)?.days ?? 0),
+            esc2(standby.get(j.id)?.total ?? 0)
           ].join(",")
         );
       }
@@ -10791,6 +11679,7 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
     }
   );
   registerRentalRoutes(app);
+  registerBoardRoutes(app);
   registerForecastRoutes(app);
   return httpServer;
 }

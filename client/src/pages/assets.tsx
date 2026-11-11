@@ -1,3 +1,4 @@
+import BoardTasksPanel from "@/components/BoardTasksPanel";
 import { useState, useEffect } from "react";
 import { RefurbishmentHistory } from "@/components/RefurbishmentHistory";
 import { AssetMoveLog } from "@/components/AssetMoveLog";
@@ -1001,6 +1002,13 @@ function AssetDetailDialog({
               <div className="text-sm">
                 <div className="text-xs text-muted-foreground mb-0.5">Description</div>
                 <div className="text-muted-foreground">{data.description}</div>
+              </div>
+            )}
+
+            {/* Area Board tasks / supply requests linked to this asset */}
+            {profile && profile.role !== "field" && (
+              <div className="border-t pt-3">
+                <BoardTasksPanel area={data.area} assetId={data.id} label={data.tag} compact />
               </div>
             )}
 

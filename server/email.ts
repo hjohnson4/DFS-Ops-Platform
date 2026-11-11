@@ -132,7 +132,7 @@ export function gmailConfigured(): boolean {
 
 export type SendResult = { ok: boolean; via: "gmail" | "resend" | "none"; error?: string };
 
-async function deliverChangeRequest(to: string, subject: string, html: string, text: string): Promise<SendResult> {
+async function deliverChangeRequest(to: string, subject: string, html: string, text: string, fromName = "DFS Daily Reports"): Promise<SendResult> {
   if (gmailConfigured()) {
     try {
       if (!gmailTransport) {
@@ -144,7 +144,7 @@ async function deliverChangeRequest(to: string, subject: string, html: string, t
         });
       }
       await gmailTransport.sendMail({
-        from: `DFS Daily Reports <${GMAIL_USER}>`,
+        from: `${fromName} <${GMAIL_USER}>`,
         to,
         subject,
         html,
@@ -261,4 +261,13 @@ export async function sendNotificationEmails(
         );
     }
   }
+}
+
+
+/** Area board task alerts (Gmail first, then Resend). */
+export async function sendBoardEmail(to: string, subject: string, html: string, text: string): Promise<SendResult> {
+  return deliverChangeRequest(to, subject, html, text, "DFS Ops Board");
+}
+export function boardEmailReady(): boolean {
+  return gmailConfigured() || !!RESEND_API_KEY;
 }

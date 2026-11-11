@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Bell, Wrench, ClipboardCheck, Mail, AlertTriangle, PenLine, FileWarning, Receipt } from "lucide-react";
+import { Bell, Wrench, ClipboardCheck, Mail, AlertTriangle, PenLine, FileWarning, Receipt, ListChecks } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -16,7 +16,8 @@ type NotificationType =
   | "new_report"
   | "changes_requested"
   | "missing_data"
-  | "service_charge";
+  | "service_charge"
+  | "board_task";
 
 interface Notification {
   id: string;
@@ -42,6 +43,7 @@ const ICONS: Record<NotificationType, typeof Wrench> = {
   changes_requested: PenLine,
   missing_data: FileWarning,
   service_charge: Receipt,
+  board_task: ListChecks,
 };
 
 function relTime(ts: string | null): string {
@@ -134,10 +136,10 @@ export default function NotificationBell() {
                       <Icon className="h-4 w-4" />
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-medium">
+                      <span className="block line-clamp-2 text-sm font-medium">
                         {n.title}
                       </span>
-                      <span className="block truncate text-xs text-muted-foreground">
+                      <span className="block line-clamp-2 text-xs text-muted-foreground">
                         {n.detail}
                       </span>
                     </span>

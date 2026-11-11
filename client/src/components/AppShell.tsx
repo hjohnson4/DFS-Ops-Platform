@@ -7,6 +7,7 @@ import logoUrl from "@/assets/dfs-logo.png";
 import PdfPreviewModal from "@/components/PdfPreviewModal";
 import NotificationBell from "@/components/NotificationBell";
 import UpdateBanner from "@/components/UpdateBanner";
+import { useBoardUnread } from "@/lib/boardUnread";
 import {
   LayoutDashboard,
   Building2,
@@ -25,6 +26,7 @@ import {
   PanelLeftOpen,
   Menu,
   X,
+  MessagesSquare,
 } from "lucide-react";
 
 const SIDEBAR_PREF_KEY = "dfsops.sidebar.collapsed";
@@ -73,6 +75,7 @@ const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, roles: ALL },
   { href: "/revenue", label: "Revenue", icon: TrendingUp, roles: ["admin", "area"] },
   { href: "/jobs", label: "Field Ops & Jobs", icon: Briefcase, roles: ALL },
+  { href: "/board", label: "Area Board", icon: MessagesSquare, roles: NON_FIELD, match: ["/board"] },
   { href: "/daily-reports", label: "Daily Reports", icon: Mails, roles: ALL },
   // Safety / JSAs is one nav area with several sub-tabs. `match` marks it active
   // for every Safety sub-tab route.
@@ -101,6 +104,7 @@ function Logo({ collapsed }: { collapsed: boolean }) {
 
 export default function AppShell({ children }: { children: ReactNode }) {
   const { profile, logout } = useAuth();
+  const boardUnread = useBoardUnread(profile?.role);
   const [loc] = useLocation();
   // Sidebar collapse state — seeded from the saved preference when storage is
   // available (Vercel), otherwise defaults to expanded (sandbox preview).
@@ -123,6 +127,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
   if (!profile) return null;
 
   const items = NAV.filter((n) => n.roles.includes(profile.role));
+  const boardNew = boardUnread;
 
   return (
     <div className="min-h-screen flex bg-background text-foreground">
@@ -202,7 +207,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
             return (
               <Link key={n.href} href={n.href}>
                 <a
-                  className={`flex items-center gap-2.5 rounded-md py-2 text-sm font-medium transition-colors px-3 ${
+                  className={`relative flex items-center gap-2.5 rounded-md py-2 text-sm font-medium transition-colors px-3 ${
                     collapsed ? "md:justify-center md:px-0" : ""
                   } ${
                     active
@@ -216,6 +221,17 @@ export default function AppShell({ children }: { children: ReactNode }) {
                   {/* Label always in the DOM; hidden only on the collapsed
                       desktop rail so the mobile drawer always shows text. */}
                   <span className={collapsed ? "md:hidden" : ""}>{n.label}</span>
+                  {n.href === "/board" && boardNew > 0 && (
+                    <span
+                      className={`ml-auto min-w-5 h-5 px-1.5 rounded-full bg-red-600 text-white text-[11px] font-semibold leading-5 text-center tabular-nums ${
+                        collapsed ? "md:absolute md:ml-0 md:translate-x-3 md:-translate-y-2.5 md:min-w-4 md:h-4 md:leading-4 md:text-[10px]" : ""
+                      }`}
+                      data-testid="badge-board-new"
+                      aria-label={`${boardNew} new on the board`}
+                    >
+                      {boardNew > 99 ? "99+" : boardNew}
+                    </span>
+                  )}
                 </a>
               </Link>
             );
@@ -253,14 +269,33 @@ export default function AppShell({ children }: { children: ReactNode }) {
           <Button
             variant="ghost"
             size="icon"
-            className="md:hidden h-9 w-9"
+            className="md:hidden h-9 w-9 relative"
             onClick={() => setMobileOpen(true)}
             aria-label="Open menu"
             data-testid="button-open-drawer"
           >
             <Menu className="h-5 w-5" />
+            {boardNew > 0 && <span className="absolute top-1.5 right-1.5 h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-background" aria-hidden="true" />}
           </Button>
-          <NotificationBell />
+          <div className="flex items-center gap-1">
+            {NON_FIELD.includes(profile.role) && (
+              <Link href="/board">
+                <a
+                  className="md:hidden relative inline-flex h-9 w-9 items-center justify-center rounded-md hover:bg-accent"
+                  aria-label={boardNew > 0 ? `Area Board, ${boardNew} new` : "Area Board"}
+                  data-testid="link-topbar-board"
+                >
+                  <MessagesSquare className="h-5 w-5" />
+                  {boardNew > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 rounded-full bg-red-600 text-white text-[10px] font-semibold leading-[18px] text-center tabular-nums">
+                      {boardNew > 99 ? "99+" : boardNew}
+                    </span>
+                  )}
+                </a>
+              </Link>
+            )}
+            <NotificationBell />
+          </div>
         </div>
         <UpdateBanner />
         {children}

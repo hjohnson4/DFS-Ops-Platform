@@ -1,3 +1,4 @@
+import MyTasksCard from "@/components/MyTasksCard";
 import { useAuth } from "@/lib/auth";
 import { RentalBadge } from "@/components/Rental";
 import { ROLE_LABELS, AREAS, tracksRunHours, isLiveJobStatus, assetStatusLabel } from "@shared/schema";
@@ -672,6 +673,9 @@ function ManagerDashboard({ profile }: { profile: Profile }) {
           ))}
         </div>
       )}
+
+      {/* Area Board: tasks assigned to me */}
+      <MyTasksCard />
 
       {/* Headline operational metrics */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">

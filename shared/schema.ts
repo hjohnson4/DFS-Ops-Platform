@@ -2863,3 +2863,135 @@ export const ticketPreviewDraftSchema = z.object({
     .optional(),
 });
 export type TicketPreviewDraft = Omit<z.infer<typeof ticketPreviewDraftSchema>, "well_name">;
+
+// ---- Area board (feed + tasks + supply requests) -------------------------
+export const BOARD_TASK_STATUSES = ["Open", "Assigned", "In progress", "Done", "Cancelled"] as const;
+export type BoardTaskStatus = (typeof BOARD_TASK_STATUSES)[number];
+export const BOARD_PRIORITIES = ["Low", "Normal", "High", "Urgent"] as const;
+export type BoardPriority = (typeof BOARD_PRIORITIES)[number];
+const optUuid = z.string().uuid().nullable().optional();
+const boardOptDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Pick a date").nullable().optional();
+export const boardPostSchema = z
+  .object({
+    area: z.enum(AREAS),
+    body: z.string().trim().max(4000, "Keep posts under 4,000 characters"),
+    parent_id: optUuid,
+    job_id: optUuid,
+    // Photos are uploaded right after the post is created.
+    has_photos: z.boolean().optional(),
+    // Area Managers / Admins only: pin to the top, ask everyone to tap "Got it".
+    pin: z.boolean().optional(),
+    needs_ack: z.boolean().optional(),
+  })
+  .refine((v) => v.body.length > 0 || v.has_photos, { message: "Write something first", path: ["body"] });
+export const boardPinSchema = z.object({
+  pinned: z.boolean(),
+  needs_ack: z.boolean().optional(),
+});
+// One photo, already shrunk on the phone. Exactly one of post/task/comment.
+export const boardFileUploadSchema = z
+  .object({
+    post_id: optUuid,
+    task_id: optUuid,
+    comment_id: optUuid,
+    file_name: z.string().trim().min(1).max(200),
+    file_mime: z.string().max(100).regex(/^image\//, "Only photos can be added"),
+    file_base64: z.string().min(10),
+  })
+  .refine((v) => [v.post_id, v.task_id, v.comment_id].filter(Boolean).length === 1, { message: "Attach the photo to one item" });
+export const boardPushSubscribeSchema = z.object({
+  endpoint: z.string().url().max(2000),
+  keys: z.object({ p256dh: z.string().min(10).max(500), auth: z.string().min(4).max(200) }),
+});
+export interface BoardFile {
+  id: string;
+  file_name: string;
+  file_mime: string | null;
+}
+export const boardPostEditSchema = z.object({
+  body: z.string().trim().min(1, "Write something first").max(4000, "Keep posts under 4,000 characters"),
+});
+export const boardTaskCreateSchema = z.object({
+  area: z.enum(AREAS),
+  kind: z.enum(["task", "supply"]).default("task"),
+  title: z.string().trim().min(1, "Give it a short title").max(160, "Keep the title under 160 characters"),
+  details: z.string().max(4000).nullable().optional(),
+  priority: z.enum(BOARD_PRIORITIES).default("Normal"),
+  due_date: boardOptDate,
+  job_id: optUuid,
+  asset_id: optUuid,
+  assignee_id: optUuid,
+});
+export const boardTaskUpdateSchema = z.object({
+  title: z.string().trim().min(1).max(160).optional(),
+  details: z.string().max(4000).nullable().optional(),
+  priority: z.enum(BOARD_PRIORITIES).optional(),
+  due_date: boardOptDate,
+  job_id: optUuid,
+  asset_id: optUuid,
+  assignee_id: optUuid,
+  status: z.enum(BOARD_TASK_STATUSES).optional(),
+});
+export const boardCommentSchema = z
+  .object({
+    body: z.string().trim().max(4000),
+    has_photos: z.boolean().optional(),
+  })
+  .refine((v) => v.body.length > 0 || v.has_photos, { message: "Write something first", path: ["body"] });
+export const boardAlertPrefsSchema = z.object({
+  phone: z.string().max(30).nullable().optional(),
+  task_email: z.boolean(),
+  task_sms: z.boolean(),
+});
+export interface BoardTask {
+  id: string;
+  number: number;
+  area: Area;
+  kind: "task" | "supply";
+  title: string;
+  details: string | null;
+  priority: BoardPriority;
+  due_date: string | null;
+  job_id: string | null;
+  asset_id: string | null;
+  status: BoardTaskStatus;
+  assignee_id: string | null;
+  assignee_name: string | null;
+  job_number: string | null;
+  asset_tag: string | null;
+  comment_count: number;
+  photo_count?: number;
+  files?: BoardFile[];
+  created_by: string | null;
+  created_by_name: string | null;
+  done_at: string | null;
+  done_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface BoardPost {
+  id: string;
+  area: Area;
+  author_id: string | null;
+  author_name: string | null;
+  body: string;
+  parent_id: string | null;
+  job_id: string | null;
+  job_number: string | null;
+  created_at: string;
+  edited_at: string | null;
+  pinned_at?: string | null;
+  pinned_by_name?: string | null;
+  needs_ack?: boolean;
+  files?: BoardFile[];
+  // For "Got it" posts: how many people in the area have acknowledged.
+  ack?: {
+    done: number;
+    total: number;
+    mine: boolean;
+    acked: { name: string; at: string }[];
+    // Only filled in for Area Managers / Admins / the writer.
+    missing: string[] | null;
+  } | null;
+  replies?: BoardPost[];
+}

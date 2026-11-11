@@ -1,3 +1,4 @@
+import BoardTasksPanel from "@/components/BoardTasksPanel";
 import { useState, useEffect, useRef } from "react";
 import { RentalBadge } from "@/components/Rental";
 import { MudPlantBilling, DailyCentrifugeHours } from "@/components/MudPlantCards";
@@ -1180,6 +1181,13 @@ export default function JobDetailPage() {
 
       {/* Service charges (billed to the customer) — any job; supervisors,
           area managers and admins only */}
+      {/* Area Board tasks / supply requests linked to this job */}
+      {profile && profile.role !== "field" && (
+        <div className="mt-6">
+          <BoardTasksPanel area={job.area} jobId={job.id} label={job.job_number || "this job"} />
+        </div>
+      )}
+
       {profile && profile.role !== "field" && <ServicesSection job={job} />}
 
       {/* Pads & wells — current well inferred from daily reports */}
