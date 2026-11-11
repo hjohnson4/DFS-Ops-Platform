@@ -13,7 +13,8 @@ import { supabaseAnon, supabaseAdmin } from "./supabase";
 import { requireAuth, requireRole } from "./auth";
 import { sendBoardEmail, boardEmailReady } from "./email";
 import { sendSms, smsConfigured, normalizeUsPhone } from "./sms";
-import { sendPush, getPushKeys } from "./push";
+import { sendPush, notifyPush, getPushKeys } from "./push";
+import { ALERT_KINDS, alertOn } from "@shared/alerts";
 import { todayCentral } from "./manualBilling";
 import {
   AREAS,
@@ -143,6 +144,10 @@ async function decorate(tasks: any[]) {
   }));
 }
 
+// Task emails and texts are paused for now — phone alerts cover it. Set to
+// true to bring them back (the Settings switches would need re-adding too).
+const TASK_EMAIL_SMS = false;
+
 /** Email + text the new assignee. Never throws; returns what happened. */
 async function alertAssignee(req: Request, task: any, actor: Who) {
   const out = { email: "skipped" as string, sms: "skipped" as string, push: 0 };
@@ -162,7 +167,7 @@ async function alertAssignee(req: Request, task: any, actor: Who) {
   const due = task.due_date ? ` · due ${fmtDate(task.due_date)}` : "";
   const by = nameOf(actor);
 
-  const wantEmail = prefs?.task_email !== false;
+  const wantEmail = TASK_EMAIL_SMS && prefs?.task_email !== false;
   if (wantEmail && person.email) {
     const subject = `${what} ${taskNo(task.number)} assigned to you: ${task.title}`;
     const rows = [
@@ -187,13 +192,13 @@ ${task.details ? `<p style="white-space:pre-wrap;margin:0 0 12px">${esc(task.det
   }
 
   const phone = normalizeUsPhone(prefs?.phone);
-  if (prefs?.task_sms && phone && smsConfigured()) {
+  if (TASK_EMAIL_SMS && prefs?.task_sms && phone && smsConfigured()) {
     const body = `DFS Ops: ${by} assigned you ${taskNo(task.number)} - ${task.title}${due}. ${link} Reply STOP to opt out.`;
     const r = await sendSms(phone, body);
     out.sms = r.ok ? "sent" : "failed";
   }
 
-  const pr = await sendPush([task.assignee_id], {
+  const pr = await notifyPush("board", [task.assignee_id], {
     title: `${what} ${taskNo(task.number)} for you`,
     body: `${short(task.title)}${due} · from ${by}`,
     url: `/#/board/task/${task.id}`,
@@ -215,7 +220,7 @@ async function alertRequesterDone(req: Request, task: any, actor: Who) {
   const what = task.kind === "supply" ? "Supply request" : "Task";
   const by = nameOf(actor);
   const link = `${appUrl(req)}/#/board/task/${task.id}`;
-  if (prefs?.task_email !== false && person.email) {
+  if (TASK_EMAIL_SMS && prefs?.task_email !== false && person.email) {
     const subject = `Done: ${what} ${taskNo(task.number)} ${task.title}`;
     const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937">
 <p>${esc(by)} marked your ${what.toLowerCase()} done on the ${esc(task.area)} board.</p>
@@ -226,7 +231,7 @@ async function alertRequesterDone(req: Request, task: any, actor: Who) {
     const r = await sendBoardEmail(person.email, subject, html, text).catch(() => ({ ok: false }) as any);
     out.email = r.ok ? "sent" : "failed";
   }
-  const pr = await sendPush([task.created_by], {
+  const pr = await notifyPush("board", [task.created_by], {
     title: `Done: ${what} ${taskNo(task.number)}`,
     body: `${short(task.title)} · marked done by ${by}`,
     url: `/#/board/task/${task.id}`,
@@ -412,7 +417,7 @@ export function registerBoardRoutes(app: Express) {
     const preview = short(v.body.trim() || "Photo", 140);
     if (pin) {
       const members = await areaMembers(v.area);
-      await sendPush(
+      await notifyPush("board", 
         members.map((m) => m.id).filter((id) => id !== p.id),
         {
           title: v.needs_ack ? `Please read: ${v.area} board` : `Pinned on the ${v.area} board`,
@@ -424,7 +429,7 @@ export function registerBoardRoutes(app: Express) {
     } else if (v.parent_id) {
       const { data: parent } = await db().from("board_posts").select("author_id").eq("id", v.parent_id).maybeSingle();
       if (parent?.author_id && parent.author_id !== p.id)
-        await sendPush([parent.author_id], {
+        await notifyPush("board", [parent.author_id], {
           title: `${nameOf(p)} replied to your post`,
           body: preview,
           url: "/#/board",
@@ -449,7 +454,7 @@ export function registerBoardRoutes(app: Express) {
     if (error) return res.status(400).json({ message: error.message });
     if (parsed.data.pinned && !post.pinned_at) {
       const members = await areaMembers(post.area);
-      await sendPush(
+      await notifyPush("board", 
         members.map((m) => m.id).filter((id) => id !== p.id),
         {
           title: patch.needs_ack ? `Please read: ${post.area} board` : `Pinned on the ${post.area} board`,
@@ -725,7 +730,7 @@ export function registerBoardRoutes(app: Express) {
     if (error) return res.status(400).json({ message: error.message });
     await db().from("board_tasks").update({ updated_at: new Date().toISOString() }).eq("id", task.id);
     // Let the requester and the assignee know (not the person commenting).
-    await sendPush(
+    await notifyPush("board", 
       [task.created_by, task.assignee_id].filter((id) => id && id !== p.id),
       {
         title: `${nameOf(p)} commented on ${taskNo(task.number)}`,
@@ -851,6 +856,47 @@ export function registerBoardRoutes(app: Express) {
       email_ready: boardEmailReady(),
       sms_ready: smsConfigured(),
     });
+  });
+
+  // Which kinds of phone alerts I want (Settings → Task alerts).
+  app.get("/api/alert-prefs/push", requireAuth, async (req: Request, res: Response) => {
+    const role = req.profile!.role;
+    const { data, error } = await db()
+      .from("notification_prefs")
+      .select("push_prefs")
+      .eq("user_id", req.profile!.id)
+      .maybeSingle();
+    const saved = ((data as any)?.push_prefs || {}) as Record<string, boolean>;
+    res.json({
+      ready: !error || !/push_prefs/.test(error.message),
+      kinds: ALERT_KINDS.filter((k) => k.roles.includes(role as any)).map((k) => ({
+        key: k.key,
+        label: k.label,
+        desc: k.desc,
+        on: alertOn(k.key, role, saved),
+      })),
+    });
+  });
+
+  app.put("/api/alert-prefs/push", requireAuth, async (req: Request, res: Response) => {
+    const key = String(req.body?.key || "");
+    const on = req.body?.on;
+    const def = ALERT_KINDS.find((k) => k.key === key);
+    if (!def || typeof on !== "boolean" || !def.roles.includes(req.profile!.role as any))
+      return res.status(400).json({ message: "Unknown alert." });
+    const { data: existing, error: rErr } = await db()
+      .from("notification_prefs")
+      .select("user_id,push_prefs")
+      .eq("user_id", req.profile!.id)
+      .maybeSingle();
+    if (rErr && /push_prefs/.test(rErr.message))
+      return res.status(400).json({ message: "Run the Phone alert choices setup SQL in Supabase first." });
+    const push_prefs = { ...(((existing as any)?.push_prefs as any) || {}), [key]: on };
+    const { error } = existing
+      ? await db().from("notification_prefs").update({ push_prefs }).eq("user_id", req.profile!.id)
+      : await db().from("notification_prefs").insert({ user_id: req.profile!.id, push_prefs });
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true, key, on });
   });
 
   app.get("/api/board/push/devices", requireAuth, async (req: Request, res: Response) => {

@@ -12,6 +12,7 @@
 import type { Express, Request, Response } from "express";
 import { supabaseAnon, supabaseAdmin } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf } from "./auth";
+import { notifyPush, peopleFor } from "./push";
 import {
   createFieldTicketSchema,
   updateFieldTicketSchema,
@@ -437,7 +438,14 @@ export function registerFieldTicketRoutes(app: Express) {
       })
       .eq("id", loaded.ticket.id);
     if (error) return res.status(400).json({ message: ticketDbError(error.message) });
-    res.json(await loadOne(loaded.ticket.id));
+    const closed: any = await loadOne(loaded.ticket.id);
+    await notifyPush("ticket_approval", (await peopleFor(null, ["admin"])).filter((id) => id !== req.profile!.id), {
+      title: `Field ticket ready for approval${closed?.ticket_number ? `: #${closed.ticket_number}` : ""}`,
+      body: `${req.profile!.name} closed the ticket${closed?.job_number ? ` for ${closed.job_number}` : ""}${closed?.well_name ? ` (${closed.well_name})` : ""}.`,
+      url: "/#/field-tickets",
+      tag: `ticket-${loaded.ticket.id}`,
+    });
+    res.json(closed);
   });
 
   // Approve (Admin only) a closed ticket.

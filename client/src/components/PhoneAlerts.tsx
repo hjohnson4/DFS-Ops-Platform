@@ -72,8 +72,8 @@ export function PhoneAlertsSection() {
         <div className="min-w-0">
           <div className="font-medium">Phone alerts</div>
           <p className="text-sm text-muted-foreground">
-            A pop-up on this phone's lock screen when a task is assigned to you, your request is done, someone comments on your task or replies to your post,
-            or a manager pins a post. Free — no text plan needed. Turn it on separately on each phone or computer you use.
+            A pop-up on this phone's lock screen for the alerts you switch on below. Free — no text plan needed. Turn it on
+            separately on each phone or computer you use.
           </p>
         </div>
       </div>

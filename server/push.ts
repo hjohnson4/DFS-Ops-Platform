@@ -10,6 +10,7 @@
 // they're used instead.
 import webpush from "web-push";
 import { supabaseAnon, supabaseAdmin } from "./supabase";
+import { alertOn, type AlertKind } from "@shared/alerts";
 
 const db = () => supabaseAdmin || supabaseAnon;
 
@@ -90,4 +91,67 @@ export async function sendPush(userIds: (string | null | undefined)[], msg: Push
     /* alerts are best-effort */
   }
   return out;
+}
+
+// ---- Alert choices (Settings → Task alerts) -------------------------------
+
+/** Send only to the people who have this kind of alert switched on. */
+export async function notifyPush(
+  kind: AlertKind,
+  userIds: (string | null | undefined)[],
+  msg: PushMessage,
+): Promise<{ sent: number; failed: number }> {
+  const ids = Array.from(new Set(userIds.filter(Boolean))) as string[];
+  if (!ids.length) return { sent: 0, failed: 0 };
+  try {
+    // Only people with a phone signed up need checking.
+    const { data: subs } = await db().from("board_push_subscriptions").select("user_id").in("user_id", ids);
+    const withPhone = Array.from(new Set((subs || []).map((s: any) => s.user_id)));
+    if (!withPhone.length) return { sent: 0, failed: 0 };
+    const [{ data: profs }, { data: prefs }] = await Promise.all([
+      db().from("profiles").select("id,role,active").in("id", withPhone),
+      db().from("notification_prefs").select("user_id,push_prefs").in("user_id", withPhone),
+    ]);
+    const pm = new Map((prefs || []).map((r: any) => [r.user_id, r.push_prefs]));
+    const keep = (profs || [])
+      .filter((p: any) => p.active !== false && alertOn(kind, p.role, pm.get(p.id) as any))
+      .map((p: any) => p.id);
+    return await sendPush(keep, msg);
+  } catch {
+    return { sent: 0, failed: 0 };
+  }
+}
+
+/**
+ * Active people in an area with one of these roles. Admins (whole company)
+ * are included when "admin" is listed. Area null = admins only.
+ */
+export async function peopleFor(area: string | null | undefined, roles: string[]): Promise<string[]> {
+  try {
+    const out = new Set<string>();
+    const local = roles.filter((r) => r !== "admin");
+    if (area && local.length) {
+      const { data } = await db().from("profiles").select("id").eq("area", area).eq("active", true).in("role", local);
+      for (const p of data || []) out.add((p as any).id);
+    }
+    if (roles.includes("admin")) {
+      const { data } = await db().from("profiles").select("id").eq("role", "admin").eq("active", true);
+      for (const p of data || []) out.add((p as any).id);
+    }
+    return Array.from(out);
+  } catch {
+    return [];
+  }
+}
+
+/** Profile ids for a list of email addresses (case-insensitive). */
+export async function peopleByEmail(emails: (string | null | undefined)[]): Promise<string[]> {
+  const list = Array.from(new Set(emails.filter(Boolean).map((e) => String(e).trim().toLowerCase())));
+  if (!list.length) return [];
+  try {
+    const { data } = await db().from("profiles").select("id,email").eq("active", true);
+    return (data || []).filter((p: any) => list.includes(String(p.email || "").toLowerCase())).map((p: any) => p.id);
+  } catch {
+    return [];
+  }
 }

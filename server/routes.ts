@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import { supabaseAnon, supabaseAdmin, hasAdmin, freshAnonClient } from "./supabase";
 import { requireAuth, requireRole, areaScopeOf, jobScopeOf } from "./auth";
 import { sendNotificationEmails, sendDailyReportChanges, emailConfigured, gmailConfigured, sendInviteEmail, sendPasswordResetEmail } from "./email";
+import { notifyPush, peopleFor, peopleByEmail } from "./push";
 import {
   parseDailyReportWorkbook,
   parseAllCompletedDays,
@@ -3631,6 +3632,13 @@ export async function registerRoutes(
         .select()
         .single();
       if (error) return res.status(400).json({ message: error.message });
+      if (parsed.data.action !== "sign_off" && data?.submitted_by && data.submitted_by !== req.profile!.id)
+        await notifyPush("changes_requested", [data.submitted_by], {
+          title: "Changes requested on your JSA",
+          body: `${req.profile!.name}: ${parsed.data.change_notes || "Please review and fix your JSA."}`.slice(0, 180),
+          url: "/#/jsas",
+          tag: `jsa-${data.id}`,
+        });
       res.json(data);
     },
   );
@@ -5027,6 +5035,16 @@ export async function registerRoutes(
       sendNotificationEmails("needs_signoff", { report, asset }).catch((e) =>
         console.error("[email] needs_signoff", e),
       );
+      await notifyPush(
+        "service_signoff",
+        (await peopleFor(asset.area, ["area", "admin"])).filter((id) => id !== req.profile!.id),
+        {
+          title: `Service report needs sign-off: ${asset.tag || "asset"}`,
+          body: `${req.profile!.name} filed a service report${asset.area ? ` in ${asset.area}` : ""}.`,
+          url: "/#/service",
+          tag: `svc-${report.id}`,
+        },
+      );
 
       res.status(201).json({
         ...flattenServiceForm({ ...report, asset, supervisor: { name: req.profile!.name } }),
@@ -5656,6 +5674,13 @@ export async function registerRoutes(
         asset: report.asset,
         signerName: req.profile!.name,
       }).catch((e) => console.error("[email] signed", e));
+      if (report.supervisor_id && report.supervisor_id !== req.profile!.id)
+        await notifyPush("service_signed", [report.supervisor_id], {
+          title: `Signed off: ${report.asset?.tag || "service report"}`,
+          body: `${req.profile!.name} signed off your service report.`,
+          url: "/#/service",
+          tag: `svc-${report.id}`,
+        });
 
       res.json({ ok: true });
     },
@@ -5701,6 +5726,49 @@ export async function registerRoutes(
   // ---- Daily reports ------------------------------------------------------
   // Ingest: called by the scheduled Gmail-analysis task, NOT a logged-in user.
   // Authenticated with a shared secret header (x-ingest-token).
+  // Phone alerts for emailed daily reports. Skipped for old report dates so a
+  // catch-up of past emails doesn't flood phones.
+  async function dailyReportAlert(
+    r: any,
+    what: "new" | "corrected" | "correction",
+    missing: boolean,
+  ) {
+    try {
+      if (r?.report_date) {
+        const d = new Date(String(r.report_date).slice(0, 10) + "T12:00:00Z").getTime();
+        if (Number.isFinite(d) && Date.now() - d > 3.5 * 86400000) return;
+      }
+      const name = `${r?.well_name || "Unknown well"}${r?.report_day != null ? ` Day ${r.report_day}` : ""}`;
+      const from = r?.sender_name || r?.sender_email || "the crew";
+      const url = `/#/daily-reports/${r?.id}`;
+      const tag = `dr-${r?.id}`;
+      if (what === "correction") {
+        await notifyPush("report_action", await peopleFor(r?.area, ["area", "admin"]), {
+          title: `Correction waiting: ${name}`,
+          body: `${from} sent a corrected workbook for a signed-off report. Approve or discard it.`,
+          url,
+          tag,
+        });
+        return;
+      }
+      await notifyPush("daily_report", await peopleFor(r?.area, ["area", "super", "admin"]), {
+        title: `${what === "corrected" ? "Corrected report" : "Daily report"}: ${name}`,
+        body: `From ${from}${r?.area ? ` · ${r.area}` : ""}${missing ? " · missing data, check before signing off" : ""}`,
+        url,
+        tag,
+      });
+      if (what === "new" && !r?.job_id)
+        await notifyPush("report_action", await peopleFor(r?.area, ["area", "admin"]), {
+          title: `Needs a job match: ${name}`,
+          body: `This report didn't match a job. Pick the job so it counts.`,
+          url,
+          tag: `${tag}-match`,
+        });
+    } catch (e) {
+      console.error("[push] daily report", e);
+    }
+  }
+
   app.post("/api/daily-reports/ingest", async (req: Request, res: Response) => {
     if (!INGEST_TOKEN)
       return res.status(503).json({ message: "Ingest not configured (set INGEST_TOKEN)." });
@@ -5886,6 +5954,7 @@ export async function registerRoutes(
             detail: `A corrected workbook arrived for this signed-off report and is waiting for an Admin or Area Manager to apply it.${changeText}`,
           },
         ]);
+        await dailyReportAlert(c, "correction", false);
         return res.status(201).json({ ...c, correction_pending: true });
       }
 
@@ -5929,6 +5998,7 @@ export async function registerRoutes(
               `data: ${missingFields.join("; ")}. Check with the crew before signing off.`,
           });
         }
+        await dailyReportAlert(upd, "corrected", missingFields.length > 0);
         return res.status(201).json({ ...upd, corrected: true });
       }
     }
@@ -5970,6 +6040,7 @@ export async function registerRoutes(
           `check with the crew before signing off.`,
       });
     }
+    await dailyReportAlert(data, "new", missingFields.length > 0);
     res.status(201).json(data);
   });
 
@@ -7071,6 +7142,16 @@ export async function registerRoutes(
           ? `Suggested changes emailed to ${report.sender_email}`
           : `Suggested changes recorded, but the email to ${report.sender_email} was NOT sent (${sent.error ?? "unknown error"})`,
       });
+      await notifyPush(
+        "changes_requested",
+        (await peopleByEmail([report.sender_email])).filter((id) => id !== reviewer.id),
+        {
+          title: `Changes requested: ${report.well_name || "daily report"}${report.report_day != null ? ` Day ${report.report_day}` : ""}`,
+          body: `${reviewer.name}: ${fullNotes.replace(/\s+/g, " ")}`.slice(0, 180),
+          url: `/#/daily-reports/${report.id}`,
+          tag: `dr-${report.id}`,
+        },
+      );
       res.json({ ...data, email_sent: sent.ok, email_error: sent.ok ? null : sent.error ?? null });
     },
   );
@@ -8990,6 +9071,16 @@ export async function registerRoutes(
         .select()
         .single();
       if (error) return res.status(400).json({ message: error.message });
+      await notifyPush(
+        "service_charge",
+        (await peopleFor(job.area, ["area", "super", "admin"])).filter((id) => id !== req.profile!.id),
+        {
+          title: `Service charge: ${(job as any).job_number || "job"}`,
+          body: `${req.profile!.name} logged ${parsed.data.service_type}${parsed.data.cost != null ? ` ($${Number(parsed.data.cost).toLocaleString("en-US")})` : ""}.`,
+          url: `/#/jobs/${job.id}`,
+          tag: `svc-charge-${data.id}`,
+        },
+      );
       res.status(201).json(data);
     },
   );

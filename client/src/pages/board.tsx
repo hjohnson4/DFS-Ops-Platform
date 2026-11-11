@@ -111,6 +111,7 @@ function alertToast(toast: ReturnType<typeof useToast>["toast"], alerts: any, wh
   const bits: string[] = [];
   if (alerts.email === "sent") bits.push("email");
   if (alerts.sms === "sent") bits.push("text");
+  if (alerts.push > 0) bits.push("phone alert");
   if (bits.length) toast({ title: `${who} was notified by ${bits.join(" and ")}` });
   else if (alerts.email === "failed" || alerts.sms === "failed")
     toast({ title: "Saved, but the alert didn't send", description: `${who} will still see it in their bell.`, variant: "destructive" });
@@ -905,7 +906,7 @@ export function NewTaskDialog({
             </Select>
             {assignee !== NONE && (
               <p className="text-xs text-muted-foreground mt-1">
-                They'll get a bell alert, an email{meta.sms_ready ? ", a text if they turned texts on," : ""} and a phone alert if they turned those on.
+                They'll get a bell alert, and a phone alert if they turned those on.
               </p>
             )}
           </div>

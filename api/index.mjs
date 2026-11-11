@@ -293,6 +293,183 @@ function boardEmailReady() {
   return gmailConfigured() || !!RESEND_API_KEY;
 }
 
+// server/push.ts
+import webpush from "web-push";
+
+// shared/alerts.ts
+var ALERT_KINDS = [
+  {
+    key: "board",
+    label: "Area Board",
+    desc: "A task is assigned to you, your request is done, someone comments on your task or replies to your post, or a manager pins a post.",
+    roles: ["admin", "area", "super"],
+    on: ["admin", "area", "super"]
+  },
+  {
+    key: "daily_report",
+    label: "Daily report received",
+    desc: "A new or corrected daily report comes in for your area. Says if it's missing data.",
+    roles: ["admin", "area", "super"],
+    on: ["area"]
+  },
+  {
+    key: "report_action",
+    label: "Report needs a job match or correction approved",
+    desc: "A report didn't match a job, or a corrected workbook arrived for a report that was already signed off.",
+    roles: ["admin", "area"],
+    on: ["admin", "area"]
+  },
+  {
+    key: "changes_requested",
+    label: "Changes requested on my report or JSA",
+    desc: "A reviewer sent your daily report or JSA back to fix.",
+    roles: ["admin", "area", "super"],
+    on: ["admin", "area", "super"]
+  },
+  {
+    key: "service_signoff",
+    label: "Service report needs my sign-off",
+    desc: "A supervisor filed a service report in your area.",
+    roles: ["admin", "area"],
+    on: ["area"]
+  },
+  {
+    key: "service_signed",
+    label: "My service report was signed off",
+    desc: "An Area Manager signed off a service report you filed.",
+    roles: ["area", "super"],
+    on: ["super"]
+  },
+  {
+    key: "service_charge",
+    label: "Service charge logged",
+    desc: "Someone logs a service charge on a job in your area.",
+    roles: ["admin", "area", "super"],
+    on: []
+  },
+  {
+    key: "ticket_approval",
+    label: "Field ticket ready for approval",
+    desc: "A field ticket is closed and waiting for an Admin to approve it.",
+    roles: ["admin"],
+    on: ["admin"]
+  }
+];
+function alertOn(kind, role, saved) {
+  const def = ALERT_KINDS.find((k) => k.key === kind);
+  if (!def || !def.roles.includes(role)) return false;
+  const v = saved?.[kind];
+  return typeof v === "boolean" ? v : def.on.includes(role);
+}
+
+// server/push.ts
+var db = () => supabaseAdmin || supabaseAnon;
+var cached = null;
+function subject() {
+  const s = (process.env.VAPID_SUBJECT || "").trim();
+  if (s) return s;
+  const g2 = (process.env.GMAIL_USER || "").trim();
+  return `mailto:${g2 || "dfsdailyreports@gmail.com"}`;
+}
+async function getPushKeys() {
+  if (cached) return cached;
+  const envPub = (process.env.VAPID_PUBLIC_KEY || "").trim();
+  const envPriv = (process.env.VAPID_PRIVATE_KEY || "").trim();
+  if (envPub && envPriv) return cached = { publicKey: envPub, privateKey: envPriv, subject: subject() };
+  const read3 = async () => {
+    const { data, error } = await db().from("board_push_config").select("public_key,private_key").eq("id", 1).maybeSingle();
+    if (error) return { err: error.message };
+    return { row: data };
+  };
+  let r = await read3();
+  if ("err" in r) return null;
+  if (!r.row) {
+    const k = webpush.generateVAPIDKeys();
+    await db().from("board_push_config").insert({ id: 1, public_key: k.publicKey, private_key: k.privateKey });
+    r = await read3();
+    if ("err" in r || !r.row) return null;
+  }
+  return cached = { publicKey: r.row.public_key, privateKey: r.row.private_key, subject: subject() };
+}
+async function sendPush(userIds, msg) {
+  const ids = Array.from(new Set(userIds.filter(Boolean)));
+  const out = { sent: 0, failed: 0 };
+  if (!ids.length) return out;
+  try {
+    const keys = await getPushKeys();
+    if (!keys) return out;
+    const { data: subs } = await db().from("board_push_subscriptions").select("id,user_id,endpoint,p256dh,auth").in("user_id", ids);
+    if (!subs?.length) return out;
+    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: msg.url || "/#/board", tag: msg.tag });
+    await Promise.all(
+      subs.map(async (s) => {
+        try {
+          await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, {
+            TTL: 60 * 60 * 24,
+            urgency: "high",
+            timeout: 8e3,
+            vapidDetails: { subject: keys.subject, publicKey: keys.publicKey, privateKey: keys.privateKey }
+          });
+          out.sent++;
+          await db().from("board_push_subscriptions").update({ last_ok_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", s.id);
+        } catch (e) {
+          out.failed++;
+          if (e?.statusCode === 404 || e?.statusCode === 410) {
+            await db().from("board_push_subscriptions").delete().eq("id", s.id);
+          }
+        }
+      })
+    );
+  } catch {
+  }
+  return out;
+}
+async function notifyPush(kind, userIds, msg) {
+  const ids = Array.from(new Set(userIds.filter(Boolean)));
+  if (!ids.length) return { sent: 0, failed: 0 };
+  try {
+    const { data: subs } = await db().from("board_push_subscriptions").select("user_id").in("user_id", ids);
+    const withPhone = Array.from(new Set((subs || []).map((s) => s.user_id)));
+    if (!withPhone.length) return { sent: 0, failed: 0 };
+    const [{ data: profs }, { data: prefs }] = await Promise.all([
+      db().from("profiles").select("id,role,active").in("id", withPhone),
+      db().from("notification_prefs").select("user_id,push_prefs").in("user_id", withPhone)
+    ]);
+    const pm = new Map((prefs || []).map((r) => [r.user_id, r.push_prefs]));
+    const keep = (profs || []).filter((p) => p.active !== false && alertOn(kind, p.role, pm.get(p.id))).map((p) => p.id);
+    return await sendPush(keep, msg);
+  } catch {
+    return { sent: 0, failed: 0 };
+  }
+}
+async function peopleFor(area, roles) {
+  try {
+    const out = /* @__PURE__ */ new Set();
+    const local = roles.filter((r) => r !== "admin");
+    if (area && local.length) {
+      const { data } = await db().from("profiles").select("id").eq("area", area).eq("active", true).in("role", local);
+      for (const p of data || []) out.add(p.id);
+    }
+    if (roles.includes("admin")) {
+      const { data } = await db().from("profiles").select("id").eq("role", "admin").eq("active", true);
+      for (const p of data || []) out.add(p.id);
+    }
+    return Array.from(out);
+  } catch {
+    return [];
+  }
+}
+async function peopleByEmail(emails) {
+  const list = Array.from(new Set(emails.filter(Boolean).map((e) => String(e).trim().toLowerCase())));
+  if (!list.length) return [];
+  try {
+    const { data } = await db().from("profiles").select("id,email").eq("active", true);
+    return (data || []).filter((p) => list.includes(String(p.email || "").toLowerCase())).map((p) => p.id);
+  } catch {
+    return [];
+  }
+}
+
 // server/excelDailyReport.ts
 import * as XLSX from "xlsx";
 var KPI_CELLS_V1 = [
@@ -1632,7 +1809,7 @@ async function withOpenWorkOrders(assets) {
 }
 
 // server/forecast.ts
-var db = () => supabaseAdmin || supabaseAnon;
+var db2 = () => supabaseAdmin || supabaseAnon;
 var LIVE_STATUSES = ["Active", "Rig Move"];
 var BID_DOC_MAX_BYTES = 3 * 1024 * 1024;
 var BID_DOC_COLS = "id, forecast_job_id, job_id, area, file_name, file_mime, file_size, uploaded_by_name, created_at";
@@ -1663,7 +1840,7 @@ function forecastWindow(today = chicagoToday()) {
 var missingTable = (msg) => !!msg && /forecast_jobs|forecast_units|est_release_on|bid_documents/.test(msg) && /does not exist|schema cache|column/i.test(msg);
 var SETUP_MSG = "The Forecast tables aren't set up yet. Run the Forecast SQL in the Supabase SQL editor, then refresh.";
 async function loadForecast(id) {
-  const { data } = await db().from("forecast_jobs").select("*").eq("id", id).maybeSingle();
+  const { data } = await db2().from("forecast_jobs").select("*").eq("id", id).maybeSingle();
   return data;
 }
 function canTouchArea(req, area) {
@@ -1679,7 +1856,7 @@ function registerForecastRoutes(app) {
     async (req, res) => {
       const scope = areaScopeOf(req.profile);
       const win = forecastWindow();
-      const client3 = db();
+      const client3 = db2();
       let jq = client3.from("jobs").select("id, job_number, area, status, started_on, est_release_on, projected_day_rate, customer:customers(name)").is("archived_at", null).in("status", LIVE_STATUSES);
       if (scope) jq = jq.eq("area", scope);
       const { data: jRows, error: jErr } = await jq;
@@ -1748,11 +1925,11 @@ function registerForecastRoutes(app) {
     async (req, res) => {
       const parsed = setProjectedRateSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
-      const { data: job } = await db().from("jobs").select("id, area").eq("id", String(req.params.id)).maybeSingle();
+      const { data: job } = await db2().from("jobs").select("id, area").eq("id", String(req.params.id)).maybeSingle();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (!canTouchArea(req, job.area))
         return res.status(403).json({ message: "You can only edit jobs in your area" });
-      const { error } = await db().from("jobs").update({ projected_day_rate: parsed.data.projected_day_rate }).eq("id", job.id);
+      const { error } = await db2().from("jobs").update({ projected_day_rate: parsed.data.projected_day_rate }).eq("id", job.id);
       if (error) {
         if (/projected_day_rate/.test(error.message))
           return res.status(409).json({ message: PROJ_SETUP_MSG, setup_required: true });
@@ -1770,7 +1947,7 @@ function registerForecastRoutes(app) {
       const qArea = String(req.query.area || "");
       const area = scope || (AREAS.includes(qArea) ? qArea : null);
       const win = forecastWindow();
-      const client3 = db();
+      const client3 = db2();
       let fq = client3.from("forecast_jobs").select("*, units:forecast_units(asset_id)").in("stage", ["Bid", "Likely", "Awarded", "Converted"]).lte("start_on", win.window_end).order("start_on", { ascending: true });
       if (area) fq = fq.eq("area", area);
       const { data: fRows, error: fErr } = await fq;
@@ -1850,7 +2027,7 @@ function registerForecastRoutes(app) {
       const v = parsed.data;
       if (!canTouchArea(req, v.area))
         return res.status(403).json({ message: "You can only plan work in your area" });
-      const { data, error } = await db().from("forecast_jobs").insert({
+      const { data, error } = await db2().from("forecast_jobs").insert({
         rig: v.rig,
         customer_id: v.customer_id ?? null,
         customer_name: v.customer_name ?? null,
@@ -1893,9 +2070,9 @@ function registerForecastRoutes(app) {
       const end = "end_on" in patch ? patch.end_on : f.end_on;
       if (end && end < start)
         return res.status(400).json({ message: "End date must be on or after the start date" });
-      const { data, error } = await db().from("forecast_jobs").update(patch).eq("id", f.id).select().single();
+      const { data, error } = await db2().from("forecast_jobs").update(patch).eq("id", f.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
-      if (patch.stage === "Lost") await db().from("forecast_units").delete().eq("forecast_job_id", f.id);
+      if (patch.stage === "Lost") await db2().from("forecast_units").delete().eq("forecast_job_id", f.id);
       res.json(data);
     }
   );
@@ -1908,8 +2085,8 @@ function registerForecastRoutes(app) {
       if (!f) return res.status(404).json({ message: "Forecast job not found" });
       if (!canTouchArea(req, f.area))
         return res.status(403).json({ message: "You can only plan work in your area" });
-      await db().from("bid_documents").delete().eq("forecast_job_id", f.id).is("job_id", null);
-      const { error } = await db().from("forecast_jobs").delete().eq("id", f.id);
+      await db2().from("bid_documents").delete().eq("forecast_job_id", f.id).is("job_id", null);
+      const { error } = await db2().from("forecast_jobs").delete().eq("id", f.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -1927,7 +2104,7 @@ function registerForecastRoutes(app) {
         return res.status(403).json({ message: "You can only plan work in your area" });
       const ids = Array.from(new Set(parsed.data.asset_ids));
       if (ids.length) {
-        const { data: rows } = await db().from("assets").select("id, area, category").in("id", ids);
+        const { data: rows } = await db2().from("assets").select("id, area, category").in("id", ids);
         const ok = (rows || []).filter(
           (a) => FORECAST_CATEGORIES.includes(a.category)
         );
@@ -1937,7 +2114,7 @@ function registerForecastRoutes(app) {
         if (scope && ok.some((a) => a.area !== scope))
           return res.status(403).json({ message: "You can only plan units from your area" });
       }
-      const client3 = db();
+      const client3 = db2();
       const { error: delErr } = await client3.from("forecast_units").delete().eq("forecast_job_id", f.id);
       if (delErr) return res.status(400).json({ message: delErr.message });
       if (ids.length) {
@@ -1960,7 +2137,7 @@ function registerForecastRoutes(app) {
         return res.status(403).json({ message: "You can only plan work in your area" });
       if (f.stage !== "Awarded")
         return res.status(400).json({ message: "Only an Awarded forecast can be converted to a job" });
-      const client3 = db();
+      const client3 = db2();
       const { data: job, error } = await client3.from("jobs").insert({
         job_number: parsed.data.job_number,
         area: f.area,
@@ -2011,7 +2188,7 @@ function registerForecastRoutes(app) {
     async (req, res) => {
       const f = await loadForecast(String(req.params.id));
       if (!f || !canTouchArea(req, f.area)) return res.status(404).json({ message: "Forecast job not found" });
-      const { data, error } = await db().from("bid_documents").select(BID_DOC_COLS).eq("forecast_job_id", f.id).order("created_at", { ascending: false });
+      const { data, error } = await db2().from("bid_documents").select(BID_DOC_COLS).eq("forecast_job_id", f.id).order("created_at", { ascending: false });
       if (error) {
         if (missingTable(error.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
         return res.status(500).json({ message: error.message });
@@ -2037,7 +2214,7 @@ function registerForecastRoutes(app) {
       if (bytes.length > BID_DOC_MAX_BYTES)
         return res.status(400).json({ message: "This PDF is over 3 MB. Save a smaller copy or split it, then try again." });
       const name = parsed.data.file_name.trim().replace(/[\\/]/g, "_") || "bid.pdf";
-      const { data, error } = await db().from("bid_documents").insert({
+      const { data, error } = await db2().from("bid_documents").insert({
         forecast_job_id: f.id,
         job_id: f.converted_job_id ?? null,
         area: f.area,
@@ -2060,7 +2237,7 @@ function registerForecastRoutes(app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const { data, error } = await db().from("bid_documents").select(BID_DOC_COLS).eq("job_id", String(req.params.id)).order("created_at", { ascending: false });
+      const { data, error } = await db2().from("bid_documents").select(BID_DOC_COLS).eq("job_id", String(req.params.id)).order("created_at", { ascending: false });
       if (error) {
         if (missingTable(error.message)) return res.json([]);
         return res.status(500).json({ message: error.message });
@@ -2073,7 +2250,7 @@ function registerForecastRoutes(app) {
     requireAuth,
     requireRole("admin", "area", "super"),
     async (req, res) => {
-      const { data } = await db().from("bid_documents").select("area, file_name, file_mime, file_base64").eq("id", String(req.params.id)).maybeSingle();
+      const { data } = await db2().from("bid_documents").select("area, file_name, file_mime, file_base64").eq("id", String(req.params.id)).maybeSingle();
       if (!data || !canSeeDoc(req, data)) return res.status(404).json({ message: "File not found" });
       const d = data;
       res.setHeader("Content-Type", d.file_mime || "application/pdf");
@@ -2086,9 +2263,9 @@ function registerForecastRoutes(app) {
     requireAuth,
     requireRole("admin", "area"),
     async (req, res) => {
-      const { data } = await db().from("bid_documents").select("id, area").eq("id", String(req.params.id)).maybeSingle();
+      const { data } = await db2().from("bid_documents").select("id, area").eq("id", String(req.params.id)).maybeSingle();
       if (!data || !canSeeDoc(req, data)) return res.status(404).json({ message: "File not found" });
-      const { error } = await db().from("bid_documents").delete().eq("id", data.id);
+      const { error } = await db2().from("bid_documents").delete().eq("id", data.id);
       if (error) return res.status(400).json({ message: error.message });
       res.status(204).end();
     }
@@ -2100,11 +2277,11 @@ function registerForecastRoutes(app) {
     async (req, res) => {
       const parsed = setJobReleaseSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
-      const { data: job } = await db().from("jobs").select("id, area").eq("id", String(req.params.id)).maybeSingle();
+      const { data: job } = await db2().from("jobs").select("id, area").eq("id", String(req.params.id)).maybeSingle();
       if (!job) return res.status(404).json({ message: "Job not found" });
       if (!canTouchArea(req, job.area))
         return res.status(403).json({ message: "You can only plan work in your area" });
-      const { error } = await db().from("jobs").update({ est_release_on: parsed.data.est_release_on }).eq("id", String(req.params.id));
+      const { error } = await db2().from("jobs").update({ est_release_on: parsed.data.est_release_on }).eq("id", String(req.params.id));
       if (error) {
         if (missingTable(error.message)) return res.status(409).json({ message: SETUP_MSG, setup_required: true });
         return res.status(400).json({ message: error.message });
@@ -2115,7 +2292,7 @@ function registerForecastRoutes(app) {
 }
 
 // server/fieldTickets.ts
-var db2 = () => supabaseAdmin || supabaseAnon;
+var db3 = () => supabaseAdmin || supabaseAnon;
 var MANAGE = ["admin", "area"];
 var VIEW = ["admin", "area", "super"];
 var TICKET_SELECT = "*, job:jobs!field_tickets_job_id_fkey(job_number,area,status,customer_id,customer:customers(name,primary_contact,phone,email)), creator:profiles!field_tickets_created_by_fkey(name)";
@@ -2184,7 +2361,7 @@ async function namesFor(ids) {
   const out = /* @__PURE__ */ new Map();
   const uniq = Array.from(new Set(ids.filter(Boolean)));
   if (uniq.length === 0) return out;
-  const { data } = await db2().from("profiles").select("id,name").in("id", uniq);
+  const { data } = await db3().from("profiles").select("id,name").in("id", uniq);
   (data || []).forEach((p) => out.set(p.id, p.name));
   return out;
 }
@@ -2220,17 +2397,17 @@ async function flatten(rows) {
   });
 }
 async function loadOne(id) {
-  const { data } = await db2().from("field_tickets").select(TICKET_SELECT).eq("id", id).single();
+  const { data } = await db3().from("field_tickets").select(TICKET_SELECT).eq("id", id).single();
   if (!data) return null;
   return (await flatten([data]))[0];
 }
 async function loadForWrite(req, res, needLive) {
-  const { data: ticket } = await db2().from("field_tickets").select("*").eq("id", req.params.id).single();
+  const { data: ticket } = await db3().from("field_tickets").select("*").eq("id", req.params.id).single();
   if (!ticket) {
     res.status(404).json({ message: "Field ticket not found" });
     return null;
   }
-  const { data: job } = await db2().from("jobs").select("id,area,status").eq("id", ticket.job_id).single();
+  const { data: job } = await db3().from("jobs").select("id,area,status").eq("id", ticket.job_id).single();
   if (!job) {
     res.status(404).json({ message: "Job not found" });
     return null;
@@ -2249,7 +2426,7 @@ async function loadForWrite(req, res, needLive) {
 }
 async function insertTicket(row, explicitNumber) {
   for (let attempt = 0; attempt < 6; attempt++) {
-    const { data, error } = await db2().from("field_tickets").insert(row).select().single();
+    const { data, error } = await db3().from("field_tickets").insert(row).select().single();
     if (!error) return { data, error: null };
     const dup = /field_tickets_ticket_number_key|duplicate key/.test(error.message);
     if (!dup || explicitNumber != null) return { data: null, error };
@@ -2259,7 +2436,7 @@ async function insertTicket(row, explicitNumber) {
 function registerFieldTicketRoutes(app) {
   app.get("/api/field-tickets", requireAuth, requireRole(...VIEW), async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    const { data, error } = await db2().from("field_tickets").select(TICKET_SELECT).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
+    const { data, error } = await db3().from("field_tickets").select(TICKET_SELECT).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
     if (error) return res.status(500).json({ message: error.message });
     let rows = await flatten(data || []);
     if (scope) rows = rows.filter((r) => r.area === scope);
@@ -2269,9 +2446,9 @@ function registerFieldTicketRoutes(app) {
     res.json(rows);
   });
   app.get("/api/field-tickets/next-number", requireAuth, requireRole(...MANAGE), async (_req, res) => {
-    const { data, error } = await db2().rpc("field_ticket_next_number");
+    const { data, error } = await db3().rpc("field_ticket_next_number");
     if (error) {
-      const { data: top } = await db2().from("field_tickets").select("ticket_number").order("ticket_number", { ascending: false }).limit(1);
+      const { data: top } = await db3().from("field_tickets").select("ticket_number").order("ticket_number", { ascending: false }).limit(1);
       return res.json({ next: (top?.[0]?.ticket_number ?? 0) + 1, configurable: false });
     }
     res.json({ next: Number(data), configurable: true });
@@ -2280,27 +2457,27 @@ function registerFieldTicketRoutes(app) {
     const n = Number(req.body?.next);
     if (!Number.isInteger(n) || n < 1)
       return res.status(400).json({ message: "Enter a whole number of 1 or more." });
-    const { data, error } = await db2().rpc("set_field_ticket_next_number", { n });
+    const { data, error } = await db3().rpc("set_field_ticket_next_number", { n });
     if (error) return res.status(400).json({ message: ticketDbError(error.message) });
     res.json({ next: Number(data) });
   });
   app.get("/api/jobs/:id/field-tickets", requireAuth, requireRole(...VIEW), async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    const { data: job } = await db2().from("jobs").select("area").eq("id", req.params.id).single();
+    const { data: job } = await db3().from("jobs").select("area").eq("id", req.params.id).single();
     if (!job || scope && job.area !== scope)
       return res.status(404).json({ message: "Job not found" });
-    const { data, error } = await db2().from("field_tickets").select(TICKET_SELECT).eq("job_id", req.params.id).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
+    const { data, error } = await db3().from("field_tickets").select(TICKET_SELECT).eq("job_id", req.params.id).order("ticket_date", { ascending: false }).order("ticket_number", { ascending: false });
     if (error) return res.status(500).json({ message: error.message });
     res.json(await flatten(data || []));
   });
   app.get("/api/jobs/:id/ticket-coverage", requireAuth, requireRole(...VIEW), async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    const { data: job } = await db2().from("jobs").select("id,area,day_rate").eq("id", req.params.id).single();
+    const { data: job } = await db3().from("jobs").select("id,area,day_rate").eq("id", req.params.id).single();
     if (!job || scope && job.area !== scope)
       return res.status(404).json({ message: "Job not found" });
     const [{ data: reports, error: rErr }, { data: tickets, error: tErr }] = await Promise.all([
-      db2().from("daily_reports").select("report_date,well_name,kpis,status").eq("job_id", job.id).eq("status", "Signed off"),
-      db2().from("field_tickets").select("ticket_number,well_name,line_items").eq("job_id", job.id)
+      db3().from("daily_reports").select("report_date,well_name,kpis,status").eq("job_id", job.id).eq("status", "Signed off"),
+      db3().from("field_tickets").select("ticket_number,well_name,line_items").eq("job_id", job.id)
     ]);
     if (rErr) return res.status(500).json({ message: rErr.message });
     if (tErr) return res.status(500).json({ message: tErr.message });
@@ -2342,7 +2519,7 @@ function registerFieldTicketRoutes(app) {
     const parsed = createFieldTicketSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
     const p = parsed.data;
-    const { data: job } = await db2().from("jobs").select("area,status").eq("id", req.params.id).single();
+    const { data: job } = await db3().from("jobs").select("area,status").eq("id", req.params.id).single();
     if (!job) return res.status(404).json({ message: "Job not found" });
     if (req.profile.role !== "admin" && job.area !== req.profile.area)
       return res.status(403).json({ message: "Outside your area" });
@@ -2420,7 +2597,7 @@ function registerFieldTicketRoutes(app) {
     if (p.amount !== void 0) patch.amount = p.amount ?? null;
     else if (lines) patch.amount = lines.length ? round2(lines.reduce((s, l) => s + l.total, 0)) : null;
     patch.history = [...loaded.history, entry(req, "Saved")];
-    const { error } = await db2().from("field_tickets").update(patch).eq("id", t.id);
+    const { error } = await db3().from("field_tickets").update(patch).eq("id", t.id);
     if (error) return res.status(400).json({ message: ticketDbError(error.message) });
     res.json(await loadOne(t.id));
   });
@@ -2434,21 +2611,28 @@ function registerFieldTicketRoutes(app) {
       line_items: loaded.ticket.line_items
     });
     if (problems.length) return res.status(400).json({ message: problems.join(" "), problems });
-    const { error } = await db2().from("field_tickets").update({
+    const { error } = await db3().from("field_tickets").update({
       status: "closed",
       closed_at: (/* @__PURE__ */ new Date()).toISOString(),
       closed_by: req.profile.id,
       history: [...loaded.history, entry(req, "Closed", clean(req.body?.note))]
     }).eq("id", loaded.ticket.id);
     if (error) return res.status(400).json({ message: ticketDbError(error.message) });
-    res.json(await loadOne(loaded.ticket.id));
+    const closed = await loadOne(loaded.ticket.id);
+    await notifyPush("ticket_approval", (await peopleFor(null, ["admin"])).filter((id) => id !== req.profile.id), {
+      title: `Field ticket ready for approval${closed?.ticket_number ? `: #${closed.ticket_number}` : ""}`,
+      body: `${req.profile.name} closed the ticket${closed?.job_number ? ` for ${closed.job_number}` : ""}${closed?.well_name ? ` (${closed.well_name})` : ""}.`,
+      url: "/#/field-tickets",
+      tag: `ticket-${loaded.ticket.id}`
+    });
+    res.json(closed);
   });
   app.post("/api/field-tickets/:id/approve", requireAuth, requireRole("admin"), async (req, res) => {
     const loaded = await loadForWrite(req, res, false);
     if (!loaded) return;
     if (loaded.status !== "closed")
       return res.status(400).json({ message: "Close the ticket before approving it." });
-    const { error } = await db2().from("field_tickets").update({
+    const { error } = await db3().from("field_tickets").update({
       status: "approved",
       approved_at: (/* @__PURE__ */ new Date()).toISOString(),
       approved_by: req.profile.id,
@@ -2463,7 +2647,7 @@ function registerFieldTicketRoutes(app) {
     if (loaded.status === "open") return res.status(400).json({ message: "This ticket is already open." });
     if (loaded.status === "approved" && req.profile.role !== "admin")
       return res.status(403).json({ message: "Only an Admin can reopen an approved ticket." });
-    const { error } = await db2().from("field_tickets").update({
+    const { error } = await db3().from("field_tickets").update({
       status: "open",
       closed_at: null,
       closed_by: null,
@@ -2482,7 +2666,7 @@ function registerFieldTicketRoutes(app) {
     if (!loaded) return;
     if (loaded.status === "approved" && req.profile.role !== "admin")
       return res.status(403).json({ message: "Only an Admin can delete an approved ticket." });
-    const { error } = await db2().from("field_tickets").delete().eq("id", loaded.ticket.id);
+    const { error } = await db3().from("field_tickets").delete().eq("id", loaded.ticket.id);
     if (error) return res.status(400).json({ message: error.message });
     res.status(204).end();
   });
@@ -2854,7 +3038,7 @@ async function standbyByJob(jobIds) {
 }
 
 // server/ticketPreview.ts
-var db3 = () => supabaseAdmin || supabaseAnon;
+var db4 = () => supabaseAdmin || supabaseAnon;
 var MANAGE2 = ["admin", "area"];
 var VIEW2 = ["admin", "area", "super"];
 var DRAFT_SQL_HINT = 'Saving ticket preview edits needs a one-time database update: run "Ticket preview setup.sql" in the Supabase SQL Editor.';
@@ -2877,7 +3061,7 @@ var range = (a, b) => a === b ? md(a) : `${md(a)} \u2013 ${md(b)}`;
 var STATUS_RANK = { "Signed off": 3, "Pending Review": 2, "Correction pending": 2, "Changes requested": 1 };
 async function loadJob(req, res) {
   const scope = areaScopeOf(req.profile);
-  const { data: job } = await db3().from("jobs").select("id,job_number,area,status,crewing,well_name,customer:customers(name)").eq("id", req.params.id).single();
+  const { data: job } = await db4().from("jobs").select("id,job_number,area,status,crewing,well_name,customer:customers(name)").eq("id", req.params.id).single();
   if (!job || scope && job.area !== scope) {
     res.status(404).json({ message: "Job not found" });
     return null;
@@ -2885,7 +3069,7 @@ async function loadJob(req, res) {
   return job;
 }
 async function loadDraft(jobId, wk) {
-  const { data, error } = await db3().from("ticket_preview_drafts").select("*").eq("job_id", jobId).eq("well_key", wk).maybeSingle();
+  const { data, error } = await db4().from("ticket_preview_drafts").select("*").eq("job_id", jobId).eq("well_key", wk).maybeSingle();
   if (error) return { draft: null, ready: !missingTable2(error.message), by: null, at: null };
   if (!data) return { draft: null, ready: true, by: null, at: null };
   return {
@@ -2901,9 +3085,9 @@ async function loadDraft(jobId, wk) {
 }
 async function buildTicketPreview(job, wellParam, canEdit, costOverride, standbyOverride) {
   const [{ data: reports }, { data: tickets }, { data: services }, standbyMap] = await Promise.all([
-    db3().from("daily_reports").select("id,report_day,report_date,well_name,status,kpis,well_context,analysis,created_at").eq("job_id", job.id),
-    db3().from("field_tickets").select("ticket_number,ticket_date,well_name,county,po_afe,ordered_by,line_items,created_at").eq("job_id", job.id).order("created_at", { ascending: false }),
-    db3().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: true }),
+    db4().from("daily_reports").select("id,report_day,report_date,well_name,status,kpis,well_context,analysis,created_at").eq("job_id", job.id),
+    db4().from("field_tickets").select("ticket_number,ticket_date,well_name,county,po_afe,ordered_by,line_items,created_at").eq("job_id", job.id).order("created_at", { ascending: false }),
+    db4().from("job_services").select("*").eq("job_id", job.id).order("service_date", { ascending: true }),
     standbyByJob([job.id])
   ]);
   const standbyByDay = standbyOverride ?? standbyMap.get(job.id)?.byDay ?? /* @__PURE__ */ new Map();
@@ -3304,7 +3488,7 @@ function registerTicketPreviewRoutes(app) {
     const p = parsed.data;
     const wk = wellKey(p.well_name);
     if (!wk) return res.status(400).json({ message: "Pick a well." });
-    const { error } = await db3().from("ticket_preview_drafts").upsert(
+    const { error } = await db4().from("ticket_preview_drafts").upsert(
       {
         job_id: job.id,
         well_key: wk,
@@ -3326,14 +3510,14 @@ function registerTicketPreviewRoutes(app) {
     if (!job) return;
     const wk = wellKey(String(req.query.well ?? ""));
     if (!wk) return res.status(400).json({ message: "Pick a well." });
-    const { error } = await db3().from("ticket_preview_drafts").delete().eq("job_id", job.id).eq("well_key", wk);
+    const { error } = await db4().from("ticket_preview_drafts").delete().eq("job_id", job.id).eq("well_key", wk);
     if (error && !missingTable2(error.message)) return res.status(400).json({ message: error.message });
     res.json(await buildTicketPreview(job, String(req.query.well), true));
   });
 }
 
 // server/rentals.ts
-var db4 = () => supabaseAdmin || supabaseAnon;
+var db5 = () => supabaseAdmin || supabaseAnon;
 var RENTAL_MONEY_ROLES = ["admin", "area"];
 var canSeeRentalMoney = (role) => !!role && RENTAL_MONEY_ROLES.includes(role);
 var MONEY_FIELDS = ["rental_monthly_rate", "rental_notes"];
@@ -3420,7 +3604,7 @@ var missingSetup = (msg) => !!msg && /rental_|asset_job_stints|is_rental/.test(m
 var SETUP_MSG2 = "Rental tracking isn't set up yet. Run the rental centrifuges SQL in the Supabase SQL editor, then refresh.";
 async function loadRentalBits(assetIds) {
   if (!assetIds.length) return { stints: /* @__PURE__ */ new Map(), charges: /* @__PURE__ */ new Map() };
-  const client3 = db4();
+  const client3 = db5();
   const [{ data: st }, { data: ch }] = await Promise.all([
     client3.from("asset_job_stints").select("id, asset_id, job_id, day_rate, start_date, end_date, created_at, job:jobs(job_number)").in("asset_id", assetIds),
     client3.from("rental_charges").select("id, asset_id, charge_date, description, amount, created_by_name, created_at").in("asset_id", assetIds).order("charge_date", { ascending: true })
@@ -3434,7 +3618,7 @@ async function loadRentalBits(assetIds) {
 function registerRentalRoutes(app) {
   app.get("/api/rentals", requireAuth, requireRole("admin", "area"), async (req, res) => {
     const scope = areaScopeOf(req.profile);
-    let q = db4().from("assets").select(
+    let q = db5().from("assets").select(
       "id, tag, category, area, status, job_id, day_rate, is_rental, rental_vendor, rental_ref, rental_monthly_rate, rental_start, rental_end, rental_notes, job:jobs(id, job_number)"
     ).eq("is_rental", true).order("tag", { ascending: true });
     if (scope) q = q.eq("area", scope);
@@ -3467,7 +3651,7 @@ function registerRentalRoutes(app) {
     });
   });
   app.get("/api/assets/:id/rental", requireAuth, requireRole("admin", "area"), async (req, res) => {
-    const { data: a, error } = await db4().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
+    const { data: a, error } = await db5().from("assets").select("id, area, day_rate, is_rental, rental_monthly_rate, rental_start, rental_end").eq("id", String(req.params.id)).maybeSingle();
     if (error) {
       if (missingSetup(error.message)) return res.status(409).json({ message: SETUP_MSG2, setup_required: true });
       return res.status(500).json({ message: error.message });
@@ -3498,12 +3682,12 @@ function registerRentalRoutes(app) {
     async (req, res) => {
       const parsed = createRentalChargeSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
-      const { data: a } = await db4().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
+      const { data: a } = await db5().from("assets").select("id, area, is_rental").eq("id", String(req.params.id)).maybeSingle();
       if (!a) return res.status(404).json({ message: "Asset not found" });
       const scope = areaScopeOf(req.profile);
       if (scope && a.area !== scope) return res.status(403).json({ message: "Outside your area" });
       if (!a.is_rental) return res.status(400).json({ message: "This asset isn't marked as a rental" });
-      const { data, error } = await db4().from("rental_charges").insert({
+      const { data, error } = await db5().from("rental_charges").insert({
         asset_id: a.id,
         charge_date: parsed.data.charge_date,
         description: parsed.data.description,
@@ -3523,7 +3707,7 @@ function registerRentalRoutes(app) {
     const parsed = setStintStartSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: parsed.error.errors[0].message });
     const start = parsed.data.start_date;
-    const { data: st } = await db4().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
+    const { data: st } = await db5().from("asset_job_stints").select("id, asset_id, job_id, start_date, end_date, asset:assets(area, is_rental, rental_start)").eq("id", String(req.params.id)).maybeSingle();
     if (!st || !st.job_id) return res.status(404).json({ message: "Job record not found" });
     const a = st.asset || {};
     const scope = areaScopeOf(req.profile);
@@ -3536,7 +3720,7 @@ function registerRentalRoutes(app) {
       return res.status(400).json({
         message: `That's before this rental was received (${a.rental_start}). Change the received date on the asset first.`
       });
-    const { data: others } = await db4().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
+    const { data: others } = await db5().from("asset_job_stints").select("id, job_id, start_date, end_date, job:jobs(job_number)").eq("asset_id", st.asset_id).neq("id", st.id).not("job_id", "is", null);
     const thisEnd = st.end_date || "9999-12-31";
     const clash = (others || []).find(
       (o) => o.job_id !== st.job_id && o.start_date <= thisEnd && (o.end_date == null || o.end_date >= start)
@@ -3545,16 +3729,16 @@ function registerRentalRoutes(app) {
       return res.status(400).json({
         message: `That overlaps the time this unit was on ${clash.job?.job_number ?? "another job"} (${clash.start_date} \u2192 ${clash.end_date ?? "now"}).`
       });
-    const { error } = await db4().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
+    const { error } = await db5().from("asset_job_stints").update({ start_date: start }).eq("id", st.id);
     if (error) return res.status(400).json({ message: error.message });
     res.json({ ok: true, start_date: start });
   });
   app.delete("/api/rental-charges/:id", requireAuth, requireRole("admin", "area"), async (req, res) => {
-    const { data: c } = await db4().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
+    const { data: c } = await db5().from("rental_charges").select("id, asset:assets(area)").eq("id", String(req.params.id)).maybeSingle();
     if (!c) return res.status(404).json({ message: "Charge not found" });
     const scope = areaScopeOf(req.profile);
     if (scope && c.asset?.area !== scope) return res.status(403).json({ message: "Outside your area" });
-    const { error } = await db4().from("rental_charges").delete().eq("id", c.id);
+    const { error } = await db5().from("rental_charges").delete().eq("id", c.id);
     if (error) return res.status(400).json({ message: error.message });
     res.status(204).end();
   });
@@ -3598,70 +3782,6 @@ async function sendSms(to, body) {
     console.error("[sms] send failed", e?.message || e);
     return { ok: false, error: "Couldn't reach Twilio." };
   }
-}
-
-// server/push.ts
-import webpush from "web-push";
-var db5 = () => supabaseAdmin || supabaseAnon;
-var cached = null;
-function subject() {
-  const s = (process.env.VAPID_SUBJECT || "").trim();
-  if (s) return s;
-  const g2 = (process.env.GMAIL_USER || "").trim();
-  return `mailto:${g2 || "dfsdailyreports@gmail.com"}`;
-}
-async function getPushKeys() {
-  if (cached) return cached;
-  const envPub = (process.env.VAPID_PUBLIC_KEY || "").trim();
-  const envPriv = (process.env.VAPID_PRIVATE_KEY || "").trim();
-  if (envPub && envPriv) return cached = { publicKey: envPub, privateKey: envPriv, subject: subject() };
-  const read3 = async () => {
-    const { data, error } = await db5().from("board_push_config").select("public_key,private_key").eq("id", 1).maybeSingle();
-    if (error) return { err: error.message };
-    return { row: data };
-  };
-  let r = await read3();
-  if ("err" in r) return null;
-  if (!r.row) {
-    const k = webpush.generateVAPIDKeys();
-    await db5().from("board_push_config").insert({ id: 1, public_key: k.publicKey, private_key: k.privateKey });
-    r = await read3();
-    if ("err" in r || !r.row) return null;
-  }
-  return cached = { publicKey: r.row.public_key, privateKey: r.row.private_key, subject: subject() };
-}
-async function sendPush(userIds, msg) {
-  const ids = Array.from(new Set(userIds.filter(Boolean)));
-  const out = { sent: 0, failed: 0 };
-  if (!ids.length) return out;
-  try {
-    const keys = await getPushKeys();
-    if (!keys) return out;
-    const { data: subs } = await db5().from("board_push_subscriptions").select("id,user_id,endpoint,p256dh,auth").in("user_id", ids);
-    if (!subs?.length) return out;
-    const payload = JSON.stringify({ title: msg.title, body: msg.body, url: msg.url || "/#/board", tag: msg.tag });
-    await Promise.all(
-      subs.map(async (s) => {
-        try {
-          await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } }, payload, {
-            TTL: 60 * 60 * 24,
-            urgency: "high",
-            timeout: 8e3,
-            vapidDetails: { subject: keys.subject, publicKey: keys.publicKey, privateKey: keys.privateKey }
-          });
-          out.sent++;
-          await db5().from("board_push_subscriptions").update({ last_ok_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", s.id);
-        } catch (e) {
-          out.failed++;
-          if (e?.statusCode === 404 || e?.statusCode === 410) {
-            await db5().from("board_push_subscriptions").delete().eq("id", s.id);
-          }
-        }
-      })
-    );
-  } catch {
-  }
-  return out;
 }
 
 // server/board.ts
@@ -3752,6 +3872,7 @@ async function decorate(tasks) {
     photo_count: pc.get(t.id) || 0
   }));
 }
+var TASK_EMAIL_SMS = false;
 async function alertAssignee(req, task, actor) {
   const out = { email: "skipped", sms: "skipped", push: 0 };
   if (!task.assignee_id || task.assignee_id === actor.id) return out;
@@ -3769,7 +3890,7 @@ async function alertAssignee(req, task, actor) {
   const what = task.kind === "supply" ? "Supply request" : "Task";
   const due = task.due_date ? ` \xB7 due ${fmtDate(task.due_date)}` : "";
   const by = nameOf(actor);
-  const wantEmail = prefs?.task_email !== false;
+  const wantEmail = TASK_EMAIL_SMS && prefs?.task_email !== false;
   if (wantEmail && person.email) {
     const subject2 = `${what} ${taskNo(task.number)} assigned to you: ${task.title}`;
     const rows = [
@@ -3794,12 +3915,12 @@ Open: ${link}`;
     out.email = r.ok ? "sent" : "failed";
   }
   const phone = normalizeUsPhone(prefs?.phone);
-  if (prefs?.task_sms && phone && smsConfigured()) {
+  if (TASK_EMAIL_SMS && prefs?.task_sms && phone && smsConfigured()) {
     const body = `DFS Ops: ${by} assigned you ${taskNo(task.number)} - ${task.title}${due}. ${link} Reply STOP to opt out.`;
     const r = await sendSms(phone, body);
     out.sms = r.ok ? "sent" : "failed";
   }
-  const pr = await sendPush([task.assignee_id], {
+  const pr = await notifyPush("board", [task.assignee_id], {
     title: `${what} ${taskNo(task.number)} for you`,
     body: `${short(task.title)}${due} \xB7 from ${by}`,
     url: `/#/board/task/${task.id}`,
@@ -3819,7 +3940,7 @@ async function alertRequesterDone(req, task, actor) {
   const what = task.kind === "supply" ? "Supply request" : "Task";
   const by = nameOf(actor);
   const link = `${appUrl(req)}/#/board/task/${task.id}`;
-  if (prefs?.task_email !== false && person.email) {
+  if (TASK_EMAIL_SMS && prefs?.task_email !== false && person.email) {
     const subject2 = `Done: ${what} ${taskNo(task.number)} ${task.title}`;
     const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937">
 <p>${esc(by)} marked your ${what.toLowerCase()} done on the ${esc(task.area)} board.</p>
@@ -3832,7 +3953,7 @@ Open: ${link}`;
     const r = await sendBoardEmail(person.email, subject2, html, text).catch(() => ({ ok: false }));
     out.email = r.ok ? "sent" : "failed";
   }
-  const pr = await sendPush([task.created_by], {
+  const pr = await notifyPush("board", [task.created_by], {
     title: `Done: ${what} ${taskNo(task.number)}`,
     body: `${short(task.title)} \xB7 marked done by ${by}`,
     url: `/#/board/task/${task.id}`,
@@ -3967,7 +4088,8 @@ function registerBoardRoutes(app) {
     const preview = short(v.body.trim() || "Photo", 140);
     if (pin) {
       const members = await areaMembers(v.area);
-      await sendPush(
+      await notifyPush(
+        "board",
         members.map((m) => m.id).filter((id) => id !== p.id),
         {
           title: v.needs_ack ? `Please read: ${v.area} board` : `Pinned on the ${v.area} board`,
@@ -3979,7 +4101,7 @@ function registerBoardRoutes(app) {
     } else if (v.parent_id) {
       const { data: parent } = await db6().from("board_posts").select("author_id").eq("id", v.parent_id).maybeSingle();
       if (parent?.author_id && parent.author_id !== p.id)
-        await sendPush([parent.author_id], {
+        await notifyPush("board", [parent.author_id], {
           title: `${nameOf(p)} replied to your post`,
           body: preview,
           url: "/#/board",
@@ -4000,7 +4122,8 @@ function registerBoardRoutes(app) {
     if (error) return res.status(400).json({ message: error.message });
     if (parsed.data.pinned && !post.pinned_at) {
       const members = await areaMembers(post.area);
-      await sendPush(
+      await notifyPush(
+        "board",
         members.map((m) => m.id).filter((id) => id !== p.id),
         {
           title: patch.needs_ack ? `Please read: ${post.area} board` : `Pinned on the ${post.area} board`,
@@ -4234,7 +4357,8 @@ function registerBoardRoutes(app) {
     const { data, error } = await db6().from("board_task_comments").insert({ task_id: task.id, author_id: p.id, author_name: nameOf(p), body: parsed.data.body.trim() }).select().single();
     if (error) return res.status(400).json({ message: error.message });
     await db6().from("board_tasks").update({ updated_at: (/* @__PURE__ */ new Date()).toISOString() }).eq("id", task.id);
-    await sendPush(
+    await notifyPush(
+      "board",
       [task.created_by, task.assignee_id].filter((id) => id && id !== p.id),
       {
         title: `${nameOf(p)} commented on ${taskNo(task.number)}`,
@@ -4337,6 +4461,34 @@ function registerBoardRoutes(app) {
       email_ready: boardEmailReady(),
       sms_ready: smsConfigured()
     });
+  });
+  app.get("/api/alert-prefs/push", requireAuth, async (req, res) => {
+    const role = req.profile.role;
+    const { data, error } = await db6().from("notification_prefs").select("push_prefs").eq("user_id", req.profile.id).maybeSingle();
+    const saved = data?.push_prefs || {};
+    res.json({
+      ready: !error || !/push_prefs/.test(error.message),
+      kinds: ALERT_KINDS.filter((k) => k.roles.includes(role)).map((k) => ({
+        key: k.key,
+        label: k.label,
+        desc: k.desc,
+        on: alertOn(k.key, role, saved)
+      }))
+    });
+  });
+  app.put("/api/alert-prefs/push", requireAuth, async (req, res) => {
+    const key = String(req.body?.key || "");
+    const on = req.body?.on;
+    const def = ALERT_KINDS.find((k) => k.key === key);
+    if (!def || typeof on !== "boolean" || !def.roles.includes(req.profile.role))
+      return res.status(400).json({ message: "Unknown alert." });
+    const { data: existing, error: rErr } = await db6().from("notification_prefs").select("user_id,push_prefs").eq("user_id", req.profile.id).maybeSingle();
+    if (rErr && /push_prefs/.test(rErr.message))
+      return res.status(400).json({ message: "Run the Phone alert choices setup SQL in Supabase first." });
+    const push_prefs = { ...existing?.push_prefs || {}, [key]: on };
+    const { error } = existing ? await db6().from("notification_prefs").update({ push_prefs }).eq("user_id", req.profile.id) : await db6().from("notification_prefs").insert({ user_id: req.profile.id, push_prefs });
+    if (error) return res.status(400).json({ message: error.message });
+    res.json({ ok: true, key, on });
   });
   app.get("/api/board/push/devices", requireAuth, async (req, res) => {
     const { data } = await db6().from("board_push_subscriptions").select("id,user_agent,created_at").eq("user_id", req.profile.id);
@@ -6786,6 +6938,13 @@ async function registerRoutes(httpServer, app) {
       };
       const { data, error } = await loaded.client.from("jsas").update(patch).eq("id", req.params.id).select().single();
       if (error) return res.status(400).json({ message: error.message });
+      if (parsed.data.action !== "sign_off" && data?.submitted_by && data.submitted_by !== req.profile.id)
+        await notifyPush("changes_requested", [data.submitted_by], {
+          title: "Changes requested on your JSA",
+          body: `${req.profile.name}: ${parsed.data.change_notes || "Please review and fix your JSA."}`.slice(0, 180),
+          url: "/#/jsas",
+          tag: `jsa-${data.id}`
+        });
       res.json(data);
     }
   );
@@ -7768,6 +7927,16 @@ async function registerRoutes(httpServer, app) {
       sendNotificationEmails("needs_signoff", { report, asset }).catch(
         (e) => console.error("[email] needs_signoff", e)
       );
+      await notifyPush(
+        "service_signoff",
+        (await peopleFor(asset.area, ["area", "admin"])).filter((id) => id !== req.profile.id),
+        {
+          title: `Service report needs sign-off: ${asset.tag || "asset"}`,
+          body: `${req.profile.name} filed a service report${asset.area ? ` in ${asset.area}` : ""}.`,
+          url: "/#/service",
+          tag: `svc-${report.id}`
+        }
+      );
       res.status(201).json({
         ...flattenServiceForm({ ...report, asset, supervisor: { name: req.profile.name } }),
         work_orders_created: createdWorkOrders.length
@@ -8213,6 +8382,13 @@ async function registerRoutes(httpServer, app) {
         asset: report.asset,
         signerName: req.profile.name
       }).catch((e) => console.error("[email] signed", e));
+      if (report.supervisor_id && report.supervisor_id !== req.profile.id)
+        await notifyPush("service_signed", [report.supervisor_id], {
+          title: `Signed off: ${report.asset?.tag || "service report"}`,
+          body: `${req.profile.name} signed off your service report.`,
+          url: "/#/service",
+          tag: `svc-${report.id}`
+        });
       res.json({ ok: true });
     }
   );
@@ -8241,6 +8417,42 @@ async function registerRoutes(httpServer, app) {
       res.json(data);
     }
   );
+  async function dailyReportAlert(r, what, missing) {
+    try {
+      if (r?.report_date) {
+        const d = (/* @__PURE__ */ new Date(String(r.report_date).slice(0, 10) + "T12:00:00Z")).getTime();
+        if (Number.isFinite(d) && Date.now() - d > 3.5 * 864e5) return;
+      }
+      const name = `${r?.well_name || "Unknown well"}${r?.report_day != null ? ` Day ${r.report_day}` : ""}`;
+      const from = r?.sender_name || r?.sender_email || "the crew";
+      const url = `/#/daily-reports/${r?.id}`;
+      const tag = `dr-${r?.id}`;
+      if (what === "correction") {
+        await notifyPush("report_action", await peopleFor(r?.area, ["area", "admin"]), {
+          title: `Correction waiting: ${name}`,
+          body: `${from} sent a corrected workbook for a signed-off report. Approve or discard it.`,
+          url,
+          tag
+        });
+        return;
+      }
+      await notifyPush("daily_report", await peopleFor(r?.area, ["area", "super", "admin"]), {
+        title: `${what === "corrected" ? "Corrected report" : "Daily report"}: ${name}`,
+        body: `From ${from}${r?.area ? ` \xB7 ${r.area}` : ""}${missing ? " \xB7 missing data, check before signing off" : ""}`,
+        url,
+        tag
+      });
+      if (what === "new" && !r?.job_id)
+        await notifyPush("report_action", await peopleFor(r?.area, ["area", "admin"]), {
+          title: `Needs a job match: ${name}`,
+          body: `This report didn't match a job. Pick the job so it counts.`,
+          url,
+          tag: `${tag}-match`
+        });
+    } catch (e) {
+      console.error("[push] daily report", e);
+    }
+  }
   app.post("/api/daily-reports/ingest", async (req, res) => {
     if (!INGEST_TOKEN)
       return res.status(503).json({ message: "Ingest not configured (set INGEST_TOKEN)." });
@@ -8362,6 +8574,7 @@ async function registerRoutes(httpServer, app) {
             detail: `A corrected workbook arrived for this signed-off report and is waiting for an Admin or Area Manager to apply it.${changeText}`
           }
         ]);
+        await dailyReportAlert(c, "correction", false);
         return res.status(201).json({ ...c, correction_pending: true });
       }
       if (sameDate || prior.status === "Changes requested") {
@@ -8393,6 +8606,7 @@ async function registerRoutes(httpServer, app) {
             detail: `${excel.source_sheet} in "${p.attachment_name}" is still missing critical data: ${missingFields.join("; ")}. Check with the crew before signing off.`
           });
         }
+        await dailyReportAlert(upd, "corrected", missingFields.length > 0);
         return res.status(201).json({ ...upd, corrected: true });
       }
     }
@@ -8414,6 +8628,7 @@ async function registerRoutes(httpServer, app) {
         detail: `${excel.source_sheet} in "${p.attachment_name}" is missing critical data: ${missingFields.join("; ")}. Imported with the values present \u2014 check with the crew before signing off.`
       });
     }
+    await dailyReportAlert(data, "new", missingFields.length > 0);
     res.status(201).json(data);
   });
   app.post(
@@ -9189,6 +9404,16 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         action: "changes_requested",
         detail: sent.ok ? `Suggested changes emailed to ${report.sender_email}` : `Suggested changes recorded, but the email to ${report.sender_email} was NOT sent (${sent.error ?? "unknown error"})`
       });
+      await notifyPush(
+        "changes_requested",
+        (await peopleByEmail([report.sender_email])).filter((id) => id !== reviewer.id),
+        {
+          title: `Changes requested: ${report.well_name || "daily report"}${report.report_day != null ? ` Day ${report.report_day}` : ""}`,
+          body: `${reviewer.name}: ${fullNotes.replace(/\s+/g, " ")}`.slice(0, 180),
+          url: `/#/daily-reports/${report.id}`,
+          tag: `dr-${report.id}`
+        }
+      );
       res.json({ ...data, email_sent: sent.ok, email_error: sent.ok ? null : sent.error ?? null });
     }
   );
@@ -10535,6 +10760,16 @@ ${fields.map((f) => `\u2022 ${f}`).join("\n")}` : "",
         created_by_name: req.profile.name
       }).select().single();
       if (error) return res.status(400).json({ message: error.message });
+      await notifyPush(
+        "service_charge",
+        (await peopleFor(job.area, ["area", "super", "admin"])).filter((id) => id !== req.profile.id),
+        {
+          title: `Service charge: ${job.job_number || "job"}`,
+          body: `${req.profile.name} logged ${parsed.data.service_type}${parsed.data.cost != null ? ` ($${Number(parsed.data.cost).toLocaleString("en-US")})` : ""}.`,
+          url: `/#/jobs/${job.id}`,
+          tag: `svc-charge-${data.id}`
+        }
+      );
       res.status(201).json(data);
     }
   );
