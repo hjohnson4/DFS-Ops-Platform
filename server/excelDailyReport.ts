@@ -345,12 +345,25 @@ function sheetIsCompleted(ws: XLSX.WorkSheet | undefined): boolean {
   return !!(remarks && remarks.trim().length > 0);
 }
 
+// Rig Activity (AI8) values where there is no hole being made, so a blank
+// measured depth (AI9) is expected and is NOT missing critical data.
+// The dropdown uses "Moving/Rig Up" and "Moving/Rig Down"; any value that
+// starts with "Moving" or reads "Rig Move" / "Rig Up" / "Rig Down" counts.
+const RIG_MOVE_ACTIVITY = /^\s*(moving\b|rig\s*(move|up|down)\b)/i;
+export function isRigMoveActivity(activity: string | null | undefined): boolean {
+  return !!activity && RIG_MOVE_ACTIVITY.test(activity);
+}
+function sheetIsRigMove(ws: XLSX.WorkSheet | undefined): boolean {
+  return !!ws && isRigMoveActivity(toText(rawCell(ws, "AI8")));
+}
+
 // True when the worked day is missing the hand-entered depth (AI9) or date
 // (D3). Such a day is still imported but flagged for supervisor review.
+// A rig-move day (see RIG_MOVE_ACTIVITY) has no measured depth to enter.
 function sheetMissingKeyFields(ws: XLSX.WorkSheet | undefined): boolean {
   if (!ws) return true;
   return (
-    toNumber(rawCell(ws, DEPTH_CELL)) == null ||
+    (toNumber(rawCell(ws, DEPTH_CELL)) == null && !sheetIsRigMove(ws)) ||
     toDateStr(rawCell(ws, DATE_CELL)) == null
   );
 }
@@ -440,7 +453,9 @@ export function missingCriticalFields(ws: XLSX.WorkSheet | undefined): string[] 
   const out: string[] = [];
   if (!ws) return ["Day tab not found"];
   if (toDateStr(rawCell(ws, DATE_CELL)) == null) out.push("Report date (D3)");
-  if (toNumber(rawCell(ws, DEPTH_CELL)) == null) out.push("Measured depth (AI9)");
+  // No measured depth while the rig is moving — not critical on those days.
+  if (toNumber(rawCell(ws, DEPTH_CELL)) == null && !sheetIsRigMove(ws))
+    out.push("Measured depth (AI9)");
   const rateCell = LAYOUTS[sheetLayout(ws)].dayRate;
   const rate = toNumber(rawCell(ws, rateCell));
   if (rate == null || rate === 0) out.push(`Day rate (${rateCell})`);

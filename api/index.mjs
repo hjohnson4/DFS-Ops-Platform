@@ -712,9 +712,16 @@ function sheetIsCompleted(ws2) {
   const remarks = toText(rawCell(ws2, remarksCell(ws2)));
   return !!(remarks && remarks.trim().length > 0);
 }
+var RIG_MOVE_ACTIVITY = /^\s*(moving\b|rig\s*(move|up|down)\b)/i;
+function isRigMoveActivity(activity) {
+  return !!activity && RIG_MOVE_ACTIVITY.test(activity);
+}
+function sheetIsRigMove(ws2) {
+  return !!ws2 && isRigMoveActivity(toText(rawCell(ws2, "AI8")));
+}
 function sheetMissingKeyFields(ws2) {
   if (!ws2) return true;
-  return toNumber(rawCell(ws2, DEPTH_CELL)) == null || toDateStr(rawCell(ws2, DATE_CELL)) == null;
+  return toNumber(rawCell(ws2, DEPTH_CELL)) == null && !sheetIsRigMove(ws2) || toDateStr(rawCell(ws2, DATE_CELL)) == null;
 }
 function reportDaySheets(wb) {
   const out = [];
@@ -771,7 +778,8 @@ function missingCriticalFields(ws2) {
   const out = [];
   if (!ws2) return ["Day tab not found"];
   if (toDateStr(rawCell(ws2, DATE_CELL)) == null) out.push("Report date (D3)");
-  if (toNumber(rawCell(ws2, DEPTH_CELL)) == null) out.push("Measured depth (AI9)");
+  if (toNumber(rawCell(ws2, DEPTH_CELL)) == null && !sheetIsRigMove(ws2))
+    out.push("Measured depth (AI9)");
   const rateCell = LAYOUTS[sheetLayout(ws2)].dayRate;
   const rate = toNumber(rawCell(ws2, rateCell));
   if (rate == null || rate === 0) out.push(`Day rate (${rateCell})`);
