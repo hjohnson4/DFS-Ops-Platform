@@ -2884,6 +2884,8 @@ export const boardPostSchema = z
     // Area Managers / Admins only: pin to the top, ask everyone to tap "Got it".
     pin: z.boolean().optional(),
     needs_ack: z.boolean().optional(),
+    // Admins only: post the same message on every area's board at once.
+    all_areas: z.boolean().optional(),
   })
   .refine((v) => v.body.length > 0 || v.has_photos, { message: "Write something first", path: ["body"] });
 export const boardPinSchema = z.object({

@@ -1734,7 +1734,9 @@ var boardPostSchema = z.object({
   has_photos: z.boolean().optional(),
   // Area Managers / Admins only: pin to the top, ask everyone to tap "Got it".
   pin: z.boolean().optional(),
-  needs_ack: z.boolean().optional()
+  needs_ack: z.boolean().optional(),
+  // Admins only: post the same message on every area's board at once.
+  all_areas: z.boolean().optional()
 }).refine((v) => v.body.length > 0 || v.has_photos, { message: "Write something first", path: ["body"] });
 var boardPinSchema = z.object({
   pinned: z.boolean(),
@@ -4083,29 +4085,40 @@ function registerBoardRoutes(app) {
     const pin = !v.parent_id && !!(v.pin || v.needs_ack);
     if (pin && !isManagerOf(p, v.area))
       return res.status(403).json({ message: "Only Area Managers and Admins can pin posts." });
-    const { data, error } = await db6().from("board_posts").insert({
-      area: v.area,
+    const allAreas = !!v.all_areas && !v.parent_id && p.role === "admin";
+    if (v.all_areas && !allAreas)
+      return res.status(403).json({ message: "Only Admins can post to all areas at once." });
+    const targets = allAreas ? [v.area, ...AREAS.filter((a) => a !== v.area)] : [v.area];
+    const pinnedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const rows = targets.map((area) => ({
+      area,
       body: v.body.trim(),
       parent_id: v.parent_id || null,
-      job_id: v.job_id || null,
+      job_id: allAreas ? null : v.job_id || null,
       author_id: p.id,
       author_name: nameOf(p),
-      ...pin ? { pinned_at: (/* @__PURE__ */ new Date()).toISOString(), pinned_by_name: nameOf(p), needs_ack: !!v.needs_ack } : {}
-    }).select().single();
-    if (error) return res.status(400).json({ message: error.message });
+      ...pin ? { pinned_at: pinnedAt, pinned_by_name: nameOf(p), needs_ack: !!v.needs_ack } : {}
+    }));
+    const { data: inserted, error } = await db6().from("board_posts").insert(rows).select();
+    if (error || !inserted?.length) return res.status(400).json({ message: error?.message || "Couldn't post." });
+    const byArea = new Map(inserted.map((r) => [r.area, r]));
+    const data = byArea.get(v.area) || inserted[0];
     const preview = short(v.body.trim() || "Photo", 140);
     if (pin) {
-      const members = await areaMembers(v.area);
-      await notifyPush(
-        "board",
-        members.map((m) => m.id).filter((id) => id !== p.id),
-        {
-          title: v.needs_ack ? `Please read: ${v.area} board` : `Pinned on the ${v.area} board`,
+      const sent = /* @__PURE__ */ new Set([p.id]);
+      for (const area of targets) {
+        const row = byArea.get(area);
+        if (!row) continue;
+        const ids = (await areaMembers(area)).map((m) => m.id).filter((id) => !sent.has(id));
+        ids.forEach((id) => sent.add(id));
+        if (!ids.length) continue;
+        await notifyPush("board", ids, {
+          title: v.needs_ack ? `Please read: ${area} board` : `Pinned on the ${area} board`,
           body: `${nameOf(p)}: ${preview}`,
           url: "/#/board",
-          tag: `post-${data.id}`
-        }
-      );
+          tag: `post-${row.id}`
+        });
+      }
     } else if (v.parent_id) {
       const { data: parent } = await db6().from("board_posts").select("author_id").eq("id", v.parent_id).maybeSingle();
       if (parent?.author_id && parent.author_id !== p.id)
@@ -4116,7 +4129,7 @@ function registerBoardRoutes(app) {
           tag: `post-${v.parent_id}`
         });
     }
-    res.json(data);
+    res.json({ ...data, copies: targets.map((a) => byArea.get(a)).filter(Boolean).map((r) => ({ id: r.id, area: r.area })) });
   });
   app.post("/api/board/posts/:id/pin", ...guard, async (req, res) => {
     const p = req.profile;

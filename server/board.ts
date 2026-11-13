@@ -398,34 +398,45 @@ export function registerBoardRoutes(app: Express) {
     const pin = !v.parent_id && !!(v.pin || v.needs_ack);
     if (pin && !isManagerOf(p, v.area))
       return res.status(403).json({ message: "Only Area Managers and Admins can pin posts." });
-    const { data, error } = await db()
-      .from("board_posts")
-      .insert({
-        area: v.area,
-        body: v.body.trim(),
-        parent_id: v.parent_id || null,
-        job_id: v.job_id || null,
-        author_id: p.id,
-        author_name: nameOf(p),
-        ...(pin ? { pinned_at: new Date().toISOString(), pinned_by_name: nameOf(p), needs_ack: !!v.needs_ack } : {}),
-      })
-      .select()
-      .single();
-    if (error) return res.status(400).json({ message: error.message });
+    // Admins can send one top-level post to every area's board. Each area gets
+    // its own copy so replies and "Got it" taps stay with that area's team.
+    // Job tags belong to one area, so they're dropped on an all-areas post.
+    const allAreas = !!v.all_areas && !v.parent_id && p.role === "admin";
+    if (v.all_areas && !allAreas)
+      return res.status(403).json({ message: "Only Admins can post to all areas at once." });
+    const targets: string[] = allAreas ? [v.area, ...AREAS.filter((a) => a !== v.area)] : [v.area];
+    const pinnedAt = new Date().toISOString();
+    const rows = targets.map((area) => ({
+      area,
+      body: v.body.trim(),
+      parent_id: v.parent_id || null,
+      job_id: allAreas ? null : v.job_id || null,
+      author_id: p.id,
+      author_name: nameOf(p),
+      ...(pin ? { pinned_at: pinnedAt, pinned_by_name: nameOf(p), needs_ack: !!v.needs_ack } : {}),
+    }));
+    const { data: inserted, error } = await db().from("board_posts").insert(rows).select();
+    if (error || !inserted?.length) return res.status(400).json({ message: error?.message || "Couldn't post." });
+    const byArea = new Map(inserted.map((r: any) => [r.area, r]));
+    const data: any = byArea.get(v.area) || inserted[0];
 
     // Phone alerts (quick; finished before replying so Vercel doesn't cut them off).
     const preview = short(v.body.trim() || "Photo", 140);
     if (pin) {
-      const members = await areaMembers(v.area);
-      await notifyPush("board", 
-        members.map((m) => m.id).filter((id) => id !== p.id),
-        {
-          title: v.needs_ack ? `Please read: ${v.area} board` : `Pinned on the ${v.area} board`,
+      const sent = new Set<string>([p.id]);
+      for (const area of targets) {
+        const row: any = byArea.get(area);
+        if (!row) continue;
+        const ids = (await areaMembers(area)).map((m) => m.id).filter((id) => !sent.has(id));
+        ids.forEach((id) => sent.add(id));
+        if (!ids.length) continue;
+        await notifyPush("board", ids, {
+          title: v.needs_ack ? `Please read: ${area} board` : `Pinned on the ${area} board`,
           body: `${nameOf(p)}: ${preview}`,
           url: "/#/board",
-          tag: `post-${data.id}`,
-        },
-      );
+          tag: `post-${row.id}`,
+        });
+      }
     } else if (v.parent_id) {
       const { data: parent } = await db().from("board_posts").select("author_id").eq("id", v.parent_id).maybeSingle();
       if (parent?.author_id && parent.author_id !== p.id)
@@ -436,7 +447,7 @@ export function registerBoardRoutes(app: Express) {
           tag: `post-${v.parent_id}`,
         });
     }
-    res.json(data);
+    res.json({ ...data, copies: targets.map((a) => byArea.get(a)).filter(Boolean).map((r: any) => ({ id: r.id, area: r.area })) });
   });
 
   // Pin / unpin a post (Area Managers of that area, Admins).

@@ -17,6 +17,7 @@ import { PhoneAlertsPrompt } from "@/components/PhoneAlerts";
 import type { BoardUnread } from "@/lib/boardUnread";
 import {
   MessagesSquare,
+  Globe,
   ListChecks,
   CheckCircle2,
   Plus,
@@ -243,17 +244,23 @@ function Feed({ meta, readOnly, seenAt }: { meta: Meta; readOnly: boolean; seenA
   const [photos, setPhotos] = useState<File[]>([]);
   const [pin, setPin] = useState(false);
   const [needsAck, setNeedsAck] = useState(false);
+  const [allAreas, setAllAreas] = useState(false);
   const manager = profile?.role === "admin" || (profile?.role === "area" && profile.area === meta.area);
+  const isAdmin = profile?.role === "admin";
 
   const post = useMutation({
-    mutationFn: async (v: { body: string; parent_id?: string; job_id?: string | null; photos?: File[]; pin?: boolean; needs_ack?: boolean }) => {
+    mutationFn: async (v: { body: string; parent_id?: string; job_id?: string | null; photos?: File[]; pin?: boolean; needs_ack?: boolean; all_areas?: boolean }) => {
       const { photos: files, ...rest } = v;
       const created = await (await apiRequest("POST", "/api/board/posts", { area: meta.area, ...rest, has_photos: !!files?.length })).json();
-      const failed = files?.length ? await uploadBoardPhotos({ post_id: created.id }, files) : 0;
-      return { created, failed };
+      // An all-areas post comes back with one copy per area; photos go on each.
+      const ids: string[] = created.copies?.length ? created.copies.map((c: { id: string }) => c.id) : [created.id];
+      let failed = 0;
+      if (files?.length) for (const id of ids) failed += await uploadBoardPhotos({ post_id: id }, files);
+      return { created, failed, areas: ids.length };
     },
     onSuccess: (r) => {
       invalidateBoard();
+      if (r.areas > 1) toast({ title: `Posted to all ${r.areas} areas` });
       photoToast(toast, r.failed);
     },
     onError: (e: any) => toast({ title: "Couldn't post", description: e.message, variant: "destructive" }),
@@ -266,12 +273,18 @@ function Feed({ meta, readOnly, seenAt }: { meta: Meta; readOnly: boolean; seenA
           <Textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            placeholder={`Share an update with the ${meta.area} team…`}
+            placeholder={allAreas ? "Share an update with every area…" : `Share an update with the ${meta.area} team…`}
             rows={3}
             data-testid="input-post-body"
           />
           {manager && (
             <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+              {isAdmin && meta.areas.length > 1 && (
+                <label className="flex items-center gap-2 cursor-pointer min-h-8">
+                  <Checkbox checked={allAreas} onCheckedChange={(v) => { setAllAreas(!!v); if (v) setJobId(NONE); }} data-testid="check-post-all-areas" />
+                  <Globe className="h-3.5 w-3.5 text-muted-foreground" /> Send to all areas
+                </label>
+              )}
               <label className="flex items-center gap-2 cursor-pointer min-h-8">
                 <Checkbox checked={pin || needsAck} onCheckedChange={(v) => { setPin(!!v); if (!v) setNeedsAck(false); }} data-testid="check-post-pin" />
                 <Pin className="h-3.5 w-3.5 text-muted-foreground" /> Pin to the top
@@ -285,8 +298,8 @@ function Feed({ meta, readOnly, seenAt }: { meta: Meta; readOnly: boolean; seenA
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
             <PhotoPicker files={photos} onChange={setPhotos} />
-            <Select value={jobId} onValueChange={setJobId}>
-              <SelectTrigger className="w-full sm:w-64 h-9" data-testid="select-post-job">
+            <Select value={jobId} onValueChange={setJobId} disabled={allAreas}>
+              <SelectTrigger className="w-full sm:w-64 h-9" data-testid="select-post-job" title={allAreas ? "Job tags aren't used on all-areas posts" : undefined}>
                 <SelectValue placeholder="Tag a job (optional)" />
               </SelectTrigger>
               <SelectContent>
@@ -305,13 +318,13 @@ function Feed({ meta, readOnly, seenAt }: { meta: Meta; readOnly: boolean; seenA
               disabled={(!body.trim() && !photos.length) || post.isPending}
               onClick={() =>
                 post.mutate(
-                  { body, job_id: jobId === NONE ? null : jobId, photos, pin: pin || needsAck, needs_ack: needsAck },
-                  { onSuccess: () => { setBody(""); setJobId(NONE); setPhotos([]); setPin(false); setNeedsAck(false); } },
+                  { body, job_id: allAreas || jobId === NONE ? null : jobId, photos, pin: pin || needsAck, needs_ack: needsAck, all_areas: allAreas || undefined },
+                  { onSuccess: () => { setBody(""); setJobId(NONE); setPhotos([]); setPin(false); setNeedsAck(false); setAllAreas(false); } },
                 )
               }
               data-testid="button-post"
             >
-              {post.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} Post
+              {post.isPending && <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />} {allAreas ? "Post to all areas" : "Post"}
             </Button>
           </div>
         </div>
