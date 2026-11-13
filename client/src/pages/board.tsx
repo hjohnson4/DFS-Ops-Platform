@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AssetModelLine } from "@/lib/assetModel";
 import { useLocation, useRoute } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
@@ -140,19 +140,39 @@ export default function BoardPage() {
     localStorage.setItem(AREA_KEY, a);
   };
 
-  // "What's new": remember when I last looked at this area (to mark newer
-  // posts "New"), then record that I've seen it now.
+  // "What's new": remember when I last looked at each area (to mark newer
+  // posts "New"), then record that I've seen them now. Opening the board
+  // clears the red count in the menu for every area I follow; areas other
+  // than the one on screen keep a small count in the area picker until I
+  // switch to them.
   const { data: unread } = useQuery<BoardUnread>({ queryKey: ["/api/board/unread"] });
   const [seenSnap, setSeenSnap] = useState<Record<string, string>>({});
+  const [newByArea, setNewByArea] = useState<Record<string, number>>({});
+  const marking = useRef(false);
+  useEffect(() => {
+    if (!unread || marking.current) return;
+    const by = unread.by_area || {};
+    const fresh = Object.keys(by).filter((a) => !(a in seenSnap));
+    if (fresh.length) setSeenSnap((m) => ({ ...m, ...Object.fromEntries(fresh.map((a) => [a, by[a].seen_at || ""])) }));
+    const toMark = Object.keys(by).filter((a) => by[a].count > 0);
+    if (!toMark.length) return;
+    setNewByArea((m) => {
+      const next = { ...m };
+      for (const a of toMark) if (a !== meta?.area) next[a] = (next[a] || 0) + by[a].count;
+      return next;
+    });
+    marking.current = true;
+    apiRequest("POST", "/api/board/seen", { areas: toMark })
+      .then(() => queryClient.invalidateQueries({ queryKey: ["/api/board/unread"] }))
+      .catch(() => {})
+      .finally(() => {
+        marking.current = false;
+      });
+  }, [unread]);
   useEffect(() => {
     const a = meta?.area;
-    if (!a || !unread || a in seenSnap) return;
-    setSeenSnap((m) => ({ ...m, [a]: unread.by_area?.[a]?.seen_at || "" }));
-    if (unread.by_area?.[a])
-      apiRequest("POST", "/api/board/seen", { area: a })
-        .then(() => queryClient.invalidateQueries({ queryKey: ["/api/board/unread"] }))
-        .catch(() => {});
-  }, [meta?.area, unread]);
+    if (a && newByArea[a]) setNewByArea((m) => ({ ...m, [a]: 0 }));
+  }, [meta?.area]);
 
   if (isLoading || !meta) {
     return (
@@ -179,12 +199,24 @@ export default function BoardPage() {
           <Select value={meta.area} onValueChange={changeArea}>
             <SelectTrigger className="w-full md:w-56" data-testid="select-board-area">
               <SelectValue />
+              {Object.entries(newByArea).some(([a, n]) => a !== meta.area && n > 0) && (
+                <span className="ml-auto mr-2 h-2.5 w-2.5 shrink-0 rounded-full bg-red-600" title="New in another area" data-testid="dot-area-new" />
+              )}
             </SelectTrigger>
             <SelectContent>
               {meta.areas.map((a) => (
                 <SelectItem key={a} value={a}>
                   {a}
                   {profile?.role === "area" && a !== profile.area ? " (view only)" : ""}
+                  {a !== meta.area && (newByArea[a] || 0) > 0 && (
+                    <span
+                      data-asset-sub
+                      className="ml-2 inline-flex min-w-5 h-5 px-1.5 rounded-full bg-red-600 text-white text-[11px] font-semibold leading-5 justify-center tabular-nums"
+                      data-testid={`badge-area-new-${a}`}
+                    >
+                      {newByArea[a] > 99 ? "99+" : newByArea[a]}
+                    </span>
+                  )}
                 </SelectItem>
               ))}
             </SelectContent>

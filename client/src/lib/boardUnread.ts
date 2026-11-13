@@ -1,7 +1,10 @@
 import { useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 
-export type BoardUnread = { total: number; by_area: Record<string, { count: number; seen_at: string }> };
+export type BoardUnread = {
+  total: number;
+  by_area: Record<string, { count: number; posts?: number; tasks?: number; comments?: number; seen_at: string }>;
+};
 
 /**
  * How many posts / new tasks from other people are waiting on my area's board

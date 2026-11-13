@@ -4402,12 +4402,20 @@ function registerBoardRoutes(app) {
     await Promise.all(
       areas.map(async (a) => {
         const since = seen.get(a) || fallback;
-        const [{ data: posts }, { data: tasks }] = await Promise.all([
+        const [{ data: posts }, { data: tasks }, { data: newComments }] = await Promise.all([
           db6().from("board_posts").select("id,author_id").eq("area", a).is("deleted_at", null).gt("created_at", since).limit(200),
-          db6().from("board_tasks").select("id,created_by").eq("area", a).gt("created_at", since).limit(200)
+          db6().from("board_tasks").select("id,created_by").eq("area", a).gt("created_at", since).limit(200),
+          db6().from("board_task_comments").select("id,author_id,task_id").gt("created_at", since).limit(500)
         ]);
-        const count = (posts || []).filter((x) => x.author_id !== p.id).length + (tasks || []).filter((x) => x.created_by !== p.id).length;
-        by_area[a] = { count, seen_at: since };
+        const others = (newComments || []).filter((c) => c.author_id !== p.id);
+        const taskIds = Array.from(new Set(others.map((c) => c.task_id)));
+        const { data: inArea } = taskIds.length ? await db6().from("board_tasks").select("id").eq("area", a).in("id", taskIds) : { data: [] };
+        const areaIds = new Set((inArea || []).map((t) => t.id));
+        const comments = others.filter((c) => areaIds.has(c.task_id));
+        const posts_n = (posts || []).filter((x) => x.author_id !== p.id).length;
+        const tasks_n = (tasks || []).filter((x) => x.created_by !== p.id).length;
+        const comments_n = (comments || []).filter((x) => x.author_id !== p.id).length;
+        by_area[a] = { count: posts_n + tasks_n + comments_n, posts: posts_n, tasks: tasks_n, comments: comments_n, seen_at: since };
       })
     );
     const total = Object.values(by_area).reduce((n, x) => n + x.count, 0);
@@ -4415,12 +4423,15 @@ function registerBoardRoutes(app) {
   });
   app.post("/api/board/seen", ...guard, async (req, res) => {
     const p = req.profile;
-    const area = String(req.body?.area || "");
-    if (!AREAS.includes(area) || !canViewArea(p, area)) return res.status(400).json({ message: "Unknown area." });
+    const asked = Array.isArray(req.body?.areas) ? req.body.areas.map(String) : [String(req.body?.area || "")];
+    const list = Array.from(new Set(asked)).filter((a) => AREAS.includes(a) && canViewArea(p, a));
+    if (!list.length) return res.status(400).json({ message: "Unknown area." });
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    const { data: had } = await db6().from("board_reads").select("user_id").eq("user_id", p.id).eq("area", area).maybeSingle();
-    const { error } = had ? await db6().from("board_reads").update({ seen_at: now }).eq("user_id", p.id).eq("area", area) : await db6().from("board_reads").insert({ user_id: p.id, area, seen_at: now });
-    if (error) return res.status(400).json({ message: error.message });
+    for (const area of list) {
+      const { data: had } = await db6().from("board_reads").select("user_id").eq("user_id", p.id).eq("area", area).maybeSingle();
+      const { error } = had ? await db6().from("board_reads").update({ seen_at: now }).eq("user_id", p.id).eq("area", area) : await db6().from("board_reads").insert({ user_id: p.id, area, seen_at: now });
+      if (error) return res.status(400).json({ message: error.message });
+    }
     res.json({ ok: true });
   });
   app.get("/api/board/my-tasks", ...guard, async (req, res) => {
