@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { AssetModelLine } from "@/lib/assetModel";
 import { useLocation, useRoute } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -49,7 +50,7 @@ export type Meta = {
   can_write: boolean;
   members: { id: string; name: string; role: keyof typeof ROLE_LABELS; area: string | null }[];
   jobs: { id: string; job_number: string; well_name: string | null }[];
-  assets: { id: string; label: string; category?: string }[];
+  assets: { id: string; label: string; category?: string; description?: string | null }[];
   email_ready: boolean;
   sms_ready: boolean;
 };
@@ -937,7 +938,13 @@ export function NewTaskDialog({
                   <SelectItem value={NONE}>None</SelectItem>
                   {assets.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      {a.label}
+                      <span className="flex flex-col">
+                        <span>
+                          {a.label}
+                          {a.category ? ` · ${a.category}` : ""}
+                        </span>
+                        <AssetModelLine asset={a} />
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>

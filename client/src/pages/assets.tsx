@@ -1,4 +1,5 @@
 import BoardTasksPanel from "@/components/BoardTasksPanel";
+import { AssetModelLine } from "@/lib/assetModel";
 import { useState, useEffect } from "react";
 import { RefurbishmentHistory } from "@/components/RefurbishmentHistory";
 import { AssetMoveLog } from "@/components/AssetMoveLog";
@@ -1553,7 +1554,10 @@ export default function AssetsPage() {
                   <td className="px-3 py-2.5">
                     <AssetTag asset={a} />
                   </td>
-                  <td className="px-3 py-2.5">{a.category}</td>
+                  <td className="px-3 py-2.5">
+                    {a.category}
+                    <AssetModelLine asset={a} />
+                  </td>
                   <td className="px-3 py-2.5">
                     <StatusBadge status={assetStatusLabel(a)} />
                   </td>

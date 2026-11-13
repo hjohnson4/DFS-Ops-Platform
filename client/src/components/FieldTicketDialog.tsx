@@ -8,6 +8,7 @@
 // A ticket is built in sections. Every line has its own dates and well, and
 // its quantity follows the number of days unless typed over.
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { AssetModelLine } from "@/lib/assetModel";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import {
@@ -867,6 +868,7 @@ export function FieldTicketDialog({ trigger, job: fixedJob, ticket: initial }: P
                       {on && <CheckCircle2 className="inline h-3 w-3 mr-1 -mt-0.5" />}
                       {a.tag}
                       <span className="font-normal text-muted-foreground"> · {a.category}</span>
+                      <AssetModelLine asset={a} className="text-left" />
                     </button>
                   );
                 })}

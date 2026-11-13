@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AssetModelLine } from "@/lib/assetModel";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -352,9 +353,14 @@ function WorkOrderDialog({
                 <SelectContent>
                   {sortedAssets.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      {a.tag}
-                      {a.is_rental ? " · RENTAL" : ""} · {a.category} · {a.area}
-                      {a.job_id ? " · in field" : ""}
+                      <span className="flex flex-col">
+                        <span>
+                          {a.tag}
+                          {a.is_rental ? " · RENTAL" : ""} · {a.category} · {a.area}
+                          {a.job_id ? " · in field" : ""}
+                        </span>
+                        <AssetModelLine asset={a} />
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -544,8 +550,13 @@ function WorkOrderDialog({
                 <SelectContent>
                   {replacementOptions.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      {a.tag}
-                      {a.is_rental ? " · RENTAL" : ""} · {a.category}
+                      <span className="flex flex-col">
+                        <span>
+                          {a.tag}
+                          {a.is_rental ? " · RENTAL" : ""} · {a.category}
+                        </span>
+                        <AssetModelLine asset={a} />
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectContent>

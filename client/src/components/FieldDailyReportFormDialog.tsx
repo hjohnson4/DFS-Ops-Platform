@@ -1,4 +1,5 @@
 import { useState, useEffect, type ReactNode } from "react";
+import { AssetModelLine } from "@/lib/assetModel";
 import { RentalBadge } from "@/components/Rental";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -264,9 +265,14 @@ export function FieldDailyReportFormDialog({ trigger, job, report, onSaved }: Pr
                       checked={assetIds.includes(a.id)}
                       onCheckedChange={() => toggleAsset(a.id)}
                     />
-                    <span className="font-medium">{a.tag}</span>
-                    <RentalBadge asset={a} />
-                    <span className="text-muted-foreground">{a.category}</span>
+                    <span className="min-w-0">
+                      <span className="flex items-center gap-3">
+                        <span className="font-medium">{a.tag}</span>
+                        <RentalBadge asset={a} />
+                        <span className="text-muted-foreground">{a.category}</span>
+                      </span>
+                      <AssetModelLine asset={a} />
+                    </span>
                   </label>
                 ))}
               </div>

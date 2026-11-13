@@ -4018,7 +4018,7 @@ function registerBoardRoutes(app) {
     const [{ data: people }, { data: jobs }, { data: assets }] = await Promise.all([
       db6().from("profiles").select("id,name,email,role,area").eq("active", true).in("role", ["admin", "area", "super"]).order("name"),
       db6().from("jobs").select("id,job_number,well_name,status").eq("area", area).is("archived_at", null).order("job_number"),
-      db6().from("assets").select("id,tag,category").eq("area", area).order("tag")
+      db6().from("assets").select("id,tag,category,description").eq("area", area).order("tag")
     ]);
     const members = (people || []).filter((u) => u.role === "admin" || u.area === area).map((u) => ({ id: u.id, name: u.name || u.email, role: u.role, area: u.area }));
     res.json({
@@ -4027,7 +4027,7 @@ function registerBoardRoutes(app) {
       can_write: canWriteArea(p, area),
       members,
       jobs: (jobs || []).map((j) => ({ id: j.id, job_number: j.job_number, well_name: j.well_name })),
-      assets: (assets || []).map((a) => ({ id: a.id, label: a.tag, category: a.category })),
+      assets: (assets || []).map((a) => ({ id: a.id, label: a.tag, category: a.category, description: a.description ?? null })),
       email_ready: boardEmailReady(),
       sms_ready: smsConfigured()
     });

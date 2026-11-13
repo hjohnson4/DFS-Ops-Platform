@@ -1,4 +1,5 @@
 import BoardTasksPanel from "@/components/BoardTasksPanel";
+import { AssetModelLine } from "@/lib/assetModel";
 import { useState, useEffect, useRef } from "react";
 import { RentalBadge } from "@/components/Rental";
 import { MudPlantBilling, DailyCentrifugeHours } from "@/components/MudPlantCards";
@@ -775,6 +776,9 @@ export default function JobDetailPage() {
         <div className="rounded-lg border border-card-border bg-card divide-y divide-card-border">
           {assignedAssets.map((a) => {
             const canEditRow = canManageAssets && isLiveJobStatus(job.status);
+            // Supervisors can set the specific job on no-report jobs.
+            const canOpenRow =
+              canEditRow || (noReportJob && profile?.role === "super" && isLiveJobStatus(job.status));
             const isCent = tracksRunHours(a.category);
             const slot = a.centrifuge_slot;
             return (
@@ -782,15 +786,18 @@ export default function JobDetailPage() {
               key={a.id}
               className={
                 "flex items-center gap-3 px-4 py-3 text-sm" +
-                (canEditRow ? " cursor-pointer hover:bg-muted/40" : "")
+                (canOpenRow ? " cursor-pointer hover:bg-muted/40" : "")
               }
-              onClick={canEditRow ? () => openEditAsset(a) : undefined}
+              onClick={canOpenRow ? () => openEditAsset(a) : undefined}
               data-testid={`assigned-asset-${a.id}`}
             >
               <Wrench className="h-4 w-4 text-muted-foreground shrink-0" />
               <span className="font-medium">{a.tag}</span>
               <RentalBadge asset={a} withVendor />
-              <span className="text-muted-foreground">{a.category}</span>
+              <span className="text-muted-foreground min-w-0">
+                {a.category}
+                <AssetModelLine asset={a} />
+              </span>
               {a.job_or_well && !(noReportJob && a.job_or_well === job.job_number) && (
                 <span className="text-muted-foreground" data-testid={`text-asset-where-${a.id}`}>
                   · {a.job_or_well}
@@ -815,36 +822,11 @@ export default function JobDetailPage() {
               <span className="ml-auto inline-flex rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
                 {a.status}
               </span>
-              {!canEditRow && noReportJob && profile?.role === "super" && isLiveJobStatus(job.status) && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 text-muted-foreground"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEditAsset(a);
-                  }}
-                  aria-label="Edit specific job"
-                  data-testid={`button-edit-asset-${a.id}`}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </Button>
-              )}
               {canEditRow && (
                 <div
                   className="flex items-center gap-0.5"
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-7 w-7 text-muted-foreground"
-                    onClick={() => openEditAsset(a)}
-                    aria-label={isCent ? "Edit well/location and centrifuge slot" : "Edit well/location"}
-                    data-testid={`button-edit-asset-${a.id}`}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </Button>
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
                       <Button
@@ -906,8 +888,11 @@ export default function JobDetailPage() {
                 <SelectContent>
                   {attachableAssets.map((a) => (
                     <SelectItem key={a.id} value={a.id} data-testid={`option-asset-${a.id}`}>
-                      <span className="inline-flex items-center gap-1.5">
-                        {a.tag} <RentalBadge asset={a} /> — {a.category}
+                      <span className="flex flex-col">
+                        <span className="inline-flex items-center gap-1.5">
+                          {a.tag} <RentalBadge asset={a} /> — {a.category}
+                        </span>
+                        <AssetModelLine asset={a} />
                       </span>
                     </SelectItem>
                   ))}
@@ -1453,7 +1438,10 @@ function ServiceFormDialog({
                 <SelectItem value={NO_ASSET}>No specific equipment</SelectItem>
                 {jobAssets.map((a) => (
                   <SelectItem key={a.id} value={a.id}>
-                    {a.tag} · {a.category}
+                    <span className="flex flex-col">
+                      <span>{a.tag} · {a.category}</span>
+                      <AssetModelLine asset={a} />
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>

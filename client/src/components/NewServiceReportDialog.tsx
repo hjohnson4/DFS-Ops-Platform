@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { AssetModelLine } from "@/lib/assetModel";
 import { RentalBadge } from "@/components/Rental";
 import { specificJobOf } from "@shared/schema";
 import { useQuery, useMutation } from "@tanstack/react-query";
@@ -256,8 +257,12 @@ export function NewServiceReportDialog({
                 <SelectContent>
                   {centrifuges.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      <span className="inline-flex items-center gap-1.5">
-                        {a.tag} <RentalBadge asset={a} /> — {specificJobOf(a as any) ?? a.category}
+                      <span className="flex flex-col">
+                        <span className="inline-flex items-center gap-1.5">
+                          {a.tag} <RentalBadge asset={a} /> — {a.category}
+                          {specificJobOf(a as any) ? ` · ${specificJobOf(a as any)}` : ""}
+                        </span>
+                        <AssetModelLine asset={a} />
                       </span>
                     </SelectItem>
                   ))}
