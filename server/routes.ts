@@ -1829,6 +1829,101 @@ export async function registerRoutes(
     },
   );
 
+  // ---- Delete a deactivated user -----------------------------------------
+  // Only for accounts that are already deactivated. Removes the login and the
+  // profile. Records they touched stay; where a record only kept a link to the
+  // person (no saved name), the "submitted/signed by" just goes blank, and the
+  // admin is shown those counts before confirming. Activity history, board
+  // posts and similar keep the saved name.
+  const USER_LINKS_SHOWN: { table: string; col: string; label: string }[] = [
+    { table: "daily_reports", col: "submitted_by", label: "daily reports (submitted by)" },
+    { table: "daily_reports", col: "signed_by", label: "daily reports (signed by)" },
+    { table: "field_daily_reports", col: "submitted_by", label: "field daily reports (submitted by)" },
+    { table: "field_daily_reports", col: "signed_by", label: "field daily reports (signed by)" },
+    { table: "jsas", col: "submitted_by", label: "JSAs (submitted by)" },
+    { table: "jsas", col: "signed_by", label: "JSAs (signed by)" },
+    { table: "field_tickets", col: "created_by", label: "field tickets (created by)" },
+    { table: "field_tickets", col: "approved_by", label: "field tickets (approved by)" },
+    { table: "field_tickets", col: "closed_by", label: "field tickets (closed by)" },
+    { table: "certifications", col: "uploaded_by", label: "certifications (uploaded by)" },
+  ];
+  // These keep a saved name next to the link, so clearing the link loses nothing.
+  const USER_LINKS_NAMED: { table: string; col: string }[] = [
+    { table: "audit_events", col: "actor_id" },
+    { table: "jsa_report_events", col: "actor_id" },
+    { table: "jsa_reports", col: "signed_off_by" },
+  ];
+
+  async function userDeleteCheck(id: string) {
+    const client = supabaseAdmin || supabaseAnon;
+    const { data: user } = await client.from("profiles").select("id,name,email,active").eq("id", id).maybeSingle();
+    if (!user) return { user: null as any, blocked: "User not found.", counts: [] as { label: string; n: number }[] };
+    const counts = (
+      await Promise.all(
+        USER_LINKS_SHOWN.map(async (l) => {
+          const { count } = await client.from(l.table).select("id", { count: "exact", head: true }).eq(l.col, id);
+          return { label: l.label, n: count || 0 };
+        }),
+      )
+    ).filter((c) => c.n > 0);
+    // Older service records require a supervisor, so these accounts can't be removed.
+    const { count: maint } = await client
+      .from("maintenance_reports")
+      .select("id", { count: "exact", head: true })
+      .eq("supervisor_id", id);
+    let blocked: string | null = null;
+    if (user.active) blocked = "Deactivate this user first.";
+    else if (maint)
+      blocked = `${user.name} is the supervisor on ${maint} older service record${maint === 1 ? "" : "s"}, so this account has to stay. It's deactivated and can't sign in.`;
+    return { user, blocked, counts };
+  }
+
+  app.get(
+    "/api/users/:id/delete-check",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      const r = await userDeleteCheck(String(req.params.id));
+      if (!r.user) return res.status(404).json({ message: "User not found." });
+      res.json({ blocked: r.blocked, counts: r.counts });
+    },
+  );
+
+  app.delete(
+    "/api/users/:id",
+    requireAuth,
+    requireRole("admin"),
+    async (req: Request, res: Response) => {
+      if (!supabaseAdmin)
+        return res.status(503).json({ message: "Deleting users needs the service role key." });
+      const id = String(req.params.id);
+      if (id === req.profile!.id) return res.status(400).json({ message: "You can't delete your own account." });
+      const r = await userDeleteCheck(id);
+      if (!r.user) return res.status(404).json({ message: "User not found." });
+      if (r.blocked) return res.status(400).json({ message: r.blocked });
+      const client = supabaseAdmin;
+      // Clear links that would otherwise stop the delete.
+      for (const l of [...USER_LINKS_SHOWN, ...USER_LINKS_NAMED]) {
+        const { error } = await client.from(l.table).update({ [l.col]: null }).eq(l.col, id);
+        if (error) return res.status(400).json({ message: `Couldn't clear ${l.table}: ${error.message}` });
+      }
+      // Sign-offs from the old Maintenance module.
+      const { error: soErr } = await client.from("sign_offs").delete().eq("area_mgr_id", id);
+      if (soErr) return res.status(400).json({ message: soErr.message });
+      // Removing the login also removes the profile (and their alert settings,
+      // phone registrations and job assignments).
+      const { error: authErr } = await client.auth.admin.deleteUser(id);
+      if (authErr && !/not.?found/i.test(authErr.message))
+        return res.status(400).json({ message: authErr.message });
+      if (authErr) {
+        const { error } = await client.from("profiles").delete().eq("id", id);
+        if (error) return res.status(400).json({ message: error.message });
+      }
+      console.log(`[users] ${req.profile!.name} deleted ${r.user.name} <${r.user.email}>`);
+      res.json({ ok: true, name: r.user.name });
+    },
+  );
+
   // ---- Customers ----------------------------------------------------------
   // Customers are company-wide (a customer can have jobs across areas).
   // Everyone can view; only admin/area managers can create/edit.

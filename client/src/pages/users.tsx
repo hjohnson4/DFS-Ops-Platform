@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
-import { Loader2, UserPlus, ShieldAlert, Pencil, Send, RefreshCw, Copy, KeyRound } from "lucide-react";
+import { Loader2, UserPlus, ShieldAlert, Pencil, Send, RefreshCw, Copy, KeyRound, Trash2 } from "lucide-react";
 
 const ROLE_TONE: Record<Role, string> = {
   admin: "bg-primary/10 text-primary",
@@ -40,6 +40,7 @@ const ROLE_TONE: Record<Role, string> = {
 
 export default function UsersPage() {
   const { toast } = useToast();
+  const { profile: me } = useAuth();
   const [open, setOpen] = useState(false);
 
   // Edit dialog state: which user is being edited + the draft role/area.
@@ -149,6 +150,25 @@ export default function UsersPage() {
       return res.json();
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["/api/users"] }),
+  });
+
+  // Permanently delete a deactivated user. The dialog first asks the server
+  // what records would lose their "submitted/signed by" name.
+  const [deleting, setDeleting] = useState<Profile | null>(null);
+  const { data: delCheck, isLoading: delChecking } = useQuery<{ blocked: string | null; counts: { label: string; n: number }[] }>({
+    queryKey: [`/api/users/${deleting?.id}/delete-check`],
+    enabled: !!deleting,
+    staleTime: 0,
+    gcTime: 0,
+  });
+  const deleteUser = useMutation({
+    mutationFn: async (u: Profile) => (await apiRequest("DELETE", `/api/users/${u.id}`)).json(),
+    onSuccess: (d: any) => {
+      setDeleting(null);
+      queryClient.invalidateQueries({ queryKey: ["/api/users"] });
+      toast({ title: "User deleted", description: `${d?.name || "The user"} was removed and can no longer sign in.` });
+    },
+    onError: (e: any) => toast({ title: "Couldn't delete user", description: e.message, variant: "destructive" }),
   });
 
   // Track which user's invite is currently being resent (to show a spinner on
@@ -326,6 +346,18 @@ export default function UsersPage() {
                   <Button variant="ghost" size="sm" onClick={() => toggleActive.mutate(u)} data-testid={`button-toggle-${u.id}`}>
                     {u.active ? "Deactivate" : "Reactivate"}
                   </Button>
+                  {!u.active && u.id !== me?.id && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setDeleting(u)}
+                      disabled={!!health && !health.adminReady}
+                      data-testid={`button-delete-${u.id}`}
+                    >
+                      <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Delete
+                    </Button>
+                  )}
     </>
   );
   return (
@@ -559,6 +591,68 @@ export default function UsersPage() {
               {updateUser.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Save changes
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete a deactivated user */}
+      <Dialog open={!!deleting} onOpenChange={(o) => !o && !deleteUser.isPending && setDeleting(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete {deleting?.name}?</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            {delChecking || !delCheck ? (
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" /> Checking their records…
+              </div>
+            ) : delCheck.blocked ? (
+              <p className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3" data-testid="text-delete-blocked">{delCheck.blocked}</p>
+            ) : (
+              <>
+                <p>
+                  This permanently removes{" "}
+                  <span className="font-medium">{deleting?.email}</span>. They won't be able to sign in, and
+                  they'll be taken off the user list, job assignments and phone alerts. The email address
+                  can be used again for a new account. This can't be undone.
+                </p>
+                {delCheck.counts.length > 0 ? (
+                  <div className="rounded-md border p-3 space-y-1.5" data-testid="list-delete-counts">
+                    <p className="font-medium">Their records stay, but their name will no longer show on:</p>
+                    <ul className="list-disc pl-5 text-muted-foreground">
+                      {delCheck.counts.map((c) => (
+                        <li key={c.label}>
+                          {c.n} {c.label}
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="text-xs text-muted-foreground">
+                      If you want to keep their name on these, leave the account deactivated instead.
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground">
+                    No reports, JSAs or field tickets are under their name. Activity history and board posts keep their name.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleting(null)} disabled={deleteUser.isPending} data-testid="button-delete-cancel">
+              {delCheck?.blocked ? "Close" : "Cancel"}
+            </Button>
+            {!delCheck?.blocked && (
+              <Button
+                variant="destructive"
+                onClick={() => deleting && deleteUser.mutate(deleting)}
+                disabled={delChecking || !delCheck || deleteUser.isPending}
+                data-testid="button-delete-confirm"
+              >
+                {deleteUser.isPending && <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />}
+                Delete permanently
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

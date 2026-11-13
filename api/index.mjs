@@ -5708,6 +5708,80 @@ async function registerRoutes(httpServer, app) {
       res.json(data);
     }
   );
+  const USER_LINKS_SHOWN = [
+    { table: "daily_reports", col: "submitted_by", label: "daily reports (submitted by)" },
+    { table: "daily_reports", col: "signed_by", label: "daily reports (signed by)" },
+    { table: "field_daily_reports", col: "submitted_by", label: "field daily reports (submitted by)" },
+    { table: "field_daily_reports", col: "signed_by", label: "field daily reports (signed by)" },
+    { table: "jsas", col: "submitted_by", label: "JSAs (submitted by)" },
+    { table: "jsas", col: "signed_by", label: "JSAs (signed by)" },
+    { table: "field_tickets", col: "created_by", label: "field tickets (created by)" },
+    { table: "field_tickets", col: "approved_by", label: "field tickets (approved by)" },
+    { table: "field_tickets", col: "closed_by", label: "field tickets (closed by)" },
+    { table: "certifications", col: "uploaded_by", label: "certifications (uploaded by)" }
+  ];
+  const USER_LINKS_NAMED = [
+    { table: "audit_events", col: "actor_id" },
+    { table: "jsa_report_events", col: "actor_id" },
+    { table: "jsa_reports", col: "signed_off_by" }
+  ];
+  async function userDeleteCheck(id) {
+    const client3 = supabaseAdmin || supabaseAnon;
+    const { data: user } = await client3.from("profiles").select("id,name,email,active").eq("id", id).maybeSingle();
+    if (!user) return { user: null, blocked: "User not found.", counts: [] };
+    const counts = (await Promise.all(
+      USER_LINKS_SHOWN.map(async (l) => {
+        const { count } = await client3.from(l.table).select("id", { count: "exact", head: true }).eq(l.col, id);
+        return { label: l.label, n: count || 0 };
+      })
+    )).filter((c) => c.n > 0);
+    const { count: maint } = await client3.from("maintenance_reports").select("id", { count: "exact", head: true }).eq("supervisor_id", id);
+    let blocked = null;
+    if (user.active) blocked = "Deactivate this user first.";
+    else if (maint)
+      blocked = `${user.name} is the supervisor on ${maint} older service record${maint === 1 ? "" : "s"}, so this account has to stay. It's deactivated and can't sign in.`;
+    return { user, blocked, counts };
+  }
+  app.get(
+    "/api/users/:id/delete-check",
+    requireAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      const r = await userDeleteCheck(String(req.params.id));
+      if (!r.user) return res.status(404).json({ message: "User not found." });
+      res.json({ blocked: r.blocked, counts: r.counts });
+    }
+  );
+  app.delete(
+    "/api/users/:id",
+    requireAuth,
+    requireRole("admin"),
+    async (req, res) => {
+      if (!supabaseAdmin)
+        return res.status(503).json({ message: "Deleting users needs the service role key." });
+      const id = String(req.params.id);
+      if (id === req.profile.id) return res.status(400).json({ message: "You can't delete your own account." });
+      const r = await userDeleteCheck(id);
+      if (!r.user) return res.status(404).json({ message: "User not found." });
+      if (r.blocked) return res.status(400).json({ message: r.blocked });
+      const client3 = supabaseAdmin;
+      for (const l of [...USER_LINKS_SHOWN, ...USER_LINKS_NAMED]) {
+        const { error } = await client3.from(l.table).update({ [l.col]: null }).eq(l.col, id);
+        if (error) return res.status(400).json({ message: `Couldn't clear ${l.table}: ${error.message}` });
+      }
+      const { error: soErr } = await client3.from("sign_offs").delete().eq("area_mgr_id", id);
+      if (soErr) return res.status(400).json({ message: soErr.message });
+      const { error: authErr } = await client3.auth.admin.deleteUser(id);
+      if (authErr && !/not.?found/i.test(authErr.message))
+        return res.status(400).json({ message: authErr.message });
+      if (authErr) {
+        const { error } = await client3.from("profiles").delete().eq("id", id);
+        if (error) return res.status(400).json({ message: error.message });
+      }
+      console.log(`[users] ${req.profile.name} deleted ${r.user.name} <${r.user.email}>`);
+      res.json({ ok: true, name: r.user.name });
+    }
+  );
   app.get("/api/customers", requireAuth, async (_req, res) => {
     const { data, error } = await supabaseAnon.from("customers").select("*").order("name");
     if (error) return res.status(500).json({ message: error.message });
