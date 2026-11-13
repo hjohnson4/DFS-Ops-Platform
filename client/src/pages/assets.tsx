@@ -64,6 +64,7 @@ import {
   Pencil,
   Trash2,
   Eye,
+  Shapes,
 } from "lucide-react";
 import {
   AlertDialog,
@@ -1211,6 +1212,11 @@ function ExportUtilizationDialog() {
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
+// Big Bowl + Small Bowl centrifuges (for the "All centrifuges" type filter).
+function isCentrifugeType(c: string | null | undefined): boolean {
+  return /centrifuge/i.test(c ?? "");
+}
+
 export default function AssetsPage() {
   const { profile } = useAuth();
   const canManage = profile?.role === "admin" || profile?.role === "area";
@@ -1268,7 +1274,37 @@ export default function AssetsPage() {
   const activeArea = showAreaFilter && areaFilter !== "all" ? areaFilter : null;
   const areaCount = (ar: string) =>
     fleet.filter((a) => a.area === ar && !(a.is_rental && a.status === "Returned")).length;
-  const allAssets = activeArea ? fleet.filter((a) => a.area === activeArea) : fleet;
+  const areaAssets = activeArea ? fleet.filter((a) => a.area === activeArea) : fleet;
+  // Type filter (Big Bowl Centrifuge, Small Bowl Centrifuge, Excavator, ...).
+  // Applied after the area filter and before everything else, so the
+  // All / Assigned / Idle / Rentals counts follow it. "centrifuges" = both
+  // bowl sizes together.
+  const [typeFilter, setTypeFilterState] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem("assets-type-filter") || "all";
+    } catch {
+      return "all";
+    }
+  });
+  const setTypeFilter = (v: string) => {
+    setTypeFilterState(v);
+    try {
+      sessionStorage.setItem("assets-type-filter", v);
+    } catch {}
+  };
+  const notReturned = (a: (typeof fleet)[number]) => !(a.is_rental && a.status === "Returned");
+  const fleetTypes = CATEGORIES.filter((c) => areaAssets.some((a) => a.category === c && notReturned(a)));
+  const typeCount = (c: string) =>
+    areaAssets.filter((a) => notReturned(a) && (c === "centrifuges" ? isCentrifugeType(a.category) : a.category === c)).length;
+  const showTypeFilter = fleetTypes.length > 1;
+  const activeType =
+    showTypeFilter && typeFilter !== "all" && (typeFilter === "centrifuges" || fleetTypes.includes(typeFilter as any))
+      ? typeFilter
+      : null;
+  const typeLabel = activeType === "centrifuges" ? "centrifuges" : activeType;
+  const allAssets = activeType
+    ? areaAssets.filter((a) => (activeType === "centrifuges" ? isCentrifugeType(a.category) : a.category === activeType))
+    : areaAssets;
   const rows = allAssets.filter((a) => !(a.is_rental && a.status === "Returned"));
   const rentalRows = allAssets.filter((a) => a.is_rental);
   const scheduleList = schedules ?? [];
@@ -1390,7 +1426,7 @@ export default function AssetsPage() {
       ) : (
       <>
       {/* Assignment toggle + search */}
-      {(rows.length > 0 || activeArea) && (
+      {(rows.length > 0 || activeArea || activeType) && (
         <div className="mb-4 flex flex-wrap items-center gap-3">
           {/* Assigned (active) vs unassigned (idle) segmented toggle */}
           <div
@@ -1443,6 +1479,28 @@ export default function AssetsPage() {
             </Select>
           )}
 
+          {showTypeFilter && (
+            <Select value={activeType ?? "all"} onValueChange={setTypeFilter}>
+              <SelectTrigger className="h-9 w-[240px]" data-testid="select-assets-type">
+                <Shapes className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
+                <SelectValue placeholder="All types" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All types</SelectItem>
+                {fleetTypes.filter(isCentrifugeType).length > 1 && (
+                  <SelectItem value="centrifuges" data-testid="option-type-centrifuges">
+                    All centrifuges ({typeCount("centrifuges")})
+                  </SelectItem>
+                )}
+                {fleetTypes.map((c) => (
+                  <SelectItem key={c} value={c} data-testid={`option-type-${c}`}>
+                    {c} ({typeCount(c)})
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+
           <div className="relative flex-1 min-w-[16rem] max-w-md">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
             <Input
@@ -1478,16 +1536,22 @@ export default function AssetsPage() {
         <div className="text-sm text-muted-foreground py-8 text-center">
           Loading…
         </div>
-      ) : rows.length === 0 && activeArea ? (
+      ) : rows.length === 0 && (activeArea || activeType) ? (
         <div className="rounded-lg border border-dashed border-card-border bg-muted/30 p-10 text-center">
           <MapPin className="h-6 w-6 mx-auto text-muted-foreground mb-2" />
-          <div className="text-sm text-muted-foreground">No assets in {activeArea}.</div>
+          <div className="text-sm text-muted-foreground">
+            No {typeLabel ?? "assets"}
+            {activeArea ? ` in ${activeArea}` : ""}.
+          </div>
           <button
             type="button"
-            onClick={() => setAreaFilter("all")}
+            onClick={() => {
+              setAreaFilter("all");
+              setTypeFilter("all");
+            }}
             className="text-xs text-primary hover:underline mt-1"
           >
-            Show all areas
+            Show all assets
           </button>
         </div>
       ) : rows.length === 0 ? (
@@ -1516,13 +1580,14 @@ export default function AssetsPage() {
                   ? "No idle assets — every asset is assigned to a job."
                   : "No assets to show."}
           </div>
-          {(q || view !== "all" || activeArea) && (
+          {(q || view !== "all" || activeArea || activeType) && (
             <button
               type="button"
               onClick={() => {
                 setQuery("");
                 setView("all");
                 setAreaFilter("all");
+                setTypeFilter("all");
               }}
               className="text-xs text-primary hover:underline mt-1"
               data-testid="button-clear-search-empty"
@@ -1586,6 +1651,7 @@ export default function AssetsPage() {
           <p className="text-xs text-muted-foreground">
             Showing {filtered.length} of {rows.length} asset
             {rows.length > 1 ? "s" : ""}
+            {typeLabel ? ` (${typeLabel})` : ""}
             {activeArea ? ` in ${activeArea}` : ""}
             {q ? ` matching “${query}”` : ""}.
           </p>
